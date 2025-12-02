@@ -12,8 +12,9 @@ import time
 import Jetson.GPIO as GPIO
 
 # Physical pin numbers on the 40-pin header (BOARD mode).
-BUTTON_PIN = 13  # button to GND; press pulls low
-LED_PIN = 12     # LED anode; cathode to GND through resistor
+# Using pins that default low at boot to avoid the LED turning on early.
+BUTTON_PIN = 16  # button to GND; press pulls low (GPIO23)
+LED_PIN = 18     # LED anode; cathode to GND through resistor (GPIO24)
 
 
 def main() -> None:
