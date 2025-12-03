@@ -12,9 +12,8 @@ import time
 import Jetson.GPIO as GPIO
 
 # Physical pin numbers on the 40-pin header (BOARD mode).
-# Using pins that default low at boot to avoid the LED turning on early.
-BUTTON_PIN = 16  # button to GND; press pulls low (GPIO23)
-LED_PIN = 18     # LED anode; cathode to GND through resistor (GPIO24)
+BUTTON_PIN = 13  # button to GND; press pulls low
+LED_PIN = 12     # LED anode; cathode to GND through resistor
 
 
 def main() -> None:
@@ -22,11 +21,18 @@ def main() -> None:
     GPIO.setup(LED_PIN, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(BUTTON_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
+    print(
+        f"Watching button on pin {BUTTON_PIN} -> driving LED on pin {LED_PIN}. "
+        "Press Ctrl+C to exit."
+    )
+
     try:
         while True:
             pressed = GPIO.input(BUTTON_PIN) == GPIO.LOW
             GPIO.output(LED_PIN, GPIO.HIGH if pressed else GPIO.LOW)
             time.sleep(0.02)  # debounce-ish
+    except KeyboardInterrupt:
+        pass
     finally:
         GPIO.output(LED_PIN, GPIO.LOW)
         GPIO.cleanup()
