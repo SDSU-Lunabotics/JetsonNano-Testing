@@ -26,7 +26,7 @@ def input_thread():
 def record_loop():
     while True:
         if recording:
-            t = time.time()
+            t = sd.getNumber("Jetson/DriveTimestamp", time.time())
             forward = sd.getNumber("Jetson/DriveForward", 0.0)
             turn = sd.getNumber("Jetson/DriveTurn", 0.0)
             path.append([t, forward, turn])
