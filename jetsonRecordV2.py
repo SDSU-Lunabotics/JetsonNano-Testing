@@ -10,10 +10,11 @@ NetworkTables.initialize(server=ROBORIO_IP)
 sd = NetworkTables.getTable("SmartDashboard")
 
 recording = False
+playing = False
 path = []
 cmd_queue = queue.Queue()
 
-print("Commands: record on/off, play, stop, clear, q")
+RECORD_DT = 0.1  # 10 Hz
 
 def input_thread():
     while True:
@@ -22,11 +23,14 @@ def input_thread():
         if cmd == "q":
             break
 
-def record_tick():
-    t = time.time()
-    forward = sd.getNumber("Jetson/DriveForward", 0.0)
-    turn = sd.getNumber("Jetson/DriveTurn", 0.0)
-    path.append([t, forward, turn])
+def record_loop():
+    while True:
+        if recording:
+            t = time.time()
+            forward = sd.getNumber("Jetson/DriveForward", 0.0)
+            turn = sd.getNumber("Jetson/DriveTurn", 0.0)
+            path.append([t, forward, turn])
+        time.sleep(RECORD_DT)
 
 def save_path(filename="recorded_path.csv"):
     with open(filename, "w", newline="") as f:
@@ -50,8 +54,11 @@ def to_command(forward, turn, duration):
     return f"{direction}{duration:.2f}"
 
 threading.Thread(target=input_thread, daemon=True).start()
+threading.Thread(target=record_loop, daemon=True).start()
 
-playing = False
+print("Commands: record on/off, play, stop, save, load, clear, q")
+
+index = 0
 
 while True:
     try:
@@ -61,13 +68,18 @@ while True:
 
     if cmd == "q":
         break
-
     if cmd == "record on":
         recording = True
         print("Recording...")
     elif cmd == "record off":
         recording = False
         print("Stopped recording.")
+    elif cmd == "save":
+        save_path()
+        print("Saved recorded_path.csv")
+    elif cmd == "load":
+        path = load_path()
+        print(f"Loaded {len(path)} points")
     elif cmd == "clear":
         path = []
         print("Cleared path.")
@@ -75,7 +87,6 @@ while True:
         if recording:
             save_path()
             print("Auto-saved recorded_path.csv")
-
         if not path:
             try:
                 path = load_path()
@@ -83,7 +94,6 @@ while True:
             except FileNotFoundError:
                 print("No recorded_path.csv found.")
                 continue
-
         sd.putBoolean("Jetson/AutomationEnabled", True)
         playing = True
         index = 0
@@ -94,20 +104,13 @@ while True:
         sd.putString("Jetson/Command", "")
         print("Playback stopped.")
 
-    if recording:
-        record_tick()
-
-    if playing and len(path) > 1:
-        if index >= len(path) - 1:
+    if playing and len(path) > 0:
+        if index >= len(path):
             index = 0  # loop
-
-        t0, f0, r0 = path[index]
-        t1, _, _ = path[index + 1]
-        duration = max(0.02, min(1.0, t1 - t0))
-        cmd_str = to_command(f0, r0, duration)
+        _, f0, r0 = path[index]
+        cmd_str = to_command(f0, r0, RECORD_DT)
         sd.putString("Jetson/Command", cmd_str)
-
         index += 1
-        time.sleep(duration)
+        time.sleep(RECORD_DT)
     else:
-        time.sleep(0.05)
+        time.sleep(0.02)
