@@ -14,8 +14,10 @@ playing = False
 path = []
 cmd_queue = queue.Queue()
 
-RECORD_DT = 0.02  # 50 Hz sampling
-SPEED_SCALE = 1.5  # playback boost (1.0 = original)
+RECORD_DT = 0.02  # still polling fast
+DEADBAND = 0.05
+CHANGE_THRESHOLD = 0.03
+SPEED_SCALE = 1.5
 
 def input_thread():
     while True:
@@ -24,13 +26,31 @@ def input_thread():
         if cmd == "q":
             break
 
+def apply_deadband(value, deadband):
+    if abs(value) < deadband:
+        return 0.0
+    return value
+
 def record_loop():
+    last_forward = None
+    last_turn = None
+
     while True:
         if recording:
             t = sd.getNumber("Jetson/DriveTimestamp", time.time())
             forward = sd.getNumber("Jetson/DriveForward", 0.0)
             turn = sd.getNumber("Jetson/DriveTurn", 0.0)
-            path.append([t, forward, turn])
+
+            forward = apply_deadband(forward, DEADBAND)
+            turn = apply_deadband(turn, DEADBAND)
+
+            if last_forward is None or \
+               abs(forward - last_forward) > CHANGE_THRESHOLD or \
+               abs(turn - last_turn) > CHANGE_THRESHOLD:
+                path.append([t, forward, turn])
+                last_forward = forward
+                last_turn = turn
+
         time.sleep(RECORD_DT)
 
 def save_path(filename="recorded_path.csv"):
