@@ -15,7 +15,7 @@ path = []
 cmd_queue = queue.Queue()
 
 RECORD_DT = 0.02  # 50 Hz sampling
-ALPHA = 0.2       # smoothing factor (0.1–0.3 works well)
+SPEED_SCALE = 1.5  # playback boost (1.0 = original)
 
 def input_thread():
     while True:
@@ -47,14 +47,15 @@ def load_path(filename="recorded_path.csv"):
             loaded.append([float(row["t"]), float(row["forward"]), float(row["turn"])])
     return loaded
 
+def clamp(val, lo=-1.0, hi=1.0):
+    return max(lo, min(hi, val))
+
 threading.Thread(target=input_thread, daemon=True).start()
 threading.Thread(target=record_loop, daemon=True).start()
 
 print("Commands: record on/off, play, stop, save, load, clear, q")
 
 index = 0
-last_f = 0.0
-last_t = 0.0
 
 while True:
     try:
@@ -93,8 +94,6 @@ while True:
         sd.putBoolean("Jetson/AutomationEnabled", True)
         playing = True
         index = 0
-        last_f = 0.0
-        last_t = 0.0
         print("Playback started. Type 'stop' to end.")
     elif cmd == "stop":
         playing = False
@@ -110,12 +109,11 @@ while True:
         t1, _, _ = path[index + 1]
         duration = max(0.02, t1 - t0)
 
-        smooth_f = ALPHA * f0 + (1 - ALPHA) * last_f
-        smooth_t = ALPHA * r0 + (1 - ALPHA) * last_t
-        last_f, last_t = smooth_f, smooth_t
+        scaled_f = clamp(f0 * SPEED_SCALE)
+        scaled_t = clamp(r0 * SPEED_SCALE)
 
-        sd.putNumber("Jetson/CommandForward", smooth_f)
-        sd.putNumber("Jetson/CommandTurn", smooth_t)
+        sd.putNumber("Jetson/CommandForward", scaled_f)
+        sd.putNumber("Jetson/CommandTurn", scaled_t)
         sd.putNumber("Jetson/CommandDuration", duration)
         sd.putBoolean("Jetson/CommandReady", True)
 
