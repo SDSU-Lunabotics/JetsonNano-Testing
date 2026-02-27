@@ -2,11 +2,12 @@ import json
 import sys
 import urllib.request
 
-URL = "http://127.0.0.1:8000/hello"  # replace with computer IP
+URL = "http://127.0.0.1:8000/drive/forward"  # replace with computer IP
 
 payload = {
-    "message": "hello world",
-    "source": "jetson-nano",
+    "action": "drive_forward",
+    "duration": 3.0,
+    "speed": 0.6,
 }
 
 data = json.dumps(payload).encode("utf-8")
