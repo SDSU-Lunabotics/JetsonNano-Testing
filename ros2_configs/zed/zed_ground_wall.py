@@ -37,12 +37,11 @@ def main():
         sys.exit(1)
 
     runtime = sl.RuntimeParameters()
-    runtime.sensing_mode = sl.SENSING_MODE.STANDARD
 
     point_cloud = sl.Mat()
     image_left = sl.Mat()
     ground_plane = sl.Plane()
-    pose = sl.Pose()
+    tracking_reset = sl.Transform()
 
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
@@ -55,7 +54,7 @@ def main():
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
             # Fit a ground plane using the SDK helper
-            status = zed.find_floor_plane(ground_plane, pose)
+            status = zed.find_floor_plane(ground_plane, tracking_reset)
             if status != sl.ERROR_CODE.SUCCESS:
                 print(f"find_floor_plane failed: {status}")
                 continue
