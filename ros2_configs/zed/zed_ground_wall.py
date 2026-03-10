@@ -117,12 +117,16 @@ def main():
             if HAS_CV2:
                 img = image_left.get_data()
                 if img is not None:
+                    # ZED may return BGRA; drop alpha for overlay colors
+                    if img.ndim == 3 and img.shape[2] == 4:
+                        img = img[:, :, :3]
                     # Build a ground/obstacle mask at the same stride
                     xyz_full = cloud[::stride, ::stride, :3]
                     valid = np.isfinite(xyz_full).all(axis=2)
                     dist_full = (a * xyz_full[:, :, 0] + b * xyz_full[:, :, 1] + c * xyz_full[:, :, 2] + d)
                     denom = np.sqrt(a * a + b * b + c * c)
                     dist_full = dist_full / denom
+                    dist_full[~valid] = np.nan
 
                     ground = (np.abs(dist_full) < 0.10) & valid
                     obstacle = (dist_full > 0.10) & valid
