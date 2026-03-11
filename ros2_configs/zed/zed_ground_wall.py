@@ -7,6 +7,9 @@ It is safe to run without the camera connected (it will fail to open and exit).
 
 import sys
 import time
+import argparse
+import subprocess
+import shutil
 import numpy as np
 
 try:
@@ -24,6 +27,16 @@ except Exception:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="ZED 2i ground + wall segmentation")
+    parser.add_argument("--rviz", action="store_true", help="Launch rviz2 on startup")
+    args = parser.parse_args()
+
+    if args.rviz:
+        if shutil.which("rviz2") is None:
+            print("rviz2 not found in PATH. Did you source ROS2?")
+        else:
+            subprocess.Popen(["rviz2"])
+
     init = sl.InitParameters()
     init.camera_resolution = sl.RESOLUTION.HD720
     init.depth_mode = sl.DEPTH_MODE.PERFORMANCE
@@ -53,10 +66,14 @@ def main():
     MAP_RES_M = 0.05
     MAP_WIDTH_M = 10.0
     MAP_HEIGHT_M = 10.0
+    MAP_DECAY = 0.97  # 1.0 = no decay, lower = faster fading
     x_min = -MAP_WIDTH_M / 2.0
     x_max = MAP_WIDTH_M / 2.0
     z_min = 0.0
     z_max = MAP_HEIGHT_M
+    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
+    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
+    map_counts = np.zeros((grid_h, grid_w), dtype=np.float32)
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -127,42 +144,30 @@ def main():
 
             print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
 
-            # Build a simple 2D occupancy map from obstacle points.
+            # Build a simple 2D top-down density map (XZ) from all valid points.
             if HAS_CV2:
                 map_vis = None
-                ground_pts = xyz[ground_mask]
-                obs = xyz[obstacle_mask]
-                if ground_pts.size > 0 or obs.size > 0:
-                    # Start with ground for context, then overlay obstacles.
-                    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
-                    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
-                    occ = np.zeros((grid_h, grid_w), dtype=np.uint8)
-
-                    if ground_pts.size > 0:
-                        gx = ground_pts[:, 0]
-                        gz = ground_pts[:, 2]
-                        g_in = (gx >= x_min) & (gx < x_max) & (gz >= z_min) & (gz < z_max)
-                        gx = gx[g_in]
-                        gz = gz[g_in]
-                        igx = ((gx - x_min) / MAP_RES_M).astype(np.int32)
-                        igz = ((gz - z_min) / MAP_RES_M).astype(np.int32)
-                        occ[grid_h - 1 - igz, igx] = 80
-
-                    if obs.size > 0:
-                        x = obs[:, 0]
-                        z = obs[:, 2]
-                        in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
-                        x = x[in_bounds]
-                        z = z[in_bounds]
-                        ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
-                        iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
-                        # Flip Z so forward is "up" in the image.
-                        occ[grid_h - 1 - iz, ix] = 255
-
+                if xyz.size > 0:
+                    x = xyz[:, 0]
+                    z = xyz[:, 2]
+                    in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
+                    x = x[in_bounds]
+                    z = z[in_bounds]
+                    counts = np.zeros((grid_h, grid_w), dtype=np.float32)
+                    ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
+                    iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
+                    # Flip Z so forward is "up" in the image.
+                    counts[grid_h - 1 - iz, ix] += 1.0
+                    # Persistent map with decay.
+                    map_counts *= MAP_DECAY
+                    map_counts += counts
+                    # Log-scale for visibility.
+                    counts_f = np.log1p(map_counts)
+                    if counts_f.max() > 0:
+                        counts_f = counts_f / counts_f.max()
+                    occ = (counts_f * 255.0).astype(np.uint8)
                     map_vis = cv2.applyColorMap(occ, cv2.COLORMAP_BONE)
                 else:
-                    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
-                    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
                     map_vis = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
 
             # Live visualization (optional)
