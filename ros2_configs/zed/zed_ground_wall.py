@@ -10,6 +10,7 @@ import time
 import argparse
 import subprocess
 import shutil
+import os
 import numpy as np
 
 try:
@@ -25,17 +26,52 @@ try:
 except Exception:
     HAS_CV2 = False
 
+try:
+    import rclpy
+    from rclpy.node import Node
+    from sensor_msgs.msg import PointCloud2, PointField
+    from sensor_msgs_py import point_cloud2
+    from std_msgs.msg import Header
+    HAS_ROS2 = True
+except Exception:
+    HAS_ROS2 = False
+
 
 def main():
     parser = argparse.ArgumentParser(description="ZED 2i ground + wall segmentation")
     parser.add_argument("--rviz", action="store_true", help="Launch rviz2 on startup")
+    parser.add_argument("--rviz-config", default=None, help="Path to an RViz2 config file")
+    parser.add_argument("--ros2", action="store_true", help="Publish a PointCloud2 topic over ROS2")
+    parser.add_argument("--frame", default="zed_camera", help="Frame ID for ROS2 point cloud")
     args = parser.parse_args()
 
     if args.rviz:
         if shutil.which("rviz2") is None:
             print("rviz2 not found in PATH. Did you source ROS2?")
         else:
-            subprocess.Popen(["rviz2"])
+            rviz_config = args.rviz_config
+            if rviz_config is None:
+                rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
+            if os.path.exists(rviz_config):
+                subprocess.Popen(["rviz2", "-d", rviz_config])
+            else:
+                print(f"RViz config not found: {rviz_config}. Launching default RViz.")
+                subprocess.Popen(["rviz2"])
+
+    node = None
+    pc_pub = None
+    pc_fields = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    if args.ros2:
+        if not HAS_ROS2:
+            print("ROS2 Python libs not found. Did you source ROS2 and install rclpy?")
+        else:
+            rclpy.init()
+            node = rclpy.create_node("zed_ground_wall")
+            pc_pub = node.create_publisher(PointCloud2, "zed/pointcloud", 10)
 
     init = sl.InitParameters()
     init.camera_resolution = sl.RESOLUTION.HD720
@@ -144,6 +180,16 @@ def main():
 
             print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
 
+            # Publish point cloud to ROS2 (optional)
+            if pc_pub is not None:
+                header = Header()
+                header.stamp = node.get_clock().now().to_msg()
+                header.frame_id = args.frame
+                pts = xyz.astype(np.float32)
+                msg = point_cloud2.create_cloud(header, pc_fields, pts.tolist())
+                pc_pub.publish(msg)
+                rclpy.spin_once(node, timeout_sec=0.0)
+
             # Build a simple 2D top-down density map (XZ) from all valid points.
             if HAS_CV2:
                 map_vis = None
@@ -209,6 +255,10 @@ def main():
                     break
         else:
             time.sleep(0.01)
+
+    if node is not None:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":
