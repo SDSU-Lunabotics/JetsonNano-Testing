@@ -96,6 +96,10 @@ def main():
                 raise AttributeError("Unsupported Plane API: missing normal/normal getter")
 
             a, b, c, d = plane_params(ground_plane)
+            # Ensure the plane normal points "up" (positive Y) so signed distance
+            # is positive above the ground plane.
+            if b < 0:
+                a, b, c, d = -a, -b, -c, -d
 
             # Sample a downscaled cloud to compute a quick summary
             cloud = point_cloud.get_data()
@@ -126,20 +130,35 @@ def main():
             # Build a simple 2D occupancy map from obstacle points.
             if HAS_CV2:
                 map_vis = None
+                ground_pts = xyz[ground_mask]
                 obs = xyz[obstacle_mask]
-                if obs.size > 0:
-                    x = obs[:, 0]
-                    z = obs[:, 2]
-                    in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
-                    x = x[in_bounds]
-                    z = z[in_bounds]
+                if ground_pts.size > 0 or obs.size > 0:
+                    # Start with ground for context, then overlay obstacles.
                     grid_w = int(MAP_WIDTH_M / MAP_RES_M)
                     grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
                     occ = np.zeros((grid_h, grid_w), dtype=np.uint8)
-                    ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
-                    iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
-                    # Flip Z so forward is "up" in the image.
-                    occ[grid_h - 1 - iz, ix] = 255
+
+                    if ground_pts.size > 0:
+                        gx = ground_pts[:, 0]
+                        gz = ground_pts[:, 2]
+                        g_in = (gx >= x_min) & (gx < x_max) & (gz >= z_min) & (gz < z_max)
+                        gx = gx[g_in]
+                        gz = gz[g_in]
+                        igx = ((gx - x_min) / MAP_RES_M).astype(np.int32)
+                        igz = ((gz - z_min) / MAP_RES_M).astype(np.int32)
+                        occ[grid_h - 1 - igz, igx] = 80
+
+                    if obs.size > 0:
+                        x = obs[:, 0]
+                        z = obs[:, 2]
+                        in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
+                        x = x[in_bounds]
+                        z = z[in_bounds]
+                        ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
+                        iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
+                        # Flip Z so forward is "up" in the image.
+                        occ[grid_h - 1 - iz, ix] = 255
+
                     map_vis = cv2.applyColorMap(occ, cv2.COLORMAP_BONE)
                 else:
                     grid_w = int(MAP_WIDTH_M / MAP_RES_M)

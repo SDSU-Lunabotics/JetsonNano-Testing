@@ -5,7 +5,7 @@ import csv
 import threading
 import queue
 
-ROBORIO_IP = "10.0.8.2"
+ROBORIO_IP = "10.0.9.2"
 NetworkTables.initialize(server=ROBORIO_IP)
 sd = NetworkTables.getTable("SmartDashboard")
 
