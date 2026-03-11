@@ -48,6 +48,16 @@ def main():
         print("  sudo apt install -y python3-opencv")
 
     print("Running. Press Ctrl+C to exit.")
+    # Simple 2D occupancy map settings (XZ plane, Y up).
+    # X: left/right, Z: forward. Units: meters.
+    MAP_RES_M = 0.05
+    MAP_WIDTH_M = 10.0
+    MAP_HEIGHT_M = 10.0
+    x_min = -MAP_WIDTH_M / 2.0
+    x_max = MAP_WIDTH_M / 2.0
+    z_min = 0.0
+    z_max = MAP_HEIGHT_M
+
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
             # Retrieve point cloud
@@ -113,6 +123,29 @@ def main():
 
             print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
 
+            # Build a simple 2D occupancy map from obstacle points.
+            if HAS_CV2:
+                map_vis = None
+                obs = xyz[obstacle_mask]
+                if obs.size > 0:
+                    x = obs[:, 0]
+                    z = obs[:, 2]
+                    in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
+                    x = x[in_bounds]
+                    z = z[in_bounds]
+                    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
+                    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
+                    occ = np.zeros((grid_h, grid_w), dtype=np.uint8)
+                    ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
+                    iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
+                    # Flip Z so forward is "up" in the image.
+                    occ[grid_h - 1 - iz, ix] = 255
+                    map_vis = cv2.applyColorMap(occ, cv2.COLORMAP_BONE)
+                else:
+                    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
+                    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
+                    map_vis = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
+
             # Live visualization (optional)
             if HAS_CV2:
                 img = image_left.get_data()
@@ -145,8 +178,11 @@ def main():
                     # Blend
                     vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                # Always show the map (even if the image frame is missing)
+                if map_vis is not None:
+                    cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
         else:
             time.sleep(0.01)
 
