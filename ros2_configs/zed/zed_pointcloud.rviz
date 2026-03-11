@@ -7,8 +7,6 @@ Panels:
   Name: Tool Properties
 - Class: rviz_common/Views
   Name: Views
-- Class: rviz_common/Time
-  Name: Time
 Visualization Manager:
   Class: ""
   Displays:

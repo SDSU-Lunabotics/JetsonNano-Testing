@@ -53,6 +53,7 @@ def main():
             if rviz_config is None:
                 rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
             if os.path.exists(rviz_config):
+                print(f"Launching rviz2 with config: {rviz_config}")
                 subprocess.Popen(["rviz2", "-d", rviz_config])
             else:
                 print(f"RViz config not found: {rviz_config}. Launching default RViz.")
@@ -72,6 +73,9 @@ def main():
             rclpy.init()
             node = rclpy.create_node("zed_ground_wall")
             pc_pub = node.create_publisher(PointCloud2, "zed/pointcloud", 10)
+            print("ROS2 enabled: publishing /zed/pointcloud")
+    else:
+        print("ROS2 disabled (run with --ros2 to publish /zed/pointcloud)")
 
     init = sl.InitParameters()
     init.camera_resolution = sl.RESOLUTION.HD720
