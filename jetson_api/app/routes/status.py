@@ -1,10 +1,11 @@
 from fastapi import APIRouter
-from app.schemas.status import JetsonStatusResponse
-from app.services.state_service import state_service
+
+from app.schemas.health import StatusResponse
+from app.services.telemetry_service import telemetry_service
 
 router = APIRouter(tags=["status"])
 
 
-@router.get("/status", response_model=JetsonStatusResponse)
-def get_status() -> JetsonStatusResponse:
-    return JetsonStatusResponse(**state_service.status_dict())
+@router.get("/status", response_model=StatusResponse)
+def get_status() -> StatusResponse:
+    return telemetry_service.get_status()
