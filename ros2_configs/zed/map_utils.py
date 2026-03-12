@@ -2,12 +2,25 @@ import numpy as np
 
 
 class OccupancyMap:
-    def __init__(self, map_res_m, map_width_m, map_height_m, map_z_min, decay=0.97):
+    def __init__(
+        self,
+        map_res_m,
+        map_width_m,
+        map_height_m,
+        map_z_min,
+        decay=0.97,
+        free_decay=None,
+        occ_decay=None,
+        hole_decay=None,
+    ):
         self.map_res_m = map_res_m
         self.map_width_m = map_width_m
         self.map_height_m = map_height_m
         self.map_z_min = map_z_min
         self.map_decay = decay
+        self.free_decay = decay if free_decay is None else free_decay
+        self.occ_decay = decay if occ_decay is None else occ_decay
+        self.hole_decay = decay if hole_decay is None else hole_decay
 
         self.x_min = -map_width_m / 2.0
         self.x_max = map_width_m / 2.0
@@ -77,9 +90,9 @@ class OccupancyMap:
         row = self.grid_h - 1 - iz
         col = ix
 
-        self.free_counts *= self.map_decay
-        self.occ_counts *= self.map_decay
-        self.hole_counts *= self.map_decay
+        self.free_counts *= self.free_decay
+        self.occ_counts *= self.occ_decay
+        self.hole_counts *= self.hole_decay
 
         if np.any(gmask):
             self.free_counts[row[gmask], col[gmask]] += 1.0

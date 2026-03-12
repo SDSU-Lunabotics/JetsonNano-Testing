@@ -60,6 +60,9 @@ def main():
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
+    parser.add_argument("--free-decay", type=float, default=None, help="Free-space decay (defaults to --map-decay)")
+    parser.add_argument("--occ-decay", type=float, default=None, help="Obstacle decay (defaults to --map-decay)")
+    parser.add_argument("--hole-decay", type=float, default=None, help="Hole decay (defaults to --map-decay)")
     parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
@@ -142,6 +145,9 @@ def main():
         map_height_m=args.map_height_m,
         map_z_min=map_z_min,
         decay=args.map_decay,
+        free_decay=args.free_decay,
+        occ_decay=args.occ_decay,
+        hole_decay=args.hole_decay,
     )
     last_save = time.time()
 
