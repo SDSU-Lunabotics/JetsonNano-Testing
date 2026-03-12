@@ -82,6 +82,7 @@ def main():
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
+    parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -411,7 +412,11 @@ def main():
                                 while err < -math.pi:
                                     err += 2 * math.pi
 
-                                turn = max(-1.0, min(1.0, args.drive_turn_k * err))
+                                tol = math.radians(max(0.0, args.drive_heading_tol_deg))
+                                if abs(err) <= tol:
+                                    turn = 0.0
+                                else:
+                                    turn = max(-1.0, min(1.0, args.drive_turn_k * err))
                                 fwd = max(0.0, min(1.0, args.drive_speed))
 
                                 sd.putBoolean("Jetson/AutomationEnabled", True)
