@@ -175,6 +175,14 @@ def main():
     map_window_ready = False
     emergency_stop = False
     last_drive_send = 0.0
+    manual_fwd = 0.0
+    manual_turn = 0.0
+    manual_mode = False
+    last_w_time = 0.0
+    last_s_time = 0.0
+    last_a_time = 0.0
+    last_d_time = 0.0
+    key_hold_timeout = 0.2
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_goal, emergency_stop
@@ -348,7 +356,19 @@ def main():
                         now = time.time()
                         if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
                             last_drive_send = now
-                            if emergency_stop or draw_path is None or cam_row_col is None:
+                            if emergency_stop:
+                                sd.putBoolean("Jetson/AutomationEnabled", False)
+                                sd.putNumber("Jetson/CommandForward", 0.0)
+                                sd.putNumber("Jetson/CommandTurn", 0.0)
+                                sd.putNumber("Jetson/CommandDuration", 0.1)
+                                sd.putBoolean("Jetson/CommandReady", True)
+                            elif manual_mode:
+                                sd.putBoolean("Jetson/AutomationEnabled", True)
+                                sd.putNumber("Jetson/CommandForward", manual_fwd)
+                                sd.putNumber("Jetson/CommandTurn", manual_turn)
+                                sd.putNumber("Jetson/CommandDuration", 1.0 / max(1.0, args.drive_rate_hz))
+                                sd.putBoolean("Jetson/CommandReady", True)
+                            elif draw_path is None or cam_row_col is None:
                                 sd.putBoolean("Jetson/AutomationEnabled", False)
                                 sd.putNumber("Jetson/CommandForward", 0.0)
                                 sd.putNumber("Jetson/CommandTurn", 0.0)
@@ -451,19 +471,49 @@ def main():
                     vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 # Always show the map (even if the image frame is missing)
-                if map_vis is not None:
-                    if args.map_scale > 1:
-                        map_vis = cv2.resize(
-                            map_vis,
-                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
-                            interpolation=cv2.INTER_NEAREST,
-                        )
-                    cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
-                    if not map_window_ready:
-                        cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
-                        map_window_ready = True
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    if map_vis is not None:
+                        if args.map_scale > 1:
+                            map_vis = cv2.resize(
+                                map_vis,
+                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                        if not map_window_ready:
+                            cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
+                            map_window_ready = True
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
                     break
+                if key == ord("m"):
+                    manual_mode = not manual_mode
+                    print(f"Manual drive mode: {'ON' if manual_mode else 'OFF'}")
+                if key == ord(" "):
+                    emergency_stop = True
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                now = time.time()
+                if key == ord("w"):
+                    manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                    last_w_time = now
+                if key == ord("s"):
+                    manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                    last_s_time = now
+                if key == ord("a"):
+                    manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                    last_a_time = now
+                if key == ord("d"):
+                    manual_turn = max(0.0, min(1.0, args.drive_speed))
+                    last_d_time = now
+                if key == ord("x"):
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                # Hold-to-move: decay to 0 if key not pressed recently.
+                if manual_mode:
+                    if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                        manual_fwd = 0.0
+                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
+                        manual_turn = 0.0
         else:
             time.sleep(0.01)
 
