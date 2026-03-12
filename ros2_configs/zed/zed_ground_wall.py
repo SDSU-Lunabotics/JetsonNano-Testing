@@ -83,6 +83,7 @@ def main():
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
+    parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -404,6 +405,8 @@ def main():
                                 # Heading error from camera forward axis.
                                 forward = R_world_cam[:, 2]
                                 heading = math.atan2(float(forward[2]), float(forward[0]))
+                                if args.drive_heading_flip:
+                                    heading += math.pi
                                 target = math.atan2(dz, dx)
                                 err = target - heading
                                 # Wrap to [-pi, pi].
