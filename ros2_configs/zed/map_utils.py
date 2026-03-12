@@ -92,3 +92,12 @@ class OccupancyMap:
         map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
         map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
         return map_vis
+
+    def world_to_grid(self, x, z):
+        if x < self.x_min or x >= self.x_max or z < self.z_min or z >= self.z_max:
+            return None
+        col = int((x - self.x_min) / self.map_res_m)
+        row = int(self.grid_h - 1 - ((z - self.z_min) / self.map_res_m))
+        if row < 0 or row >= self.grid_h or col < 0 or col >= self.grid_w:
+            return None
+        return row, col

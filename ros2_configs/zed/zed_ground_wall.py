@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
+    parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -188,6 +189,16 @@ def main():
                     z = xyz_world[:, 2]
                     occ_map.update(x, z, ground_mask, obstacle_mask)
                     map_vis = occ_map.render()
+                    # Draw camera position marker (blue square).
+                    cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
+                    if cam_row_col is not None:
+                        r0, c0 = cam_row_col
+                        half = max(1, int(args.map_camera_size) // 2)
+                        r1 = max(0, r0 - half)
+                        r2 = min(occ_map.grid_h, r0 + half + 1)
+                        c1 = max(0, c0 - half)
+                        c2 = min(occ_map.grid_w, c0 + half + 1)
+                        map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
