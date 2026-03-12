@@ -47,9 +47,11 @@ def main():
     parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
     parser.add_argument("--map-z-min", type=float, default=0.0, help="Minimum Z (forward) bound for map")
     parser.add_argument("--map-scale", type=int, default=3, help="Upscale factor for map display window")
+    parser.add_argument("--map-center", action="store_true", help="Center map on Z=0 (start camera in middle)")
     parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
+    parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -83,12 +85,16 @@ def main():
     print("Running. Press Ctrl+C to exit.")
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
+    map_z_min = args.map_z_min
+    if args.map_center:
+        map_z_min = -args.map_height_m / 2.0
+
     occ_map = map_utils.OccupancyMap(
         map_res_m=args.map_res_m,
         map_width_m=args.map_width_m,
         map_height_m=args.map_height_m,
-        map_z_min=args.map_z_min,
-        decay=0.97,
+        map_z_min=map_z_min,
+        decay=args.map_decay,
     )
     last_save = time.time()
 
