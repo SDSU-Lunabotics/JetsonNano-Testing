@@ -199,6 +199,26 @@ def main():
                         c1 = max(0, c0 - half)
                         c2 = min(occ_map.grid_w, c0 + half + 1)
                         map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
+                        # Draw heading triangle (blue) if tracking is enabled.
+                        if tracking_enabled and HAS_CV2:
+                            # Camera forward axis in world frame (Z in camera frame).
+                            forward = R_world_cam[:, 2]
+                            fx, fz = float(forward[0]), float(forward[2])
+                            ang = np.arctan2(fz, fx)
+                            size = max(3, int(args.map_camera_size) * 2)
+                            tip_r = int(r0 - np.sin(ang) * size)
+                            tip_c = int(c0 + np.cos(ang) * size)
+                            left_ang = ang + 2.5
+                            right_ang = ang - 2.5
+                            base_r1 = int(r0 - np.sin(left_ang) * (size * 0.6))
+                            base_c1 = int(c0 + np.cos(left_ang) * (size * 0.6))
+                            base_r2 = int(r0 - np.sin(right_ang) * (size * 0.6))
+                            base_c2 = int(c0 + np.cos(right_ang) * (size * 0.6))
+                            tri = np.array(
+                                [[tip_c, tip_r], [base_c1, base_r1], [base_c2, base_r2]],
+                                dtype=np.int32,
+                            )
+                            cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
