@@ -37,7 +37,12 @@ class NTService:
 
     def drive_forward(self, duration: float, speed: float) -> None:
         self.initialize()
+
+        # NOTE:
+        # This key name is kept for RoboRIO compatibility.
+        # It does NOT mean true autonomy mode in the Jetson app state.
         self._table.putBoolean("Jetson/AutomationEnabled", True)
+
         self._table.putString("Jetson/Command", "drive_forward")
         self._table.putNumber("Jetson/CommandForward", float(speed))
         self._table.putNumber("Jetson/CommandTurn", 0.0)
@@ -54,8 +59,13 @@ class NTService:
         self._table.putBoolean("Jetson/AutomationEnabled", False)
         self._table.putString("Jetson/Command", "")
 
-    def run_async(self, fn, *args) -> None:
-        threading.Thread(target=fn, args=args, daemon=True).start()
+    def set_excavator(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorEnabled", bool(enabled))
+
+    def set_conveyor(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ConveyorEnabled", bool(enabled))
 
     def stop_all_motion(self) -> None:
         self.initialize()
@@ -68,5 +78,9 @@ class NTService:
 
         self._table.putBoolean("Jetson/ExcavatorEnabled", False)
         self._table.putBoolean("Jetson/ConveyorEnabled", False)
+
+    def run_async(self, fn, *args) -> None:
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
 
 nt_service = NTService()

@@ -23,6 +23,7 @@ class DriveForwardResponse(BaseModel):
     action: str
     duration: float
     speed: float
+    command_source: str = "manual"
     timestamp_ms: int
 
 

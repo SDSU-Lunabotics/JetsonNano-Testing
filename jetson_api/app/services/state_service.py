@@ -9,7 +9,16 @@ class StateService:
     def __init__(self) -> None:
         self.led_state = False
         self.led_override = True
-        self.automation_enabled = False
+
+        # True autonomy state (reserve this for future real autonomy mode)
+        self.autonomy_enabled = False
+
+        # Manual motion/debug state
+        self.manual_motion_active = False
+        self.last_drive_speed = None
+        self.last_drive_duration = None
+        self.last_drive_timestamp_ms = None
+
         self.estop = False
         self.excavator_running = False
         self.conveyor_running = False
@@ -19,7 +28,11 @@ class StateService:
             "ok": True,
             "led_state": self.led_state,
             "led_override": self.led_override,
-            "automation_enabled": self.automation_enabled,
+            "autonomy_enabled": self.autonomy_enabled,
+            "manual_motion_active": self.manual_motion_active,
+            "last_drive_speed": self.last_drive_speed,
+            "last_drive_duration": self.last_drive_duration,
+            "last_drive_timestamp_ms": self.last_drive_timestamp_ms,
             "estop": self.estop,
             "excavator_running": self.excavator_running,
             "conveyor_running": self.conveyor_running,
