@@ -72,29 +72,47 @@ def get_world_transform(zed, sl, pose, pose_warned):
     return R_world_cam, t_world_cam, pose_warned
 
 
+def _get_enum(sl, names):
+    for name in names:
+        if hasattr(sl, name):
+            return getattr(sl, name)
+    return None
+
+
+def _enum_value(enum_obj, value, default_name):
+    if enum_obj is None:
+        return None
+    key = (value or "").upper()
+    if hasattr(enum_obj, key):
+        return getattr(enum_obj, key)
+    if hasattr(enum_obj, default_name):
+        return getattr(enum_obj, default_name)
+    return None
+
+
 def _map_spatial_resolution(sl, value):
-    v = (value or "").lower()
-    if v == "low":
-        return sl.SPATIAL_MAP_RESOLUTION.LOW
-    if v == "high":
-        return sl.SPATIAL_MAP_RESOLUTION.HIGH
-    return sl.SPATIAL_MAP_RESOLUTION.MEDIUM
+    enum_obj = _get_enum(sl, ["SPATIAL_MAP_RESOLUTION", "SPATIAL_MAPPING_RESOLUTION"])
+    return _enum_value(enum_obj, value, "MEDIUM")
 
 
 def _map_spatial_range(sl, value):
-    v = (value or "").lower()
-    if v == "short":
-        return sl.SPATIAL_MAP_RANGE.SHORT
-    if v == "long":
-        return sl.SPATIAL_MAP_RANGE.LONG
-    return sl.SPATIAL_MAP_RANGE.MEDIUM
+    enum_obj = _get_enum(sl, ["SPATIAL_MAP_RANGE", "SPATIAL_MAPPING_RANGE"])
+    return _enum_value(enum_obj, value, "MEDIUM")
 
 
 def enable_spatial_mapping(zed, sl, resolution="medium", mapping_range="medium"):
     try:
         params = sl.SpatialMappingParameters()
-        params.map_resolution = _map_spatial_resolution(sl, resolution)
-        params.map_range = _map_spatial_range(sl, mapping_range)
+        res = _map_spatial_resolution(sl, resolution)
+        rng = _map_spatial_range(sl, mapping_range)
+        if hasattr(params, "map_resolution") and res is not None:
+            params.map_resolution = res
+        if hasattr(params, "resolution") and res is not None:
+            params.resolution = res
+        if hasattr(params, "map_range") and rng is not None:
+            params.map_range = rng
+        if hasattr(params, "range") and rng is not None:
+            params.range = rng
         err = zed.enable_spatial_mapping(params)
         if err == sl.ERROR_CODE.SUCCESS:
             print("Spatial mapping enabled.")
