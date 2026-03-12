@@ -8,8 +8,6 @@ It is safe to run without the camera connected (it will fail to open and exit).
 import sys
 import time
 import argparse
-import subprocess
-import shutil
 import os
 import numpy as np
 
@@ -26,15 +24,15 @@ try:
 except Exception:
     HAS_CV2 = False
 
-try:
-    import rclpy
-    from rclpy.node import Node
-    from sensor_msgs.msg import PointCloud2, PointField
-    from sensor_msgs_py import point_cloud2
-    from std_msgs.msg import Header
-    HAS_ROS2 = True
-except Exception:
-    HAS_ROS2 = False
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+import rviz_utils
+import ros2_utils
+import segmentation
+import map_utils
+import zed_utils
 
 
 def main():
@@ -43,50 +41,27 @@ def main():
     parser.add_argument("--rviz-config", default=None, help="Path to an RViz2 config file")
     parser.add_argument("--ros2", action="store_true", help="Publish a PointCloud2 topic over ROS2")
     parser.add_argument("--frame", default="zed_camera", help="Frame ID for ROS2 point cloud")
+    parser.add_argument("--tracking", action="store_true", help="Enable ZED positional tracking")
+    parser.add_argument("--map-width-m", type=float, default=20.0, help="Top-down map width in meters (X axis)")
+    parser.add_argument("--map-height-m", type=float, default=20.0, help="Top-down map height in meters (Z axis)")
+    parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
+    parser.add_argument("--map-z-min", type=float, default=0.0, help="Minimum Z (forward) bound for map")
+    parser.add_argument("--map-scale", type=int, default=3, help="Upscale factor for map display window")
+    parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
+    parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
+    parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     args = parser.parse_args()
 
-    if args.rviz:
-        if shutil.which("rviz2") is None:
-            print("rviz2 not found in PATH. Did you source ROS2?")
-        else:
-            rviz_config = args.rviz_config
-            if rviz_config is None:
-                rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
-            if os.path.exists(rviz_config):
-                print(f"Launching rviz2 with config: {rviz_config}")
-                subprocess.Popen(["rviz2", "-d", rviz_config])
-            else:
-                print(f"RViz config not found: {rviz_config}. Launching default RViz.")
-                subprocess.Popen(["rviz2"])
+    if args.rviz_config is None:
+        args.rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
+    rviz_utils.launch_rviz(args.rviz, args.rviz_config)
 
-    node = None
-    pc_pub = None
-    pc_fields = [
-        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-    ]
-    if args.ros2:
-        if not HAS_ROS2:
-            print("ROS2 Python libs not found. Did you source ROS2 and install rclpy?")
-        else:
-            rclpy.init()
-            node = rclpy.create_node("zed_ground_wall")
-            pc_pub = node.create_publisher(PointCloud2, "zed/pointcloud", 10)
-            print("ROS2 enabled: publishing /zed/pointcloud")
-    else:
-        print("ROS2 disabled (run with --ros2 to publish /zed/pointcloud)")
+    node, pc_pub, pc_fields = ros2_utils.setup_ros2(args.ros2)
 
-    init = sl.InitParameters()
-    init.camera_resolution = sl.RESOLUTION.HD720
-    init.depth_mode = sl.DEPTH_MODE.PERFORMANCE
-    init.coordinate_units = sl.UNIT.METER
-    init.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
-
-    zed = sl.Camera()
-    err = zed.open(init)
-    if err != sl.ERROR_CODE.SUCCESS:
-        print(f"Failed to open ZED camera: {err}")
+    try:
+        zed = zed_utils.open_zed_camera(sl)
+    except RuntimeError as exc:
+        print(str(exc))
         sys.exit(1)
 
     runtime = sl.RuntimeParameters()
@@ -95,6 +70,11 @@ def main():
     image_left = sl.Mat()
     ground_plane = sl.Plane()
     tracking_reset = sl.Transform()
+    tracking_enabled = False
+    pose_warned = False
+    pose = None
+    if args.tracking:
+        tracking_enabled, pose = zed_utils.enable_tracking(zed, sl)
 
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
@@ -103,20 +83,33 @@ def main():
     print("Running. Press Ctrl+C to exit.")
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
-    MAP_RES_M = 0.05
-    MAP_WIDTH_M = 10.0
-    MAP_HEIGHT_M = 10.0
-    MAP_DECAY = 0.97  # 1.0 = no decay, lower = faster fading
-    x_min = -MAP_WIDTH_M / 2.0
-    x_max = MAP_WIDTH_M / 2.0
-    z_min = 0.0
-    z_max = MAP_HEIGHT_M
-    grid_w = int(MAP_WIDTH_M / MAP_RES_M)
-    grid_h = int(MAP_HEIGHT_M / MAP_RES_M)
-    map_counts = np.zeros((grid_h, grid_w), dtype=np.float32)
+    occ_map = map_utils.OccupancyMap(
+        map_res_m=args.map_res_m,
+        map_width_m=args.map_width_m,
+        map_height_m=args.map_height_m,
+        map_z_min=args.map_z_min,
+        decay=0.97,
+    )
+    last_save = time.time()
+
+    if args.map_load and os.path.exists(args.map_save_path):
+        try:
+            ok, msg = occ_map.load(args.map_save_path)
+            print(f"{msg} ({args.map_save_path})" if ok else msg)
+        except Exception as exc:
+            print(f"Failed to load map ({args.map_save_path}): {exc}")
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+            # Update camera pose (world frame) if tracking is enabled.
+            if tracking_enabled:
+                R_world_cam, t_world_cam, pose_warned = zed_utils.get_world_transform(
+                    zed, sl, pose, pose_warned
+                )
+            else:
+                R_world_cam = np.eye(3, dtype=np.float32)
+                t_world_cam = np.zeros(3, dtype=np.float32)
+
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
@@ -152,11 +145,8 @@ def main():
                     return eq[0], eq[1], eq[2], eq[3]
                 raise AttributeError("Unsupported Plane API: missing normal/normal getter")
 
-            a, b, c, d = plane_params(ground_plane)
-            # Ensure the plane normal points "up" (positive Y) so signed distance
-            # is positive above the ground plane.
-            if b < 0:
-                a, b, c, d = -a, -b, -c, -d
+            a, b, c, d = segmentation.plane_params(ground_plane)
+            a, b, c, d = segmentation.normalize_plane(a, b, c, d)
 
             # Sample a downscaled cloud to compute a quick summary
             cloud = point_cloud.get_data()
@@ -172,53 +162,32 @@ def main():
                 continue
 
             # Distance to plane (signed)
-            dist = (a * xyz[:, 0] + b * xyz[:, 1] + c * xyz[:, 2] + d) / np.sqrt(a * a + b * b + c * c)
-
-            # Ground threshold: within 10 cm of plane
-            ground_mask = np.abs(dist) < 0.10
+            dist, ground_mask, obstacle_mask = segmentation.classify_points(xyz, a, b, c, d, ground_thresh=0.10)
             ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
 
-            # Wall/obstacle: above ground by > 10 cm
-            obstacle_mask = dist > 0.10
             obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
 
             print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
 
             # Publish point cloud to ROS2 (optional)
-            if pc_pub is not None:
-                header = Header()
-                header.stamp = node.get_clock().now().to_msg()
-                header.frame_id = args.frame
-                pts = xyz.astype(np.float32)
-                msg = point_cloud2.create_cloud(header, pc_fields, pts.tolist())
-                pc_pub.publish(msg)
-                rclpy.spin_once(node, timeout_sec=0.0)
+            ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
 
-            # Build a simple 2D top-down density map (XZ) from all valid points.
+            # Build a simple 2D top-down occupancy map (XZ) from ground/obstacle points.
             if HAS_CV2:
                 map_vis = None
                 if xyz.size > 0:
-                    x = xyz[:, 0]
-                    z = xyz[:, 2]
-                    in_bounds = (x >= x_min) & (x < x_max) & (z >= z_min) & (z < z_max)
-                    x = x[in_bounds]
-                    z = z[in_bounds]
-                    counts = np.zeros((grid_h, grid_w), dtype=np.float32)
-                    ix = ((x - x_min) / MAP_RES_M).astype(np.int32)
-                    iz = ((z - z_min) / MAP_RES_M).astype(np.int32)
-                    # Flip Z so forward is "up" in the image.
-                    counts[grid_h - 1 - iz, ix] += 1.0
-                    # Persistent map with decay.
-                    map_counts *= MAP_DECAY
-                    map_counts += counts
-                    # Log-scale for visibility.
-                    counts_f = np.log1p(map_counts)
-                    if counts_f.max() > 0:
-                        counts_f = counts_f / counts_f.max()
-                    occ = (counts_f * 255.0).astype(np.uint8)
-                    map_vis = cv2.applyColorMap(occ, cv2.COLORMAP_BONE)
+                    # Transform to world frame if tracking is enabled.
+                    xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
+                    x = xyz_world[:, 0]
+                    z = xyz_world[:, 2]
+                    occ_map.update(x, z, ground_mask, obstacle_mask)
+                    map_vis = occ_map.render()
+                    # Periodically save persistent map to disk.
+                    if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
+                        occ_map.save(args.map_save_path)
+                        last_save = time.time()
                 else:
-                    map_vis = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
+                    map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
 
             # Live visualization (optional)
             if HAS_CV2:
@@ -254,15 +223,19 @@ def main():
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 # Always show the map (even if the image frame is missing)
                 if map_vis is not None:
+                    if args.map_scale > 1:
+                        map_vis = cv2.resize(
+                            map_vis,
+                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
                     cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
         else:
             time.sleep(0.01)
 
-    if node is not None:
-        node.destroy_node()
-        rclpy.shutdown()
+    ros2_utils.shutdown_ros2(node)
 
 
 if __name__ == "__main__":
