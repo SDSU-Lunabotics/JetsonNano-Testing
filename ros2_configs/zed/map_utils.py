@@ -19,6 +19,7 @@ class OccupancyMap:
 
         self.free_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
         self.occ_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+        self.hole_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
 
     def meta(self):
         return {
@@ -32,6 +33,7 @@ class OccupancyMap:
         data = np.load(path)
         loaded_free = data["free_counts"].astype(np.float32)
         loaded_occ = data["occ_counts"].astype(np.float32)
+        loaded_hole = data["hole_counts"].astype(np.float32) if "hole_counts" in data else None
         meta = data["meta"].item()
         if (
             meta.get("map_res_m") == self.map_res_m
@@ -42,6 +44,8 @@ class OccupancyMap:
             if loaded_free.shape == self.free_counts.shape and loaded_occ.shape == self.occ_counts.shape:
                 self.free_counts[:] = loaded_free
                 self.occ_counts[:] = loaded_occ
+                if loaded_hole is not None and loaded_hole.shape == self.hole_counts.shape:
+                    self.hole_counts[:] = loaded_hole
                 return True, "Loaded map"
             return False, "Map size mismatch; starting with empty map."
         return False, "Map settings differ; starting with empty map."
@@ -51,10 +55,11 @@ class OccupancyMap:
             path,
             free_counts=self.free_counts,
             occ_counts=self.occ_counts,
+            hole_counts=self.hole_counts,
             meta=self.meta(),
         )
 
-    def update(self, x, z, ground_mask, obstacle_mask):
+    def update(self, x, z, ground_mask, obstacle_mask, hole_mask=None):
         in_bounds = (x >= self.x_min) & (x < self.x_max) & (z >= self.z_min) & (z < self.z_max)
         if not np.any(in_bounds):
             return
@@ -62,6 +67,9 @@ class OccupancyMap:
         z = z[in_bounds]
         gmask = ground_mask[in_bounds]
         omask = obstacle_mask[in_bounds]
+        hmask = None
+        if hole_mask is not None:
+            hmask = hole_mask[in_bounds]
 
         ix = ((x - self.x_min) / self.map_res_m).astype(np.int32)
         iz = ((z - self.z_min) / self.map_res_m).astype(np.int32)
@@ -71,26 +79,35 @@ class OccupancyMap:
 
         self.free_counts *= self.map_decay
         self.occ_counts *= self.map_decay
+        self.hole_counts *= self.map_decay
 
         if np.any(gmask):
             self.free_counts[row[gmask], col[gmask]] += 1.0
         if np.any(omask):
             self.occ_counts[row[omask], col[omask]] += 1.0
+        if hmask is not None and np.any(hmask):
+            self.hole_counts[row[hmask], col[hmask]] += 1.0
 
     def render(self):
-        # Visualize: green = free, red = occupied, dark = unknown.
+        # Visualize: green = free, red = occupied, blue = holes, dark = unknown.
         free_vis = np.log1p(self.free_counts)
         occ_vis = np.log1p(self.occ_counts)
+        hole_vis = np.log1p(self.hole_counts)
         fmax = free_vis.max()
         omax = occ_vis.max()
+        hmax = hole_vis.max()
         if fmax > 0:
             free_vis = free_vis / fmax
         if omax > 0:
             occ_vis = occ_vis / omax
+        if hmax > 0:
+            hole_vis = hole_vis / hmax
         map_vis = np.zeros((self.grid_h, self.grid_w, 3), dtype=np.uint8)
         # Red channel for occupied, green channel for free.
         map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
         map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
+        # Blue channel for holes.
+        map_vis[:, :, 0] = (hole_vis * 255.0).astype(np.uint8)
         return map_vis
 
     def world_to_grid(self, x, z):
@@ -101,3 +118,76 @@ class OccupancyMap:
         if row < 0 or row >= self.grid_h or col < 0 or col >= self.grid_w:
             return None
         return row, col
+
+    def obstacle_mask(self, min_occ_count=3.0):
+        return (self.occ_counts >= min_occ_count) & (self.occ_counts >= self.free_counts)
+
+
+def astar_path(start_rc, goal_rc, obstacle_mask):
+    import heapq
+
+    if start_rc is None or goal_rc is None:
+        return None
+    if obstacle_mask[goal_rc[0], goal_rc[1]]:
+        return None
+
+    h, w = obstacle_mask.shape
+    sr, sc = start_rc
+    gr, gc = goal_rc
+    if sr < 0 or sr >= h or sc < 0 or sc >= w:
+        return None
+    if gr < 0 or gr >= h or gc < 0 or gc >= w:
+        return None
+
+    def heuristic(r, c):
+        return abs(r - gr) + abs(c - gc)
+
+    open_set = []
+    heapq.heappush(open_set, (heuristic(sr, sc), 0, (sr, sc)))
+    came_from = {}
+    cost = { (sr, sc): 0 }
+
+    while open_set:
+        _, g, current = heapq.heappop(open_set)
+        if current == (gr, gc):
+            # Reconstruct
+            path = [current]
+            while current in came_from:
+                current = came_from[current]
+                path.append(current)
+            path.reverse()
+            return path
+
+        r, c = current
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = r + dr, c + dc
+            if nr < 0 or nr >= h or nc < 0 or nc >= w:
+                continue
+            if obstacle_mask[nr, nc]:
+                continue
+            ng = g + 1
+            if (nr, nc) not in cost or ng < cost[(nr, nc)]:
+                cost[(nr, nc)] = ng
+                came_from[(nr, nc)] = (r, c)
+                heapq.heappush(open_set, (ng + heuristic(nr, nc), ng, (nr, nc)))
+    return None
+
+
+def inflate_mask(mask, radius_cells):
+    if radius_cells <= 0:
+        return mask
+    h, w = mask.shape
+    inflated = mask.copy()
+    r = int(radius_cells)
+    for rr in range(h):
+        if not mask[rr].any():
+            continue
+        for cc in range(w):
+            if not mask[rr, cc]:
+                continue
+            r1 = max(0, rr - r)
+            r2 = min(h, rr + r + 1)
+            c1 = max(0, cc - r)
+            c2 = min(w, cc + r + 1)
+            inflated[r1:r2, c1:c2] = True
+    return inflated

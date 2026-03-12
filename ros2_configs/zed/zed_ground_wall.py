@@ -54,6 +54,10 @@ def main():
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
     parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
+    parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
+    parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
+    parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
+    parser.add_argument("--rover-size-m", type=float, default=0.305, help="Rover footprint size (m, square)")
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
@@ -134,6 +138,26 @@ def main():
         except Exception as exc:
             print(f"Failed to load map ({args.map_save_path}): {exc}")
 
+    goal_cell = None
+    path_cells = None
+    last_start = None
+    last_goal = None
+    map_window_ready = False
+
+    def on_map_click(event, x, y, flags, param):
+        nonlocal goal_cell, path_cells, last_goal
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        scale = max(1, int(args.map_scale))
+        row = int(y / scale)
+        col = int(x / scale)
+        if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
+            return
+        goal_cell = (row, col)
+        path_cells = None
+        last_goal = None
+        print(f"New goal set at row={row}, col={col}")
+
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
             # Update camera pose (world frame) if tracking is enabled.
@@ -197,12 +221,19 @@ def main():
                 continue
 
             # Distance to plane (signed)
-            dist, ground_mask, obstacle_mask = segmentation.classify_points(xyz, a, b, c, d, ground_thresh=0.10)
+            dist, ground_mask, obstacle_mask = segmentation.classify_points(
+                xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
+            )
+            hole_mask = dist < -args.hole_thresh_m
             ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
 
             obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
+            hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
 
-            print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
+            print(
+                f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "
+                f"| Holes {hole_pct:5.1f}% | Points {xyz.shape[0]}"
+            )
 
             # Publish point cloud to ROS2 (optional)
             ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
@@ -215,7 +246,7 @@ def main():
                     xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
                     x = xyz_world[:, 0]
                     z = xyz_world[:, 2]
-                    occ_map.update(x, z, ground_mask, obstacle_mask)
+                    occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
                     map_vis = occ_map.render()
                     # Draw camera position marker (blue square).
                     cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
@@ -247,6 +278,23 @@ def main():
                                 dtype=np.int32,
                             )
                             cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+
+                    # Compute/update path to goal (avoid red obstacles only).
+                    if goal_cell is not None and cam_row_col is not None:
+                        if cam_row_col != last_start or goal_cell != last_goal:
+                            obs = occ_map.obstacle_mask(min_occ_count=args.path_avoid_occ_min)
+                            radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
+                            if radius_cells > 0:
+                                obs = map_utils.inflate_mask(obs, radius_cells)
+                            path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
+                            last_start = cam_row_col
+                            last_goal = goal_cell
+
+                    # Draw path if available.
+                    if path_cells:
+                        pts = np.array([[c, r] for r, c in path_cells], dtype=np.int32)
+                        if pts.shape[0] >= 2:
+                            cv2.polylines(map_vis, [pts], False, (255, 255, 0), 1)
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
@@ -307,6 +355,9 @@ def main():
                             interpolation=cv2.INTER_NEAREST,
                         )
                     cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                    if not map_window_ready:
+                        cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
+                        map_window_ready = True
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
         else:
