@@ -127,9 +127,21 @@ def update_spatial_map(zed, sl, mesh, save_path):
     if mesh is None:
         return False
     try:
-        zed.request_spatial_map_async()
-        err = zed.get_spatial_map_async(mesh)
-        if err != sl.ERROR_CODE.SUCCESS:
+        err = None
+        if hasattr(zed, "request_spatial_map_async"):
+            zed.request_spatial_map_async()
+            if hasattr(zed, "get_spatial_map_async"):
+                err = zed.get_spatial_map_async(mesh)
+            elif hasattr(zed, "retrieve_spatial_map_async"):
+                err = zed.retrieve_spatial_map_async(mesh)
+        elif hasattr(zed, "request_spatial_map"):
+            zed.request_spatial_map()
+            if hasattr(zed, "retrieve_spatial_map"):
+                err = zed.retrieve_spatial_map(mesh)
+        elif hasattr(zed, "extract_whole_spatial_map"):
+            err = zed.extract_whole_spatial_map(mesh)
+
+        if err is not None and err != sl.ERROR_CODE.SUCCESS:
             return False
         if hasattr(mesh, "filter") and hasattr(sl, "MeshFilterParameters"):
             mesh.filter(sl.MeshFilterParameters(sl.MESH_FILTER.MEDIUM))
