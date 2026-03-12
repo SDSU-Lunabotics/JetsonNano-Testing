@@ -9,6 +9,7 @@ import sys
 import time
 import argparse
 import os
+import math
 import numpy as np
 
 try:
@@ -35,6 +36,12 @@ import map_utils
 import zed_utils
 import viewer_utils
 
+try:
+    from networktables import NetworkTables
+    HAS_NT = True
+except Exception:
+    HAS_NT = False
+
 
 def main():
     parser = argparse.ArgumentParser(description="ZED 2i ground + wall segmentation")
@@ -57,6 +64,7 @@ def main():
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
+    parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
     parser.add_argument("--rover-size-m", type=float, default=0.305, help="Rover footprint size (m, square)")
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
@@ -65,6 +73,12 @@ def main():
     parser.add_argument("--spatial-save-every", type=float, default=10.0, help="Seconds between spatial map saves")
     parser.add_argument("--spatial-viewer", action="store_true", help="Show live Open3D mesh viewer")
     parser.add_argument("--spatial-filter", default="none", help="Mesh filter: none|low|medium|high")
+    parser.add_argument("--drive", action="store_true", help="Enable RoboRIO driving commands")
+    parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
+    parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
+    parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
+    parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
+    parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -138,16 +152,30 @@ def main():
         except Exception as exc:
             print(f"Failed to load map ({args.map_save_path}): {exc}")
 
+    sd = None
+    if args.drive:
+        if not HAS_NT:
+            print("NetworkTables not available; disable --drive or install pynetworktables.")
+        else:
+            NetworkTables.initialize(server=args.roborio_ip)
+            sd = NetworkTables.getTable("SmartDashboard")
+            print(f"Drive enabled: NetworkTables to {args.roborio_ip}")
+
     goal_cell = None
     path_cells = None
     last_path_cells = None
     last_start = None
     last_goal = None
     map_window_ready = False
+    emergency_stop = False
+    last_drive_send = 0.0
 
     def on_map_click(event, x, y, flags, param):
-        nonlocal goal_cell, path_cells, last_goal
+        nonlocal goal_cell, path_cells, last_goal, emergency_stop
         if event != cv2.EVENT_LBUTTONDOWN:
+            if event == cv2.EVENT_RBUTTONDOWN:
+                emergency_stop = True
+                print("EMERGENCY STOP")
             return
         scale = max(1, int(args.map_scale))
         row = int(y / scale)
@@ -157,6 +185,7 @@ def main():
         goal_cell = (row, col)
         path_cells = None
         last_goal = None
+        emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
 
     while True:
@@ -283,7 +312,10 @@ def main():
                     # Compute/update path to goal (avoid red obstacles only).
                     if goal_cell is not None and cam_row_col is not None:
                         if cam_row_col != last_start or goal_cell != last_goal:
-                            obs = occ_map.obstacle_mask(min_occ_count=args.path_avoid_occ_min)
+                            obs = occ_map.obstacle_mask(
+                                min_occ_count=args.path_avoid_occ_min,
+                                min_occ_ratio=args.path_avoid_occ_ratio,
+                            )
                             radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
@@ -304,6 +336,63 @@ def main():
                         gr, gc = goal_cell
                         if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
                             cv2.circle(map_vis, (gc, gr), 2, (0, 255, 255), -1)
+
+                    # Drive output to RoboRIO (optional).
+                    if sd is not None:
+                        now = time.time()
+                        if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
+                            last_drive_send = now
+                            if emergency_stop or draw_path is None or cam_row_col is None:
+                                sd.putBoolean("Jetson/AutomationEnabled", False)
+                                sd.putNumber("Jetson/CommandForward", 0.0)
+                                sd.putNumber("Jetson/CommandTurn", 0.0)
+                                sd.putNumber("Jetson/CommandDuration", 0.1)
+                                sd.putBoolean("Jetson/CommandReady", True)
+                            else:
+                                # Pick a waypoint a few steps ahead.
+                                wp_index = min(5, len(draw_path) - 1)
+                                wp_rc = draw_path[wp_index]
+                                wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
+                                if wp_world is None:
+                                    continue
+                                tx, tz = wp_world
+                                # Current pose in world.
+                                cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
+                                dx = tx - cx
+                                dz = tz - cz
+                                dist = math.hypot(dx, dz)
+
+                                # Stop if close enough to goal.
+                                goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+                                if goal_world is not None:
+                                    gx, gz = goal_world
+                                    if math.hypot(gx - cx, gz - cz) <= args.drive_goal_tol_m:
+                                        sd.putBoolean("Jetson/AutomationEnabled", False)
+                                        sd.putNumber("Jetson/CommandForward", 0.0)
+                                        sd.putNumber("Jetson/CommandTurn", 0.0)
+                                        sd.putNumber("Jetson/CommandDuration", 0.1)
+                                        sd.putBoolean("Jetson/CommandReady", True)
+                                        continue
+
+                                # Heading error from camera forward axis.
+                                forward = R_world_cam[:, 2]
+                                heading = math.atan2(float(forward[2]), float(forward[0]))
+                                target = math.atan2(dz, dx)
+                                err = target - heading
+                                # Wrap to [-pi, pi].
+                                while err > math.pi:
+                                    err -= 2 * math.pi
+                                while err < -math.pi:
+                                    err += 2 * math.pi
+
+                                turn = max(-1.0, min(1.0, args.drive_turn_k * err))
+                                fwd = max(0.0, min(1.0, args.drive_speed))
+
+                                sd.putBoolean("Jetson/AutomationEnabled", True)
+                                sd.putNumber("Jetson/CommandForward", fwd)
+                                sd.putNumber("Jetson/CommandTurn", turn)
+                                sd.putNumber("Jetson/CommandDuration", 1.0 / max(1.0, args.drive_rate_hz))
+                                sd.putBoolean("Jetson/CommandReady", True)
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)

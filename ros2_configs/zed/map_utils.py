@@ -119,8 +119,20 @@ class OccupancyMap:
             return None
         return row, col
 
-    def obstacle_mask(self, min_occ_count=3.0):
-        return (self.occ_counts >= min_occ_count) & (self.occ_counts >= self.free_counts)
+    def grid_to_world(self, row, col):
+        if row < 0 or row >= self.grid_h or col < 0 or col >= self.grid_w:
+            return None
+        x = self.x_min + (col + 0.5) * self.map_res_m
+        z = self.z_min + (self.grid_h - 1 - row + 0.5) * self.map_res_m
+        return x, z
+
+    def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5):
+        # Mark as obstacle only if we have enough occupied evidence
+        # and it significantly outweighs free evidence.
+        occ = self.occ_counts
+        free = self.free_counts
+        ratio_ok = occ >= (free * float(min_occ_ratio))
+        return (occ >= float(min_occ_count)) & ratio_ok
 
 
 def astar_path(start_rc, goal_rc, obstacle_mask):
@@ -142,6 +154,8 @@ def astar_path(start_rc, goal_rc, obstacle_mask):
     def heuristic(r, c):
         return abs(r - gr) + abs(c - gc)
 
+    neighbors = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0)]
+
     open_set = []
     heapq.heappush(open_set, (heuristic(sr, sc), 0, (sr, sc)))
     came_from = {}
@@ -159,13 +173,13 @@ def astar_path(start_rc, goal_rc, obstacle_mask):
             return path
 
         r, c = current
-        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for dr, dc, step_cost in neighbors:
             nr, nc = r + dr, c + dc
             if nr < 0 or nr >= h or nc < 0 or nc >= w:
                 continue
             if obstacle_mask[nr, nc]:
                 continue
-            ng = g + 1
+            ng = g + step_cost
             if (nr, nc) not in cost or ng < cost[(nr, nc)]:
                 cost[(nr, nc)] = ng
                 came_from[(nr, nc)] = (r, c)
