@@ -123,7 +123,20 @@ def enable_spatial_mapping(zed, sl, resolution="medium", mapping_range="medium")
     return False, None
 
 
-def update_spatial_map(zed, sl, mesh, save_path):
+def _map_mesh_filter(sl, value):
+    if not hasattr(sl, "MESH_FILTER"):
+        return None
+    v = (value or "").lower()
+    if v == "low":
+        return sl.MESH_FILTER.LOW
+    if v == "high":
+        return sl.MESH_FILTER.HIGH
+    if v == "medium":
+        return sl.MESH_FILTER.MEDIUM
+    return None
+
+
+def update_spatial_map(zed, sl, mesh, save_path, mesh_filter="none"):
     if mesh is None:
         return False
     try:
@@ -143,8 +156,9 @@ def update_spatial_map(zed, sl, mesh, save_path):
 
         if err is not None and err != sl.ERROR_CODE.SUCCESS:
             return False
-        if hasattr(mesh, "filter") and hasattr(sl, "MeshFilterParameters"):
-            mesh.filter(sl.MeshFilterParameters(sl.MESH_FILTER.MEDIUM))
+        filt = _map_mesh_filter(sl, mesh_filter)
+        if filt is not None and hasattr(mesh, "filter") and hasattr(sl, "MeshFilterParameters"):
+            mesh.filter(sl.MeshFilterParameters(filt))
         if hasattr(mesh, "save"):
             mesh.save(save_path)
             print(f"Saved spatial mesh: {save_path}")

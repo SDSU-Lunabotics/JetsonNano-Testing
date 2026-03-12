@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--spatial-save-path", default=None, help="Optional path to save spatial mesh (.obj)")
     parser.add_argument("--spatial-save-every", type=float, default=10.0, help="Seconds between spatial map saves")
     parser.add_argument("--spatial-viewer", action="store_true", help="Show live Open3D mesh viewer")
+    parser.add_argument("--spatial-filter", default="none", help="Mesh filter: none|low|medium|high")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -253,7 +254,9 @@ def main():
                     # Periodically update and save spatial map (mesh) if enabled.
                     if spatial_enabled and args.spatial_save_path and args.spatial_save_every > 0:
                         if (time.time() - last_spatial_save) >= args.spatial_save_every:
-                            ok = zed_utils.update_spatial_map(zed, sl, spatial_mesh, args.spatial_save_path)
+                            ok = zed_utils.update_spatial_map(
+                                zed, sl, spatial_mesh, args.spatial_save_path, mesh_filter=args.spatial_filter
+                            )
                             if ok:
                                 last_spatial_save = time.time()
                                 if mesh_viewer is not None:
