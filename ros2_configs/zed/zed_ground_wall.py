@@ -140,6 +140,7 @@ def main():
 
     goal_cell = None
     path_cells = None
+    last_path_cells = None
     last_start = None
     last_goal = None
     map_window_ready = False
@@ -287,14 +288,22 @@ def main():
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
                             path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
+                            if path_cells:
+                                last_path_cells = path_cells
                             last_start = cam_row_col
                             last_goal = goal_cell
 
                     # Draw path if available.
-                    if path_cells:
-                        pts = np.array([[c, r] for r, c in path_cells], dtype=np.int32)
+                    draw_path = path_cells if path_cells else last_path_cells
+                    if draw_path:
+                        pts = np.array([[c, r] for r, c in draw_path], dtype=np.int32)
                         if pts.shape[0] >= 2:
                             cv2.polylines(map_vis, [pts], False, (255, 255, 0), 1)
+                    # Draw goal marker.
+                    if goal_cell is not None:
+                        gr, gc = goal_cell
+                        if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
+                            cv2.circle(map_vis, (gc, gr), 2, (0, 255, 255), -1)
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
