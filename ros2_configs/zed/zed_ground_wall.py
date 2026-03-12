@@ -53,6 +53,11 @@ def main():
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
     parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
+    parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
+    parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
+    parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
+    parser.add_argument("--spatial-save-path", default=None, help="Optional path to save spatial mesh (.obj)")
+    parser.add_argument("--spatial-save-every", type=float, default=10.0, help="Seconds between spatial map saves")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -78,6 +83,16 @@ def main():
     pose = None
     if args.tracking:
         tracking_enabled, pose = zed_utils.enable_tracking(zed, sl)
+    spatial_enabled = False
+    spatial_mesh = None
+    last_spatial_save = time.time()
+    if args.spatial_mapping:
+        spatial_enabled, spatial_mesh = zed_utils.enable_spatial_mapping(
+            zed,
+            sl,
+            resolution=args.spatial_res,
+            mapping_range=args.spatial_range,
+        )
 
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
@@ -204,7 +219,7 @@ def main():
                             # Camera forward axis in world frame (Z in camera frame).
                             forward = R_world_cam[:, 2]
                             fx, fz = float(forward[0]), float(forward[2])
-                            ang = np.arctan2(fz, fx)
+                            ang = np.arctan2(fz, fx) + np.pi
                             size = max(3, int(args.map_camera_size) * 2)
                             tip_r = int(r0 - np.sin(ang) * size)
                             tip_c = int(c0 + np.cos(ang) * size)
@@ -223,6 +238,12 @@ def main():
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
                         last_save = time.time()
+                    # Periodically update and save spatial map (mesh) if enabled.
+                    if spatial_enabled and args.spatial_save_path and args.spatial_save_every > 0:
+                        if (time.time() - last_spatial_save) >= args.spatial_save_every:
+                            ok = zed_utils.update_spatial_map(zed, sl, spatial_mesh, args.spatial_save_path)
+                            if ok:
+                                last_spatial_save = time.time()
                 else:
                     map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
 
@@ -272,6 +293,8 @@ def main():
         else:
             time.sleep(0.01)
 
+    if spatial_enabled:
+        zed_utils.disable_spatial_mapping(zed)
     ros2_utils.shutdown_ros2(node)
 
 

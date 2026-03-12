@@ -70,3 +70,62 @@ def get_world_transform(zed, sl, pose, pose_warned):
         R_world_cam = np.eye(3, dtype=np.float32)
         t_world_cam = np.zeros(3, dtype=np.float32)
     return R_world_cam, t_world_cam, pose_warned
+
+
+def _map_spatial_resolution(sl, value):
+    v = (value or "").lower()
+    if v == "low":
+        return sl.SPATIAL_MAP_RESOLUTION.LOW
+    if v == "high":
+        return sl.SPATIAL_MAP_RESOLUTION.HIGH
+    return sl.SPATIAL_MAP_RESOLUTION.MEDIUM
+
+
+def _map_spatial_range(sl, value):
+    v = (value or "").lower()
+    if v == "short":
+        return sl.SPATIAL_MAP_RANGE.SHORT
+    if v == "long":
+        return sl.SPATIAL_MAP_RANGE.LONG
+    return sl.SPATIAL_MAP_RANGE.MEDIUM
+
+
+def enable_spatial_mapping(zed, sl, resolution="medium", mapping_range="medium"):
+    try:
+        params = sl.SpatialMappingParameters()
+        params.map_resolution = _map_spatial_resolution(sl, resolution)
+        params.map_range = _map_spatial_range(sl, mapping_range)
+        err = zed.enable_spatial_mapping(params)
+        if err == sl.ERROR_CODE.SUCCESS:
+            print("Spatial mapping enabled.")
+            return True, sl.Mesh()
+        print(f"Failed to enable spatial mapping: {err}")
+    except Exception as exc:
+        print(f"Failed to enable spatial mapping: {exc}")
+    return False, None
+
+
+def update_spatial_map(zed, sl, mesh, save_path):
+    if mesh is None:
+        return False
+    try:
+        zed.request_spatial_map_async()
+        err = zed.get_spatial_map_async(mesh)
+        if err != sl.ERROR_CODE.SUCCESS:
+            return False
+        if hasattr(mesh, "filter") and hasattr(sl, "MeshFilterParameters"):
+            mesh.filter(sl.MeshFilterParameters(sl.MESH_FILTER.MEDIUM))
+        if hasattr(mesh, "save"):
+            mesh.save(save_path)
+            print(f"Saved spatial mesh: {save_path}")
+            return True
+    except Exception as exc:
+        print(f"Spatial map update failed: {exc}")
+    return False
+
+
+def disable_spatial_mapping(zed):
+    try:
+        zed.disable_spatial_mapping()
+    except Exception:
+        pass
