@@ -33,6 +33,7 @@ import ros2_utils
 import segmentation
 import map_utils
 import zed_utils
+import viewer_utils
 
 
 def main():
@@ -58,6 +59,7 @@ def main():
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
     parser.add_argument("--spatial-save-path", default=None, help="Optional path to save spatial mesh (.obj)")
     parser.add_argument("--spatial-save-every", type=float, default=10.0, help="Seconds between spatial map saves")
+    parser.add_argument("--spatial-viewer", action="store_true", help="Show live Open3D mesh viewer")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -93,6 +95,16 @@ def main():
             resolution=args.spatial_res,
             mapping_range=args.spatial_range,
         )
+    mesh_viewer = None
+    if args.spatial_viewer:
+        if not viewer_utils.HAS_OPEN3D:
+            print("Open3D not available; mesh viewer disabled.")
+        elif not args.spatial_save_path:
+            print("Mesh viewer requires --spatial-save-path to load updates.")
+        else:
+            mesh_viewer = viewer_utils.MeshViewer()
+            if not mesh_viewer.open():
+                mesh_viewer = None
 
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
@@ -244,6 +256,10 @@ def main():
                             ok = zed_utils.update_spatial_map(zed, sl, spatial_mesh, args.spatial_save_path)
                             if ok:
                                 last_spatial_save = time.time()
+                                if mesh_viewer is not None:
+                                    mesh_viewer.update_from_path(args.spatial_save_path)
+                    if mesh_viewer is not None:
+                        mesh_viewer.poll()
                 else:
                     map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
 
@@ -295,6 +311,8 @@ def main():
 
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
+    if mesh_viewer is not None:
+        mesh_viewer.close()
     ros2_utils.shutdown_ros2(node)
 
 
