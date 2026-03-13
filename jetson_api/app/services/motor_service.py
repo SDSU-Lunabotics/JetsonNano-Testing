@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import List
 
 from app.schemas.common import MotorId
 from app.schemas.motors import (
@@ -8,26 +8,84 @@ from app.schemas.motors import (
     MotorCommandResponse,
 )
 from app.services.state_service import now_ms
+from app.services.roborio_bridge_service import roborio_bridge_service
 
 
 class MotorService:
-    def __init__(self) -> None:
-        self._motors: Dict[str, MotorHealth] = {
-            "left_front": MotorHealth(motor_id=MotorId.left_front, enabled=True, faults=[]),
-            "right_front": MotorHealth(motor_id=MotorId.right_front, enabled=True, faults=[]),
-            "left_rear": MotorHealth(motor_id=MotorId.left_rear, enabled=True, faults=[]),
-            "right_rear": MotorHealth(motor_id=MotorId.right_rear, enabled=True, faults=[]),
-            "excavator": MotorHealth(motor_id=MotorId.excavator, enabled=True, faults=[]),
-            "deposition": MotorHealth(motor_id=MotorId.deposition, enabled=True, faults=[]),
-        }
-
     def get_status(self) -> MotorsStatusResponse:
         timestamp = now_ms()
-        motors: List[MotorHealth] = []
 
-        for motor in self._motors.values():
-            motor.last_update_ms = timestamp
-            motors.append(motor)
+        values = roborio_bridge_service.get_status().get("values", {})
+
+        def num(key: str):
+            value = values.get(key)
+            try:
+                return float(value) if value is not None else None
+            except Exception:
+                return None
+
+        def boolean(key: str):
+            value = values.get(key)
+            if isinstance(value, bool):
+                return value
+            return None
+
+        motors: List[MotorHealth] = [
+            MotorHealth(
+                motor_id=MotorId.left_front,
+                enabled=boolean("Kraken/LeftFront/Enabled"),
+                current_a=num("Kraken/LeftFront/TorqueCurrentA"),
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+            MotorHealth(
+                motor_id=MotorId.left_rear,
+                enabled=boolean("Kraken/LeftRear/Enabled"),
+                current_a=num("Kraken/LeftRear/TorqueCurrentA"),
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+            MotorHealth(
+                motor_id=MotorId.right_front,
+                enabled=boolean("Kraken/RightFront/Enabled"),
+                current_a=num("Kraken/RightFront/TorqueCurrentA"),
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+            MotorHealth(
+                motor_id=MotorId.right_rear,
+                enabled=boolean("Kraken/RightRear/Enabled"),
+                current_a=num("Kraken/RightRear/TorqueCurrentA"),
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+            MotorHealth(
+                motor_id=MotorId.excavator,
+                enabled=None,
+                current_a=None,
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+            MotorHealth(
+                motor_id=MotorId.deposition,
+                enabled=None,
+                current_a=None,
+                rpm=None,
+                torque_nm=None,
+                last_update_ms=timestamp,
+                faults=[],
+            ),
+        ]
 
         return MotorsStatusResponse(
             timestamp_ms=timestamp,
@@ -35,27 +93,7 @@ class MotorService:
         )
 
     def command_motor(self, motor_id: MotorId, req: MotorCommandRequest) -> MotorCommandResponse:
-        if motor_id.value not in self._motors:
-            raise ValueError(f"Unknown motor_id '{motor_id.value}'")
-
-        motor = self._motors[motor_id.value]
-
-        if req.mode == "stop":
-            motor.rpm = 0.0
-            motor.torque_nm = None
-        elif req.mode == "rpm":
-            if req.value is None:
-                raise ValueError("value required for rpm mode")
-            motor.rpm = float(req.value)
-        elif req.mode == "percent":
-            if req.value is None:
-                raise ValueError("value required for percent mode")
-            motor.rpm = None
-        else:
-            raise ValueError("Invalid motor command mode")
-
-        motor.last_update_ms = now_ms()
-
+        # Placeholder until direct motor command wiring is added
         return MotorCommandResponse(
             ok=True,
             motor_id=motor_id.value,

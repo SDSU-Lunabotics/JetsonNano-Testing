@@ -7,6 +7,7 @@ from app.services.state_service import state_service, now_ms
 from app.services.network_service import network_service
 from app.services.battery_service import battery_service
 from app.services.wireless_service import wireless_service
+from app.services.roborio_bridge_service import roborio_bridge_service
 
 
 class TelemetryService:
@@ -34,6 +35,9 @@ class TelemetryService:
 
     def get_status(self) -> StatusResponse:
         now = now_ms()
+
+        if roborio_bridge_service.is_connected():
+            self._roborio_last_seen_ms = now
 
         rover = RoverStatus(
             heartbeat=self._hb(self._jetson_last_seen_ms, now),
