@@ -1,23 +1,26 @@
 from app.schemas.common import BatteryStatus
-from app.services.state_service import now_ms
+from app.services.roborio_bridge_service import roborio_bridge_service
 
 
 class BatteryService:
-    def __init__(self) -> None:
-        self._battery = BatteryStatus(
-            voltage_v=None,
-            low=None,
-        )
-
-    def set_battery(self, voltage_v: float | None) -> None:
-        self._battery.voltage_v = voltage_v
-        if voltage_v is None:
-            self._battery.low = None
-        else:
-            self._battery.low = voltage_v < 11.5
-
     def get_battery_status(self) -> BatteryStatus:
-        return self._battery
+        voltage = roborio_bridge_service.get_value("Battery/Voltage", None)
+
+        if voltage is None:
+            return BatteryStatus(
+                voltage_v=None,
+                low=None,
+            )
+
+        try:
+            voltage = float(voltage)
+        except Exception:
+            voltage = None
+
+        return BatteryStatus(
+            voltage_v=voltage,
+            low=(voltage < 11.5 if voltage is not None else None),
+        )
 
 
 battery_service = BatteryService()
