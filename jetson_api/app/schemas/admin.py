@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
+from typing import Optional
 
 
 class RestartServiceRequest(BaseModel):
@@ -9,4 +10,4 @@ class RestartServiceRequest(BaseModel):
 
 class AdminActionResponse(BaseModel):
     ok: bool
-    message: str | None = None
+    message: Optional[str] = None
