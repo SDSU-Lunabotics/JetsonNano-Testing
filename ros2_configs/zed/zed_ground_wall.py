@@ -35,6 +35,7 @@ import segmentation
 import map_utils
 import zed_utils
 import viewer_utils
+import stream_utils
 
 try:
     from networktables import NetworkTables
@@ -84,6 +85,12 @@ def main():
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
+    parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
+    parser.add_argument("--stream-port", type=int, default=5600, help="UDP port for GStreamer stream")
+    parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
+    parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
+    parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     args = parser.parse_args()
 
     if args.rviz_config is None:
