@@ -7,7 +7,7 @@ from networktables import NetworkTables
 
 
 HOST = "0.0.0.0"
-PORT = 8000
+PORT = 8001
 
 # Make sure this matches your real RoboRIO IP
 ROBORIO_IP = "10.0.9.2"
