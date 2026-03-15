@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ENV_FILE="${SCRIPT_DIR}/zed_ground_wall.env"
+
+if [[ -f "${ENV_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+fi
+
+# Optional: auto-start TigerVNC before launching the app.
+if [[ "${AUTO_START_VNC:-0}" == "1" ]]; then
+  VNC_DISPLAY="${VNC_DISPLAY:-:2}"
+  VNC_XSTARTUP="${VNC_XSTARTUP:-$HOME/.vnc/xstartup}"
+  VNC_LOCALHOST_NO="${VNC_LOCALHOST_NO:-1}"
+
+  if command -v tigervncserver >/dev/null 2>&1; then
+    if ! tigervncserver -list 2>/dev/null | grep -qE "^[[:space:]]*${VNC_DISPLAY}[[:space:]]"; then
+      vnc_cmd=(tigervncserver "${VNC_DISPLAY}")
+      if [[ "${VNC_LOCALHOST_NO}" == "1" ]]; then
+        vnc_cmd+=(-localhost no)
+      fi
+      if [[ -x "${VNC_XSTARTUP}" ]]; then
+        vnc_cmd+=(-xstartup "${VNC_XSTARTUP}")
+      fi
+      echo "Starting TigerVNC on ${VNC_DISPLAY}..."
+      if ! "${vnc_cmd[@]}"; then
+        echo "Warning: failed to start TigerVNC on ${VNC_DISPLAY}. Continuing launch."
+      fi
+    else
+      echo "TigerVNC already running on ${VNC_DISPLAY}."
+    fi
+  else
+    echo "Warning: tigervncserver not found. Skipping VNC auto-start."
+  fi
+fi
+
+cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py")
+
+# Core mapping/tracking
+if [[ "${TRACKING:-1}" == "1" ]]; then cmd+=(--tracking); fi
+if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
+cmd+=(--map-scale "${MAP_SCALE:-3}")
+cmd+=(--free-decay "${FREE_DECAY:-1.0}")
+cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
+cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
+cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
+
+# Drive
+if [[ "${DRIVE:-1}" == "1" ]]; then
+  cmd+=(--drive)
+  cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
+  cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
+  if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+fi
+
+# Optional streaming
+if [[ -n "${STREAM_IP:-}" ]]; then
+  cmd+=(--stream-ip "${STREAM_IP}")
+  cmd+=(--stream-port "${STREAM_PORT:-5600}")
+  cmd+=(--stream-view "${STREAM_VIEW:-both}")
+fi
+if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
+
+cd "${REPO_ROOT}"
+echo "Running: ${cmd[*]} $*"
+exec "${cmd[@]}" "$@"

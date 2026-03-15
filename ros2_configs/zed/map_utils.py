@@ -147,6 +147,10 @@ class OccupancyMap:
         ratio_ok = occ >= (free * float(min_occ_ratio))
         return (occ >= float(min_occ_count)) & ratio_ok
 
+    def known_mask(self, min_evidence=1.0):
+        evidence = self.free_counts + self.occ_counts + self.hole_counts
+        return evidence >= float(min_evidence)
+
 
 def astar_path(start_rc, goal_rc, obstacle_mask):
     import heapq
@@ -218,3 +222,15 @@ def inflate_mask(mask, radius_cells):
             c2 = min(w, cc + r + 1)
             inflated[r1:r2, c1:c2] = True
     return inflated
+
+
+def clear_mask_circle(mask, center_rc, radius_cells):
+    if center_rc is None or radius_cells <= 0:
+        return mask
+    h, w = mask.shape
+    rr0, cc0 = center_rc
+    rr, cc = np.ogrid[:h, :w]
+    circle = (rr - rr0) * (rr - rr0) + (cc - cc0) * (cc - cc0) <= int(radius_cells) * int(radius_cells)
+    out = mask.copy()
+    out[circle] = False
+    return out

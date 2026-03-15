@@ -69,6 +69,9 @@ def main():
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
+    parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
+    parser.add_argument("--start-clear-radius-m", type=float, default=0.35, help="Clear blocked cells near rover start/blind spot")
     parser.add_argument("--rover-size-m", type=float, default=0.305, help="Rover footprint size (m, square)")
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
@@ -339,9 +342,15 @@ def main():
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                             )
+                            if args.block_unknown:
+                                known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
+                                obs = np.logical_or(obs, np.logical_not(known))
                             radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
+                            clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+                            if clear_cells > 0:
+                                obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
                             path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
                             if path_cells:
                                 last_path_cells = path_cells
@@ -457,16 +466,27 @@ def main():
             if HAS_CV2:
                 img = image_left.get_data()
                 if img is not None:
-                    # ZED may return BGRA; drop alpha for overlay colors
-                    if img.ndim == 3 and img.shape[2] == 4:
-                        img = img[:, :, :3]
+                    # Normalize to BGR (3 channels) across SDK image formats.
+                    if img.ndim == 2:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    elif img.ndim == 3:
+                        if img.shape[2] == 4:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                        elif img.shape[2] == 1:
+                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        elif img.shape[2] > 3:
+                            img = img[:, :, :3]
+                    else:
+                        img = None
+                if img is not None:
                     # Build a ground/obstacle mask at the same stride
                     xyz_full = cloud[::stride, ::stride, :3]
                     valid = np.isfinite(xyz_full).all(axis=2)
-                    dist_full = (a * xyz_full[:, :, 0] + b * xyz_full[:, :, 1] + c * xyz_full[:, :, 2] + d)
+                    dist_num = (a * xyz_full[:, :, 0] + b * xyz_full[:, :, 1] + c * xyz_full[:, :, 2] + d)
                     denom = np.sqrt(a * a + b * b + c * c)
-                    dist_full = dist_full / denom
-                    dist_full[~valid] = np.nan
+                    dist_full = np.full_like(dist_num, np.nan, dtype=np.float32)
+                    if np.any(valid):
+                        dist_full[valid] = (dist_num[valid] / denom).astype(np.float32)
 
                     ground = (np.abs(dist_full) < 0.10) & valid
                     obstacle = (dist_full > 0.10) & valid
