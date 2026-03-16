@@ -44,9 +44,17 @@ if [[ "${TRACKING:-1}" == "1" ]]; then cmd+=(--tracking); fi
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
 cmd+=(--map-scale "${MAP_SCALE:-3}")
 cmd+=(--free-decay "${FREE_DECAY:-1.0}")
+cmd+=(--free-decay-unconfirmed "${FREE_DECAY_UNCONFIRMED:-0.995}")
+cmd+=(--free-decay-confirmed "${FREE_DECAY_CONFIRMED:-1.0}")
+cmd+=(--free-confirm-hits "${FREE_CONFIRM_HITS:-8}")
+cmd+=(--free-confirm-ratio "${FREE_CONFIRM_RATIO:-1.2}")
+cmd+=(--free-downgrade-factor "${FREE_DOWNGRADE_FACTOR:-0.6}")
 cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
 cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
+cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
+cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
+cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
 
 # Drive
 if [[ "${DRIVE:-1}" == "1" ]]; then

@@ -62,6 +62,11 @@ def main():
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
     parser.add_argument("--free-decay", type=float, default=None, help="Free-space decay (defaults to --map-decay)")
+    parser.add_argument("--free-decay-unconfirmed", type=float, default=None, help="Decay for low-confidence free cells")
+    parser.add_argument("--free-decay-confirmed", type=float, default=1.0, help="Decay for confirmed free cells")
+    parser.add_argument("--free-confirm-hits", type=float, default=8.0, help="Hits needed to mark a free cell as confirmed")
+    parser.add_argument("--free-confirm-ratio", type=float, default=1.2, help="Free/obstacle ratio required for confirmed free")
+    parser.add_argument("--free-downgrade-factor", type=float, default=0.6, help="Multiply free confidence when obstacle/hole appears")
     parser.add_argument("--occ-decay", type=float, default=None, help="Obstacle decay (defaults to --map-decay)")
     parser.add_argument("--hole-decay", type=float, default=None, help="Hole decay (defaults to --map-decay)")
     parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
@@ -69,6 +74,7 @@ def main():
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
     parser.add_argument("--start-clear-radius-m", type=float, default=0.35, help="Clear blocked cells near rover start/blind spot")
@@ -88,6 +94,8 @@ def main():
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
+    parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
+    parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
     parser.add_argument("--stream-port", type=int, default=5600, help="UDP port for GStreamer stream")
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
@@ -158,6 +166,11 @@ def main():
         map_z_min=map_z_min,
         decay=args.map_decay,
         free_decay=args.free_decay,
+        free_decay_unconfirmed=args.free_decay_unconfirmed,
+        free_decay_confirmed=args.free_decay_confirmed,
+        free_confirm_hits=args.free_confirm_hits,
+        free_confirm_ratio=args.free_confirm_ratio,
+        free_downgrade_factor=args.free_downgrade_factor,
         occ_decay=args.occ_decay,
         hole_decay=args.hole_decay,
     )
@@ -195,6 +208,11 @@ def main():
     last_a_time = 0.0
     last_d_time = 0.0
     key_hold_timeout = 0.2
+    last_path_plan_time = 0.0
+    last_plane_update_time = 0.0
+    plane_fail_count = 0
+    a, b, c, d = 0.0, 1.0, 0.0, 0.0
+    has_plane = False
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_goal, emergency_stop
@@ -228,40 +246,31 @@ def main():
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
-            # Fit a ground plane using the SDK helper
-            status = zed.find_floor_plane(ground_plane, tracking_reset)
-            if status != sl.ERROR_CODE.SUCCESS:
-                print(f"find_floor_plane failed: {status}")
+            # Fit/update floor plane on an interval to reduce SDK load.
+            now = time.time()
+            should_update_plane = (not has_plane) or ((now - last_plane_update_time) >= args.floor_update_sec)
+            if should_update_plane:
+                status = zed.find_floor_plane(ground_plane, tracking_reset)
+                last_plane_update_time = now
+                if status == sl.ERROR_CODE.SUCCESS:
+                    a0, b0, c0, d0 = segmentation.plane_params(ground_plane)
+                    a0, b0, c0, d0 = segmentation.normalize_plane(a0, b0, c0, d0)
+                    if abs(float(b0)) >= float(args.floor_min_normal_y):
+                        a, b, c, d = a0, b0, c0, d0
+                        has_plane = True
+                        plane_fail_count = 0
+                    else:
+                        plane_fail_count += 1
+                        if plane_fail_count % 10 == 1:
+                            print(f"Rejected floor plane with weak normal.y={b0:.3f}")
+                else:
+                    plane_fail_count += 1
+                    if plane_fail_count % 10 == 1:
+                        print(f"find_floor_plane failed: {status}")
+
+            if not has_plane:
+                # No valid plane yet; wait for a stable floor estimate.
                 continue
-
-            # Plane parameters: ax + by + cz + d = 0
-            def plane_params(plane):
-                # Support multiple ZED SDK Python API versions.
-                if hasattr(plane, "normal"):
-                    n = plane.normal
-                    a0, b0, c0 = n.x, n.y, n.z
-                    d0 = plane.distance if hasattr(plane, "distance") else plane.get_distance()
-                    return a0, b0, c0, d0
-                if hasattr(plane, "get_normal"):
-                    n = plane.get_normal()
-                    # n can be a struct with x/y/z or a sequence
-                    if hasattr(n, "x"):
-                        a0, b0, c0 = n.x, n.y, n.z
-                    else:
-                        a0, b0, c0 = n[0], n[1], n[2]
-                    if hasattr(plane, "get_distance"):
-                        d0 = plane.get_distance()
-                    else:
-                        eq = plane.get_plane_equation()
-                        d0 = eq[3]
-                    return a0, b0, c0, d0
-                if hasattr(plane, "get_plane_equation"):
-                    eq = plane.get_plane_equation()
-                    return eq[0], eq[1], eq[2], eq[3]
-                raise AttributeError("Unsupported Plane API: missing normal/normal getter")
-
-            a, b, c, d = segmentation.plane_params(ground_plane)
-            a, b, c, d = segmentation.normalize_plane(a, b, c, d)
 
             # Sample a downscaled cloud to compute a quick summary
             cloud = point_cloud.get_data()
@@ -337,7 +346,14 @@ def main():
 
                     # Compute/update path to goal (avoid red obstacles only).
                     if goal_cell is not None and cam_row_col is not None:
-                        if cam_row_col != last_start or goal_cell != last_goal:
+                        now = time.time()
+                        should_replan = (
+                            cam_row_col != last_start
+                            or goal_cell != last_goal
+                            or path_cells is None
+                            or (now - last_path_plan_time) >= args.path_replan_sec
+                        )
+                        if should_replan:
                             obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
@@ -356,6 +372,7 @@ def main():
                                 last_path_cells = path_cells
                             last_start = cam_row_col
                             last_goal = goal_cell
+                            last_path_plan_time = now
 
                     # Draw path if available.
                     draw_path = path_cells if path_cells else last_path_cells

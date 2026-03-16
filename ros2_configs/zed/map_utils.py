@@ -12,6 +12,11 @@ class OccupancyMap:
         free_decay=None,
         occ_decay=None,
         hole_decay=None,
+        free_confirm_hits=8.0,
+        free_decay_unconfirmed=None,
+        free_decay_confirmed=1.0,
+        free_downgrade_factor=0.6,
+        free_confirm_ratio=1.2,
     ):
         self.map_res_m = map_res_m
         self.map_width_m = map_width_m
@@ -21,6 +26,13 @@ class OccupancyMap:
         self.free_decay = decay if free_decay is None else free_decay
         self.occ_decay = decay if occ_decay is None else occ_decay
         self.hole_decay = decay if hole_decay is None else hole_decay
+        self.free_confirm_hits = float(free_confirm_hits)
+        self.free_decay_unconfirmed = (
+            self.free_decay if free_decay_unconfirmed is None else float(free_decay_unconfirmed)
+        )
+        self.free_decay_confirmed = float(free_decay_confirmed)
+        self.free_downgrade_factor = float(free_downgrade_factor)
+        self.free_confirm_ratio = float(free_confirm_ratio)
 
         self.x_min = -map_width_m / 2.0
         self.x_max = map_width_m / 2.0
@@ -90,19 +102,35 @@ class OccupancyMap:
         row = self.grid_h - 1 - iz
         col = ix
 
-        self.free_counts *= self.free_decay
+        # Two-speed free-space decay:
+        # - low-confidence free cells decay faster
+        # - confirmed free cells can be held near static (e.g. decay=1.0)
+        confirmed_free = self.free_counts >= self.free_confirm_hits
+        self.free_counts[~confirmed_free] *= self.free_decay_unconfirmed
+        self.free_counts[confirmed_free] *= self.free_decay_confirmed
         self.occ_counts *= self.occ_decay
         self.hole_counts *= self.hole_decay
 
         if np.any(gmask):
-            self.free_counts[row[gmask], col[gmask]] += 1.0
+            np.add.at(self.free_counts, (row[gmask], col[gmask]), 1.0)
         if np.any(omask):
-            self.occ_counts[row[omask], col[omask]] += 1.0
+            occ_r = row[omask]
+            occ_c = col[omask]
+            np.add.at(self.occ_counts, (occ_r, occ_c), 1.0)
+            # New obstacle evidence should degrade prior free-space confidence.
+            if self.free_downgrade_factor < 1.0:
+                uniq_occ = np.unique(np.stack((occ_r, occ_c), axis=1), axis=0)
+                self.free_counts[uniq_occ[:, 0], uniq_occ[:, 1]] *= self.free_downgrade_factor
         if hmask is not None and np.any(hmask):
-            self.hole_counts[row[hmask], col[hmask]] += 1.0
+            hole_r = row[hmask]
+            hole_c = col[hmask]
+            np.add.at(self.hole_counts, (hole_r, hole_c), 1.0)
+            if self.free_downgrade_factor < 1.0:
+                uniq_hole = np.unique(np.stack((hole_r, hole_c), axis=1), axis=0)
+                self.free_counts[uniq_hole[:, 0], uniq_hole[:, 1]] *= self.free_downgrade_factor
 
     def render(self):
-        # Visualize: green = free, red = occupied, blue = holes, dark = unknown.
+        # Visualize: green = free, red = occupied, blue = holes, black = unknown.
         free_vis = np.log1p(self.free_counts)
         occ_vis = np.log1p(self.occ_counts)
         hole_vis = np.log1p(self.hole_counts)
@@ -116,10 +144,8 @@ class OccupancyMap:
         if hmax > 0:
             hole_vis = hole_vis / hmax
         map_vis = np.zeros((self.grid_h, self.grid_w, 3), dtype=np.uint8)
-        # Red channel for occupied, green channel for free.
         map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
         map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
-        # Blue channel for holes.
         map_vis[:, :, 0] = (hole_vis * 255.0).astype(np.uint8)
         return map_vis
 
