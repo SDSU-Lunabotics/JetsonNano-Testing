@@ -215,7 +215,8 @@ def main():
     has_plane = False
 
     def on_map_click(event, x, y, flags, param):
-        nonlocal goal_cell, path_cells, last_goal, emergency_stop
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
+        nonlocal emergency_stop, last_path_plan_time
         if event != cv2.EVENT_LBUTTONDOWN:
             if event == cv2.EVENT_RBUTTONDOWN:
                 emergency_stop = True
@@ -228,7 +229,10 @@ def main():
             return
         goal_cell = (row, col)
         path_cells = None
+        last_path_cells = None
+        last_start = None
         last_goal = None
+        last_path_plan_time = 0.0
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
 
@@ -370,6 +374,10 @@ def main():
                             path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
                             if path_cells:
                                 last_path_cells = path_cells
+                            else:
+                                # Do not keep stale path to an old goal.
+                                last_path_cells = None
+                                print("No path to selected goal yet; retrying...")
                             last_start = cam_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
@@ -403,7 +411,7 @@ def main():
                                 sd.putNumber("Jetson/CommandTurn", manual_turn)
                                 sd.putNumber("Jetson/CommandDuration", 1.0 / max(1.0, args.drive_rate_hz))
                                 sd.putBoolean("Jetson/CommandReady", True)
-                            elif draw_path is None or cam_row_col is None:
+                            elif cam_row_col is None:
                                 sd.putBoolean("Jetson/AutomationEnabled", False)
                                 sd.putNumber("Jetson/CommandForward", 0.0)
                                 sd.putNumber("Jetson/CommandTurn", 0.0)
@@ -411,17 +419,35 @@ def main():
                                 sd.putBoolean("Jetson/CommandReady", True)
                             else:
                                 # Pick a waypoint a few steps ahead.
-                                wp_index = min(5, len(draw_path) - 1)
-                                wp_rc = draw_path[wp_index]
-                                wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
-                                if wp_world is None:
+                                if draw_path is not None and len(draw_path) > 0:
+                                    wp_index = min(5, len(draw_path) - 1)
+                                    wp_rc = draw_path[wp_index]
+                                    wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
+                                    if wp_world is None:
+                                        continue
+                                    tx, tz = wp_world
+                                elif goal_cell is not None:
+                                    # Fallback: drive directly toward clicked goal if path is not ready yet.
+                                    goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+                                    if goal_world_fallback is None:
+                                        sd.putBoolean("Jetson/AutomationEnabled", False)
+                                        sd.putNumber("Jetson/CommandForward", 0.0)
+                                        sd.putNumber("Jetson/CommandTurn", 0.0)
+                                        sd.putNumber("Jetson/CommandDuration", 0.1)
+                                        sd.putBoolean("Jetson/CommandReady", True)
+                                        continue
+                                    tx, tz = goal_world_fallback
+                                else:
+                                    sd.putBoolean("Jetson/AutomationEnabled", False)
+                                    sd.putNumber("Jetson/CommandForward", 0.0)
+                                    sd.putNumber("Jetson/CommandTurn", 0.0)
+                                    sd.putNumber("Jetson/CommandDuration", 0.1)
+                                    sd.putBoolean("Jetson/CommandReady", True)
                                     continue
-                                tx, tz = wp_world
                                 # Current pose in world.
                                 cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
                                 dx = tx - cx
                                 dz = tz - cz
-                                dist = math.hypot(dx, dz)
 
                                 # Stop if close enough to goal.
                                 goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
