@@ -208,6 +208,9 @@ def main():
     last_a_time = 0.0
     last_d_time = 0.0
     key_hold_timeout = 0.2
+    nt_last_conn_log = 0.0
+    nt_ready_high = False
+    nt_ready_clear_time = 0.0
     last_path_plan_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
@@ -235,6 +238,19 @@ def main():
         last_path_plan_time = 0.0
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
+
+    def send_nt_command(enabled, fwd, turn, duration):
+        nonlocal nt_ready_high, nt_ready_clear_time
+        if sd is None:
+            return
+        sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
+        sd.putNumber("Jetson/CommandForward", float(fwd))
+        sd.putNumber("Jetson/CommandTurn", float(turn))
+        sd.putNumber("Jetson/CommandDuration", float(duration))
+        # Pulse CommandReady high, then clear shortly after.
+        sd.putBoolean("Jetson/CommandReady", True)
+        nt_ready_high = True
+        nt_ready_clear_time = time.time() + 0.03
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -397,26 +413,28 @@ def main():
                     # Drive output to RoboRIO (optional).
                     if sd is not None:
                         now = time.time()
+                        # Clear ready pulse to create edges like working test scripts.
+                        if nt_ready_high and now >= nt_ready_clear_time:
+                            sd.putBoolean("Jetson/CommandReady", False)
+                            nt_ready_high = False
+                        # Periodic connection status log.
+                        if (now - nt_last_conn_log) >= 2.0:
+                            connected = NetworkTables.isConnected()
+                            print(f"NT connected={connected} target={args.roborio_ip}")
+                            nt_last_conn_log = now
                         if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
                             last_drive_send = now
                             if emergency_stop:
-                                sd.putBoolean("Jetson/AutomationEnabled", False)
-                                sd.putNumber("Jetson/CommandForward", 0.0)
-                                sd.putNumber("Jetson/CommandTurn", 0.0)
-                                sd.putNumber("Jetson/CommandDuration", 0.1)
-                                sd.putBoolean("Jetson/CommandReady", True)
+                                send_nt_command(False, 0.0, 0.0, 0.1)
                             elif manual_mode:
-                                sd.putBoolean("Jetson/AutomationEnabled", True)
-                                sd.putNumber("Jetson/CommandForward", manual_fwd)
-                                sd.putNumber("Jetson/CommandTurn", manual_turn)
-                                sd.putNumber("Jetson/CommandDuration", 1.0 / max(1.0, args.drive_rate_hz))
-                                sd.putBoolean("Jetson/CommandReady", True)
+                                send_nt_command(
+                                    True,
+                                    manual_fwd,
+                                    manual_turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif cam_row_col is None:
-                                sd.putBoolean("Jetson/AutomationEnabled", False)
-                                sd.putNumber("Jetson/CommandForward", 0.0)
-                                sd.putNumber("Jetson/CommandTurn", 0.0)
-                                sd.putNumber("Jetson/CommandDuration", 0.1)
-                                sd.putBoolean("Jetson/CommandReady", True)
+                                send_nt_command(False, 0.0, 0.0, 0.1)
                             else:
                                 # Pick a waypoint a few steps ahead.
                                 if draw_path is not None and len(draw_path) > 0:
@@ -430,19 +448,11 @@ def main():
                                     # Fallback: drive directly toward clicked goal if path is not ready yet.
                                     goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
                                     if goal_world_fallback is None:
-                                        sd.putBoolean("Jetson/AutomationEnabled", False)
-                                        sd.putNumber("Jetson/CommandForward", 0.0)
-                                        sd.putNumber("Jetson/CommandTurn", 0.0)
-                                        sd.putNumber("Jetson/CommandDuration", 0.1)
-                                        sd.putBoolean("Jetson/CommandReady", True)
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
                                     tx, tz = goal_world_fallback
                                 else:
-                                    sd.putBoolean("Jetson/AutomationEnabled", False)
-                                    sd.putNumber("Jetson/CommandForward", 0.0)
-                                    sd.putNumber("Jetson/CommandTurn", 0.0)
-                                    sd.putNumber("Jetson/CommandDuration", 0.1)
-                                    sd.putBoolean("Jetson/CommandReady", True)
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
                                 # Current pose in world.
                                 cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
@@ -454,11 +464,7 @@ def main():
                                 if goal_world is not None:
                                     gx, gz = goal_world
                                     if math.hypot(gx - cx, gz - cz) <= args.drive_goal_tol_m:
-                                        sd.putBoolean("Jetson/AutomationEnabled", False)
-                                        sd.putNumber("Jetson/CommandForward", 0.0)
-                                        sd.putNumber("Jetson/CommandTurn", 0.0)
-                                        sd.putNumber("Jetson/CommandDuration", 0.1)
-                                        sd.putBoolean("Jetson/CommandReady", True)
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
                                 # Heading error from camera forward axis.
@@ -481,11 +487,12 @@ def main():
                                     turn = max(-1.0, min(1.0, args.drive_turn_k * err))
                                 fwd = max(0.0, min(1.0, args.drive_speed))
 
-                                sd.putBoolean("Jetson/AutomationEnabled", True)
-                                sd.putNumber("Jetson/CommandForward", fwd)
-                                sd.putNumber("Jetson/CommandTurn", turn)
-                                sd.putNumber("Jetson/CommandDuration", 1.0 / max(1.0, args.drive_rate_hz))
-                                sd.putBoolean("Jetson/CommandReady", True)
+                                send_nt_command(
+                                    True,
+                                    fwd,
+                                    turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                     # Periodically save persistent map to disk.
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
