@@ -30,6 +30,9 @@ DATA_KEYS = {
     "Jetson/TurnSpeed": "number",
     "Jetson/LedOverride": "boolean",
     "Jetson/LedState": "boolean",
+    "Jetson/EStop": "boolean",
+    "Jetson/ExcavatorEnabled": "boolean",
+    "Jetson/ConveyorEnabled": "boolean",
     "NavX/YawDeg": "number",
     "LEDEnabled": "boolean",
     "LEDState": "boolean",
@@ -61,12 +64,18 @@ DATA_KEYS = {
 WRITE_KEYS = {
     "Jetson/LedOverride": "boolean",
     "Jetson/LedState": "boolean",
+    "Jetson/EStop": "boolean",
+    "Jetson/ExcavatorEnabled": "boolean",
+    "Jetson/ConveyorEnabled": "boolean",
     "Jetson/AutomationEnabled": "boolean",
     "Jetson/CommandReady": "boolean",
     "Jetson/CommandDuration": "number",
     "Jetson/CommandForward": "number",
     "Jetson/CommandTurn": "number",
     "Jetson/Command": "string",
+    "Jetson/DriveForward": "number",
+    "Jetson/DriveTurn": "number",
+    "Jetson/DriveTimestamp": "number",
     "Jetson/Speed": "number",
     "Jetson/TurnSpeed": "number",
 }
@@ -160,6 +169,49 @@ def torque_warnings(values):
             )
 
     return warnings
+
+
+def _float_arg(data, key, default):
+    try:
+        return float(data.get(key, default))
+    except Exception:
+        return float(default)
+
+
+def _bool_arg(data, key, default):
+    return parse_value("boolean", data.get(key, default))
+
+
+def stop_all_motion():
+    write_value("Jetson/AutomationEnabled", "boolean", False)
+    write_value("Jetson/CommandForward", "number", 0.0)
+    write_value("Jetson/CommandTurn", "number", 0.0)
+    write_value("Jetson/CommandDuration", "number", 0.0)
+    write_value("Jetson/CommandReady", "boolean", False)
+    write_value("Jetson/Command", "string", "")
+
+    write_value("Jetson/DriveForward", "number", 0.0)
+    write_value("Jetson/DriveTurn", "number", 0.0)
+    write_value("Jetson/DriveTimestamp", "number", now_ms())
+
+
+def run_motion_command(duration, speed, turn=0.0, command="drive_forward"):
+    write_value("Jetson/AutomationEnabled", "boolean", True)
+    write_value("Jetson/Command", "string", command)
+    write_value("Jetson/CommandForward", "number", speed)
+    write_value("Jetson/CommandTurn", "number", turn)
+    write_value("Jetson/CommandDuration", "number", duration)
+    write_value("Jetson/CommandReady", "boolean", True)
+
+    write_value("Jetson/DriveForward", "number", speed)
+    write_value("Jetson/DriveTurn", "number", turn)
+    write_value("Jetson/DriveTimestamp", "number", now_ms())
+
+    time.sleep(0.1)
+    write_value("Jetson/CommandReady", "boolean", False)
+
+    time.sleep(max(0.0, duration))
+    stop_all_motion()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -262,8 +314,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/led":
 
-            led_state = bool(data.get("state", False))
-            override = bool(data.get("override", True))
+            led_state = _bool_arg(data, "state", False)
+            override = _bool_arg(data, "override", True)
 
             if not wait_for_connection():
                 self._send_json(
@@ -296,6 +348,165 @@ class Handler(BaseHTTPRequestHandler):
                     "override": override,
                 },
             )
+            return
+
+        if self.path == "/drive/forward":
+            duration = _float_arg(data, "duration", 3.0)
+            speed = _float_arg(data, "speed", 0.6)
+
+            if duration <= 0.0:
+                self._send_json(400, {"status": "error", "message": "duration must be > 0"})
+                return
+
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+
+            threading.Thread(
+                target=run_motion_command,
+                args=(duration, speed, 0.0, "drive_forward"),
+                daemon=True,
+            ).start()
+
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "timestamp_ms": now_ms(),
+                    "action": "drive_forward",
+                    "duration": duration,
+                    "speed": speed,
+                },
+            )
+            return
+
+        if self.path == "/automation/start":
+            duration = _float_arg(data, "duration", 3.0)
+            speed = _float_arg(data, "speed", 0.6)
+            turn = _float_arg(data, "turn", 0.0)
+            command = str(data.get("command", "drive_forward"))
+
+            if duration <= 0.0:
+                self._send_json(400, {"status": "error", "message": "duration must be > 0"})
+                return
+
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+
+            threading.Thread(
+                target=run_motion_command,
+                args=(duration, speed, turn, command),
+                daemon=True,
+            ).start()
+
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "timestamp_ms": now_ms(),
+                    "action": "automation_start",
+                    "command": command,
+                    "duration": duration,
+                    "speed": speed,
+                    "turn": turn,
+                },
+            )
+            return
+
+        if self.path == "/automation/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+
+            stop_all_motion()
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "timestamp_ms": now_ms(),
+                    "action": "automation_stop",
+                },
+            )
+            return
+
+        if self.path == "/control/estop":
+            engage = _bool_arg(data, "engage", True)
+
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+
+            write_value("Jetson/EStop", "boolean", engage)
+            if engage:
+                stop_all_motion()
+                write_value("Jetson/ExcavatorEnabled", "boolean", False)
+                write_value("Jetson/ConveyorEnabled", "boolean", False)
+
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "timestamp_ms": now_ms(),
+                    "estop": engage,
+                },
+            )
+            return
+
+        if self.path == "/actuators/excavator/start":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/ExcavatorEnabled", "boolean", True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "excavator": True})
+            return
+
+        if self.path == "/actuators/excavator/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/ExcavatorEnabled", "boolean", False)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "excavator": False})
+            return
+
+        if self.path == "/actuators/conveyor/start":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/ConveyorEnabled", "boolean", True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": True})
+            return
+
+        if self.path == "/actuators/conveyor/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/ConveyorEnabled", "boolean", False)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": False})
             return
 
         self._send_json(404, {"status": "error", "message": "Not found"})
