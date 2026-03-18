@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 
 CameraMode = Literal["manual", "snapshot"]
+CameraBackend = Literal["auto", "zed", "opencv"]
 
 
 class CameraModeRequest(BaseModel):
@@ -19,5 +20,10 @@ class CameraModeResponse(BaseModel):
 
 
 class CameraStatus(BaseModel):
+    connected: bool
+    backend: Optional[CameraBackend] = None
+    streaming: bool = False
     mode: CameraMode
     snapshot_interval_ms: Optional[int] = None
+    last_frame_ms: Optional[int] = None
+    error: Optional[str] = None
