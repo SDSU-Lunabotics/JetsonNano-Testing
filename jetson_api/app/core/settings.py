@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     roborio_ip: str = "10.0.9.2"
     camera_host: str = "10.0.8.102" # Update with actual IPs
     lidar_host: str = "10.0.8.103" # Update with actual IPs
+    camera_backend: str = "auto"
+    camera_device_index: int = 0
+    camera_status_ttl_ms: int = 2000
     
     max_latency_ms: float = 200.0 # Update with acceptable latency threshold
     max_packet_loss_pct: float = 5.0 # Update with acceptable packet loss threshold
