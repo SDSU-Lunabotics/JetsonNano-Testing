@@ -36,6 +36,7 @@ class TelemetryService:
 
     def get_status(self) -> StatusResponse:
         now = now_ms()
+        self._jetson_last_seen_ms = now
 
         if roborio_bridge_service.is_connected():
             self._roborio_last_seen_ms = now
