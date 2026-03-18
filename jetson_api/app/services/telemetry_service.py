@@ -8,6 +8,7 @@ from app.services.network_service import network_service
 from app.services.battery_service import battery_service
 from app.services.wireless_service import wireless_service
 from app.services.roborio_bridge_service import roborio_bridge_service
+from app.services.camera_service import camera_service
 
 
 class TelemetryService:
@@ -64,6 +65,7 @@ class TelemetryService:
             link=network_service.get_link_stats(),
             battery=battery_service.get_battery_status(),
             control=control,
+            camera=camera_service.get_status(),
             wireless=wireless_service.get_status(),
         )
 

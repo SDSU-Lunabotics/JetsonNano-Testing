@@ -16,3 +16,8 @@ class CameraModeResponse(BaseModel):
     ok: bool
     applied: CameraModeRequest
     timestamp_ms: int
+
+
+class CameraStatus(BaseModel):
+    mode: CameraMode
+    snapshot_interval_ms: Optional[int] = None
