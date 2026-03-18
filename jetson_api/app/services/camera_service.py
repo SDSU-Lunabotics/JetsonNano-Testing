@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Optional, Tuple
 
-from app.schemas.camera import CameraMode, CameraModeRequest, CameraModeResponse
+from app.schemas.camera import CameraMode, CameraModeRequest, CameraModeResponse, CameraStatus
 
 
 def _now_ms() -> int:
@@ -45,6 +45,12 @@ class CameraService:
             ok=True,
             applied=applied,
             timestamp_ms=_now_ms(),
+        )
+
+    def get_status(self) -> CameraStatus:
+        return CameraStatus(
+            mode=self._mode,
+            snapshot_interval_ms=self._snapshot_interval_ms,
         )
 
     def get_snapshot_bytes(self) -> bytes:
