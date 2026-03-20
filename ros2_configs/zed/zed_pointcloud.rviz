@@ -1,0 +1,46 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+- Class: rviz_common/Selection
+  Name: Selection
+- Class: rviz_common/Tool Properties
+  Name: Tool Properties
+- Class: rviz_common/Views
+  Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+  - Class: rviz_default_plugins/Grid
+    Name: Grid
+    Enabled: true
+    Cell Size: 1
+    Plane: XY
+    Color: 160; 160; 160
+  - Class: rviz_default_plugins/PointCloud2
+    Name: ZED PointCloud
+    Enabled: true
+    Topic: /zed/pointcloud
+    Queue Size: 5
+    Style: Points
+    Size (Pixels): 3
+    Color Transformer: Intensity
+    Autocompute Intensity Bounds: true
+  Global Options:
+    Fixed Frame: zed_camera
+    Background Color: 48; 48; 48
+  Tools:
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/FocusCamera
+  - Class: rviz_default_plugins/Measure
+  - Class: rviz_default_plugins/SetInitialPose
+  - Class: rviz_default_plugins/SetGoal
+  - Class: rviz_default_plugins/PublishPoint
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 5
+      Focal Point: 0; 0; 0
+      Pitch: 0.785
+      Yaw: 0.785

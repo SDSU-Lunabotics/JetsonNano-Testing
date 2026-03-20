@@ -7,6 +7,9 @@ It is safe to run without the camera connected (it will fail to open and exit).
 
 import sys
 import time
+import argparse
+import os
+import math
 import numpy as np
 
 try:
@@ -22,18 +25,123 @@ try:
 except Exception:
     HAS_CV2 = False
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+import rviz_utils
+import ros2_utils
+import segmentation
+import map_utils
+import heatmap_utils
+import zed_utils
+import viewer_utils
+import stream_utils
+
+try:
+    from networktables import NetworkTables
+    HAS_NT = True
+except Exception:
+    HAS_NT = False
+
 
 def main():
-    init = sl.InitParameters()
-    init.camera_resolution = sl.RESOLUTION.HD720
-    init.depth_mode = sl.DEPTH_MODE.PERFORMANCE
-    init.coordinate_units = sl.UNIT.METER
-    init.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
+    parser = argparse.ArgumentParser(description="ZED 2i ground + wall segmentation")
+    parser.add_argument("--rviz", action="store_true", help="Launch rviz2 on startup")
+    parser.add_argument("--rviz-config", default=None, help="Path to an RViz2 config file")
+    parser.add_argument("--ros2", action="store_true", help="Publish a PointCloud2 topic over ROS2")
+    parser.add_argument("--frame", default="zed_camera", help="Frame ID for ROS2 point cloud")
+    parser.add_argument("--tracking", action="store_true", help="Enable ZED positional tracking")
+    parser.add_argument("--map-width-m", type=float, default=20.0, help="Top-down map width in meters (X axis)")
+    parser.add_argument("--map-height-m", type=float, default=20.0, help="Top-down map height in meters (Z axis)")
+    parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
+    parser.add_argument("--map-z-min", type=float, default=0.0, help="Minimum Z (forward) bound for map")
+    parser.add_argument("--map-scale", type=int, default=3, help="Upscale factor for map display window")
+    parser.add_argument("--map-center", action="store_true", help="Center map on Z=0 (start camera in middle)")
+    parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
+    parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
+    parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
+    parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
+    parser.add_argument("--free-decay", type=float, default=None, help="Free-space decay (defaults to --map-decay)")
+    parser.add_argument("--free-decay-unconfirmed", type=float, default=None, help="Decay for low-confidence free cells")
+    parser.add_argument("--free-decay-confirmed", type=float, default=1.0, help="Decay for confirmed free cells")
+    parser.add_argument("--free-confirm-hits", type=float, default=8.0, help="Hits needed to mark a free cell as confirmed")
+    parser.add_argument("--free-confirm-ratio", type=float, default=1.2, help="Free/obstacle ratio required for confirmed free")
+    parser.add_argument("--free-downgrade-factor", type=float, default=0.6, help="Multiply free confidence when obstacle/hole appears")
+    parser.add_argument("--occ-decay", type=float, default=None, help="Obstacle decay (defaults to --map-decay)")
+    parser.add_argument("--hole-decay", type=float, default=None, help="Hole decay (defaults to --map-decay)")
+    parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
+    parser.add_argument("--heatmap", action="store_true", help="Enable heatmap view for map confidence/risk")
+    parser.add_argument(
+        "--heatmap-mode",
+        default="risk",
+        choices=["risk", "obstacle", "hole", "free", "evidence"],
+        help="Heatmap mode",
+    )
+    parser.add_argument("--heatmap-alpha", type=float, default=0.35, help="Heatmap overlay alpha (0-1)")
+    parser.add_argument(
+        "--heatmap-min-evidence",
+        type=float,
+        default=1.0,
+        help="Min evidence needed before a heatmap cell is shown",
+    )
+    parser.add_argument(
+        "--heatmap-window",
+        action="store_true",
+        help="Show heatmap in a separate window instead of overlaying on map",
+    )
+    parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
+    parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
+    parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
+    parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
+    parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
+    parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
+    parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
+    parser.add_argument("--start-clear-radius-m", type=float, default=0.35, help="Clear blocked cells near rover start/blind spot")
+    parser.add_argument("--rover-size-m", type=float, default=0.305, help="Rover footprint size (m, square)")
+    parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
+    parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
+    parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
+    parser.add_argument("--spatial-save-path", default=None, help="Optional path to save spatial mesh (.obj)")
+    parser.add_argument("--spatial-save-every", type=float, default=10.0, help="Seconds between spatial map saves")
+    parser.add_argument("--spatial-viewer", action="store_true", help="Show live Open3D mesh viewer")
+    parser.add_argument("--spatial-filter", default="none", help="Mesh filter: none|low|medium|high")
+    parser.add_argument("--drive", action="store_true", help="Enable RoboRIO driving commands")
+    parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
+    parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
+    parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
+    parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
+    parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
+    parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
+    parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
+    parser.add_argument(
+        "--drive-ready-pulse-sec",
+        type=float,
+        default=0.10,
+        help="How long CommandReady stays high per command pulse",
+    )
+    parser.add_argument("--drive-debug", action="store_true", help="Print outgoing NT drive commands")
+    parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
+    parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
+    parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
+    parser.add_argument("--stream-port", type=int, default=5600, help="UDP port for GStreamer stream")
+    parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
+    parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
+    parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
+    args = parser.parse_args()
 
-    zed = sl.Camera()
-    err = zed.open(init)
-    if err != sl.ERROR_CODE.SUCCESS:
-        print(f"Failed to open ZED camera: {err}")
+    if args.rviz_config is None:
+        args.rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
+    rviz_utils.launch_rviz(args.rviz, args.rviz_config)
+
+    node, pc_pub, pc_fields = ros2_utils.setup_ros2(args.ros2)
+
+    try:
+        zed = zed_utils.open_zed_camera(sl)
+    except RuntimeError as exc:
+        print(str(exc))
         sys.exit(1)
 
     runtime = sl.RuntimeParameters()
@@ -42,50 +150,187 @@ def main():
     image_left = sl.Mat()
     ground_plane = sl.Plane()
     tracking_reset = sl.Transform()
+    tracking_enabled = False
+    pose_warned = False
+    pose = None
+    if args.tracking:
+        tracking_enabled, pose = zed_utils.enable_tracking(zed, sl)
+    spatial_enabled = False
+    spatial_mesh = None
+    last_spatial_save = time.time()
+    if args.spatial_mapping:
+        spatial_enabled, spatial_mesh = zed_utils.enable_spatial_mapping(
+            zed,
+            sl,
+            resolution=args.spatial_res,
+            mapping_range=args.spatial_range,
+        )
+    mesh_viewer = None
+    if args.spatial_viewer:
+        if not viewer_utils.HAS_OPEN3D:
+            print("Open3D not available; mesh viewer disabled.")
+        elif not args.spatial_save_path:
+            print("Mesh viewer requires --spatial-save-path to load updates.")
+        else:
+            mesh_viewer = viewer_utils.MeshViewer()
+            if not mesh_viewer.open():
+                mesh_viewer = None
 
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
         print("  sudo apt install -y python3-opencv")
 
     print("Running. Press Ctrl+C to exit.")
+    # Simple 2D occupancy map settings (XZ plane, Y up).
+    # X: left/right, Z: forward. Units: meters.
+    map_z_min = args.map_z_min
+    if args.map_center:
+        map_z_min = -args.map_height_m / 2.0
+
+    occ_map = map_utils.OccupancyMap(
+        map_res_m=args.map_res_m,
+        map_width_m=args.map_width_m,
+        map_height_m=args.map_height_m,
+        map_z_min=map_z_min,
+        decay=args.map_decay,
+        free_decay=args.free_decay,
+        free_decay_unconfirmed=args.free_decay_unconfirmed,
+        free_decay_confirmed=args.free_decay_confirmed,
+        free_confirm_hits=args.free_confirm_hits,
+        free_confirm_ratio=args.free_confirm_ratio,
+        free_downgrade_factor=args.free_downgrade_factor,
+        occ_decay=args.occ_decay,
+        hole_decay=args.hole_decay,
+    )
+    last_save = time.time()
+
+    if args.map_load and os.path.exists(args.map_save_path):
+        try:
+            ok, msg = occ_map.load(args.map_save_path)
+            print(f"{msg} ({args.map_save_path})" if ok else msg)
+        except Exception as exc:
+            print(f"Failed to load map ({args.map_save_path}): {exc}")
+
+    sd = None
+    if args.drive:
+        if not HAS_NT:
+            print("NetworkTables not available; disable --drive or install pynetworktables.")
+        else:
+            NetworkTables.initialize(server=args.roborio_ip)
+            sd = NetworkTables.getTable("SmartDashboard")
+            print(f"Drive enabled: NetworkTables to {args.roborio_ip}")
+
+    goal_cell = None
+    path_cells = None
+    last_path_cells = None
+    last_start = None
+    last_goal = None
+    map_window_ready = False
+    emergency_stop = False
+    last_drive_send = 0.0
+    manual_fwd = 0.0
+    manual_turn = 0.0
+    manual_mode = False
+    last_w_time = 0.0
+    last_s_time = 0.0
+    last_a_time = 0.0
+    last_d_time = 0.0
+    key_hold_timeout = 0.2
+    nt_last_conn_log = 0.0
+    nt_ready_high = False
+    nt_ready_clear_time = 0.0
+    last_drive_debug_time = 0.0
+    last_path_plan_time = 0.0
+    last_plane_update_time = 0.0
+    plane_fail_count = 0
+    a, b, c, d = 0.0, 1.0, 0.0, 0.0
+    has_plane = False
+
+    def on_map_click(event, x, y, flags, param):
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
+        nonlocal emergency_stop, last_path_plan_time
+        if event != cv2.EVENT_LBUTTONDOWN:
+            if event == cv2.EVENT_RBUTTONDOWN:
+                emergency_stop = True
+                print("EMERGENCY STOP")
+            return
+        scale = max(1, int(args.map_scale))
+        row = int(y / scale)
+        col = int(x / scale)
+        if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
+            return
+        goal_cell = (row, col)
+        path_cells = None
+        last_path_cells = None
+        last_start = None
+        last_goal = None
+        last_path_plan_time = 0.0
+        emergency_stop = False
+        print(f"New goal set at row={row}, col={col}")
+
+    def send_nt_command(enabled, fwd, turn, duration):
+        nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
+        if sd is None:
+            return
+        sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
+        sd.putNumber("Jetson/CommandForward", float(fwd))
+        sd.putNumber("Jetson/CommandTurn", float(turn))
+        sd.putNumber("Jetson/CommandDuration", float(duration))
+        if not enabled:
+            # Clear string-based legacy command channels when auto-drive is off.
+            sd.putString("Jetson/Command", "")
+        # Pulse CommandReady high, then clear shortly after.
+        sd.putBoolean("Jetson/CommandReady", True)
+        nt_ready_high = True
+        nt_ready_clear_time = time.time() + max(0.01, float(args.drive_ready_pulse_sec))
+        if args.drive_debug:
+            now = time.time()
+            if (now - last_drive_debug_time) >= 0.2:
+                print(
+                    f"NT cmd enabled={bool(enabled)} fwd={float(fwd):+.2f} "
+                    f"turn={float(turn):+.2f} dur={float(duration):.2f}"
+                )
+                last_drive_debug_time = now
+
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+            # Update camera pose (world frame) if tracking is enabled.
+            if tracking_enabled:
+                R_world_cam, t_world_cam, pose_warned = zed_utils.get_world_transform(
+                    zed, sl, pose, pose_warned
+                )
+            else:
+                R_world_cam = np.eye(3, dtype=np.float32)
+                t_world_cam = np.zeros(3, dtype=np.float32)
+
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
-            # Fit a ground plane using the SDK helper
-            status = zed.find_floor_plane(ground_plane, tracking_reset)
-            if status != sl.ERROR_CODE.SUCCESS:
-                print(f"find_floor_plane failed: {status}")
+            # Fit/update floor plane on an interval to reduce SDK load.
+            now = time.time()
+            should_update_plane = (not has_plane) or ((now - last_plane_update_time) >= args.floor_update_sec)
+            if should_update_plane:
+                status = zed.find_floor_plane(ground_plane, tracking_reset)
+                last_plane_update_time = now
+                if status == sl.ERROR_CODE.SUCCESS:
+                    a0, b0, c0, d0 = segmentation.plane_params(ground_plane)
+                    a0, b0, c0, d0 = segmentation.normalize_plane(a0, b0, c0, d0)
+                    if abs(float(b0)) >= float(args.floor_min_normal_y):
+                        a, b, c, d = a0, b0, c0, d0
+                        has_plane = True
+                        plane_fail_count = 0
+                    else:
+                        plane_fail_count += 1
+                        if plane_fail_count % 10 == 1:
+                            print(f"Rejected floor plane with weak normal.y={b0:.3f}")
+                else:
+                    plane_fail_count += 1
+                    if plane_fail_count % 10 == 1:
+                        print(f"find_floor_plane failed: {status}")
+
+            if not has_plane:
+                # No valid plane yet; wait for a stable floor estimate.
                 continue
-
-            # Plane parameters: ax + by + cz + d = 0
-            def plane_params(plane):
-                # Support multiple ZED SDK Python API versions.
-                if hasattr(plane, "normal"):
-                    n = plane.normal
-                    a0, b0, c0 = n.x, n.y, n.z
-                    d0 = plane.distance if hasattr(plane, "distance") else plane.get_distance()
-                    return a0, b0, c0, d0
-                if hasattr(plane, "get_normal"):
-                    n = plane.get_normal()
-                    # n can be a struct with x/y/z or a sequence
-                    if hasattr(n, "x"):
-                        a0, b0, c0 = n.x, n.y, n.z
-                    else:
-                        a0, b0, c0 = n[0], n[1], n[2]
-                    if hasattr(plane, "get_distance"):
-                        d0 = plane.get_distance()
-                    else:
-                        eq = plane.get_plane_equation()
-                        d0 = eq[3]
-                    return a0, b0, c0, d0
-                if hasattr(plane, "get_plane_equation"):
-                    eq = plane.get_plane_equation()
-                    return eq[0], eq[1], eq[2], eq[3]
-                raise AttributeError("Unsupported Plane API: missing normal/normal getter")
-
-            a, b, c, d = plane_params(ground_plane)
 
             # Sample a downscaled cloud to compute a quick summary
             cloud = point_cloud.get_data()
@@ -101,28 +346,279 @@ def main():
                 continue
 
             # Distance to plane (signed)
-            dist = (a * xyz[:, 0] + b * xyz[:, 1] + c * xyz[:, 2] + d) / np.sqrt(a * a + b * b + c * c)
-
-            # Ground threshold: within 10 cm of plane
-            ground_mask = np.abs(dist) < 0.10
+            dist, ground_mask, obstacle_mask = segmentation.classify_points(
+                xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
+            )
+            if args.disable_holes:
+                hole_mask = np.zeros(dist.shape, dtype=bool)
+            else:
+                hole_mask = dist < -args.hole_thresh_m
             ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
 
-            # Wall/obstacle: above ground by > 10 cm
-            obstacle_mask = dist > 0.10
             obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
+            hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
 
-            print(f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% | Points {xyz.shape[0]}")
+            print(
+                f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "
+                f"| Holes {hole_pct:5.1f}% | Points {xyz.shape[0]}"
+            )
+
+            # Publish point cloud to ROS2 (optional)
+            ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
+
+            # Build a simple 2D top-down occupancy map (XZ) from ground/obstacle points.
+            if HAS_CV2:
+                map_vis = None
+                heatmap_vis = None
+                if xyz.size > 0:
+                    # Transform to world frame if tracking is enabled.
+                    xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
+                    x = xyz_world[:, 0]
+                    z = xyz_world[:, 2]
+                    occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
+                    map_vis = occ_map.render()
+                    # Draw camera position marker (blue square).
+                    cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
+                    if cam_row_col is not None:
+                        r0, c0 = cam_row_col
+                        half = max(1, int(args.map_camera_size) // 2)
+                        r1 = max(0, r0 - half)
+                        r2 = min(occ_map.grid_h, r0 + half + 1)
+                        c1 = max(0, c0 - half)
+                        c2 = min(occ_map.grid_w, c0 + half + 1)
+                        map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
+                        # Draw heading triangle (blue) if tracking is enabled.
+                        if tracking_enabled and HAS_CV2:
+                            # Camera forward axis in world frame (Z in camera frame).
+                            forward = R_world_cam[:, 2]
+                            fx, fz = float(forward[0]), float(forward[2])
+                            ang = np.arctan2(fz, fx) + np.pi
+                            size = max(3, int(args.map_camera_size) * 2)
+                            tip_r = int(r0 - np.sin(ang) * size)
+                            tip_c = int(c0 + np.cos(ang) * size)
+                            left_ang = ang + 2.5
+                            right_ang = ang - 2.5
+                            base_r1 = int(r0 - np.sin(left_ang) * (size * 0.6))
+                            base_c1 = int(c0 + np.cos(left_ang) * (size * 0.6))
+                            base_r2 = int(r0 - np.sin(right_ang) * (size * 0.6))
+                            base_c2 = int(c0 + np.cos(right_ang) * (size * 0.6))
+                            tri = np.array(
+                                [[tip_c, tip_r], [base_c1, base_r1], [base_c2, base_r2]],
+                                dtype=np.int32,
+                            )
+                            cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+
+                    # Compute/update path to goal (avoid red obstacles only).
+                    if goal_cell is not None and cam_row_col is not None:
+                        now = time.time()
+                        should_replan = (
+                            cam_row_col != last_start
+                            or goal_cell != last_goal
+                            or path_cells is None
+                            or (now - last_path_plan_time) >= args.path_replan_sec
+                        )
+                        if should_replan:
+                            obs = occ_map.obstacle_mask(
+                                min_occ_count=args.path_avoid_occ_min,
+                                min_occ_ratio=args.path_avoid_occ_ratio,
+                            )
+                            if args.block_unknown:
+                                known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
+                                obs = np.logical_or(obs, np.logical_not(known))
+                            radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
+                            if radius_cells > 0:
+                                obs = map_utils.inflate_mask(obs, radius_cells)
+                            clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+                            if clear_cells > 0:
+                                obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
+                            path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
+                            if path_cells:
+                                last_path_cells = path_cells
+                            else:
+                                # Do not keep stale path to an old goal.
+                                last_path_cells = None
+                                print("No path to selected goal yet; retrying...")
+                            last_start = cam_row_col
+                            last_goal = goal_cell
+                            last_path_plan_time = now
+
+                    # Draw path if available.
+                    draw_path = path_cells if path_cells else last_path_cells
+                    if draw_path:
+                        pts = np.array([[c, r] for r, c in draw_path], dtype=np.int32)
+                        if pts.shape[0] >= 2:
+                            cv2.polylines(map_vis, [pts], False, (255, 255, 0), 1)
+                    # Draw goal marker.
+                    if goal_cell is not None:
+                        gr, gc = goal_cell
+                        if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
+                            cv2.circle(map_vis, (gc, gr), 2, (0, 255, 255), -1)
+
+                    if args.heatmap:
+                        heatmap_vis = heatmap_utils.render_heatmap(
+                            occ_map,
+                            mode=args.heatmap_mode,
+                            min_evidence=args.heatmap_min_evidence,
+                        )
+                        if args.heatmap_window:
+                            # Keep normal map colors untouched when showing separate heatmap window.
+                            pass
+                        else:
+                            map_vis = heatmap_utils.blend_with_map(
+                                map_vis,
+                                heatmap_vis,
+                                alpha=args.heatmap_alpha,
+                            )
+                            cv2.putText(
+                                map_vis,
+                                f"HEAT:{args.heatmap_mode}",
+                                (8, 16),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45,
+                                (255, 255, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
+
+                    # Drive output to RoboRIO (optional).
+                    if sd is not None:
+                        now = time.time()
+                        # Clear ready pulse to create edges like working test scripts.
+                        if nt_ready_high and now >= nt_ready_clear_time:
+                            sd.putBoolean("Jetson/CommandReady", False)
+                            nt_ready_high = False
+                        # Periodic connection status log.
+                        if (now - nt_last_conn_log) >= 2.0:
+                            connected = NetworkTables.isConnected()
+                            print(f"NT connected={connected} target={args.roborio_ip}")
+                            nt_last_conn_log = now
+                        if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
+                            last_drive_send = now
+                            if emergency_stop:
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif manual_mode:
+                                send_nt_command(
+                                    True,
+                                    manual_fwd,
+                                    manual_turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
+                            elif cam_row_col is None:
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                            else:
+                                # Pick a waypoint a few steps ahead.
+                                if draw_path is not None and len(draw_path) > 0:
+                                    wp_index = min(5, len(draw_path) - 1)
+                                    wp_rc = draw_path[wp_index]
+                                    wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
+                                    if wp_world is None:
+                                        continue
+                                    tx, tz = wp_world
+                                elif goal_cell is not None:
+                                    # Fallback: drive directly toward clicked goal if path is not ready yet.
+                                    goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+                                    if goal_world_fallback is None:
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
+                                        continue
+                                    tx, tz = goal_world_fallback
+                                else:
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
+                                    continue
+                                # Current pose in world.
+                                cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
+                                dx = tx - cx
+                                dz = tz - cz
+
+                                # Stop if close enough to goal.
+                                goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+                                if goal_world is not None:
+                                    gx, gz = goal_world
+                                    if math.hypot(gx - cx, gz - cz) <= args.drive_goal_tol_m:
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
+                                        continue
+
+                                # Heading error from camera forward axis.
+                                forward = R_world_cam[:, 2]
+                                heading = math.atan2(float(forward[2]), float(forward[0]))
+                                if args.drive_heading_flip:
+                                    heading += math.pi
+                                target = math.atan2(dz, dx)
+                                err = target - heading
+                                # Wrap to [-pi, pi].
+                                while err > math.pi:
+                                    err -= 2 * math.pi
+                                while err < -math.pi:
+                                    err += 2 * math.pi
+
+                                tol = math.radians(max(0.0, args.drive_heading_tol_deg))
+                                if abs(err) <= tol:
+                                    turn = 0.0
+                                else:
+                                    turn = max(-1.0, min(1.0, args.drive_turn_k * err))
+                                fwd = max(0.0, min(1.0, args.drive_speed))
+
+                                send_nt_command(
+                                    True,
+                                    fwd,
+                                    turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
+                    # Periodically save persistent map to disk.
+                    if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
+                        occ_map.save(args.map_save_path)
+                        last_save = time.time()
+                    # Periodically update and save spatial map (mesh) if enabled.
+                    if spatial_enabled and args.spatial_save_path and args.spatial_save_every > 0:
+                        if (time.time() - last_spatial_save) >= args.spatial_save_every:
+                            ok = zed_utils.update_spatial_map(
+                                zed, sl, spatial_mesh, args.spatial_save_path, mesh_filter=args.spatial_filter
+                            )
+                            if ok:
+                                last_spatial_save = time.time()
+                                if mesh_viewer is not None:
+                                    mesh_viewer.update_from_path(args.spatial_save_path)
+                    if mesh_viewer is not None:
+                        mesh_viewer.poll()
+                else:
+                    map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
+                    if args.heatmap:
+                        heatmap_vis = heatmap_utils.render_heatmap(
+                            occ_map,
+                            mode=args.heatmap_mode,
+                            min_evidence=args.heatmap_min_evidence,
+                        )
+                        if not args.heatmap_window:
+                            map_vis = heatmap_utils.blend_with_map(
+                                map_vis,
+                                heatmap_vis,
+                                alpha=args.heatmap_alpha,
+                            )
 
             # Live visualization (optional)
             if HAS_CV2:
                 img = image_left.get_data()
                 if img is not None:
+                    # Normalize to BGR (3 channels) across SDK image formats.
+                    if img.ndim == 2:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    elif img.ndim == 3:
+                        if img.shape[2] == 4:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                        elif img.shape[2] == 1:
+                            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        elif img.shape[2] > 3:
+                            img = img[:, :, :3]
+                    else:
+                        img = None
+                if img is not None:
                     # Build a ground/obstacle mask at the same stride
                     xyz_full = cloud[::stride, ::stride, :3]
                     valid = np.isfinite(xyz_full).all(axis=2)
-                    dist_full = (a * xyz_full[:, :, 0] + b * xyz_full[:, :, 1] + c * xyz_full[:, :, 2] + d)
+                    dist_num = (a * xyz_full[:, :, 0] + b * xyz_full[:, :, 1] + c * xyz_full[:, :, 2] + d)
                     denom = np.sqrt(a * a + b * b + c * c)
-                    dist_full = dist_full / denom
+                    dist_full = np.full_like(dist_num, np.nan, dtype=np.float32)
+                    if np.any(valid):
+                        dist_full[valid] = (dist_num[valid] / denom).astype(np.float32)
 
                     ground = (np.abs(dist_full) < 0.10) & valid
                     obstacle = (dist_full > 0.10) & valid
@@ -141,10 +637,67 @@ def main():
                     # Blend
                     vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
+                # Always show the map (even if the image frame is missing)
+                    if map_vis is not None:
+                        if args.map_scale > 1:
+                            map_vis = cv2.resize(
+                                map_vis,
+                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                        if not map_window_ready:
+                            cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
+                            map_window_ready = True
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_show = heatmap_vis
+                        if args.map_scale > 1:
+                            heatmap_show = cv2.resize(
+                                heatmap_show,
+                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                if key == ord("m"):
+                    manual_mode = not manual_mode
+                    print(f"Manual drive mode: {'ON' if manual_mode else 'OFF'}")
+                if key == ord(" "):
+                    emergency_stop = True
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                now = time.time()
+                if key == ord("w"):
+                    manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                    last_w_time = now
+                if key == ord("s"):
+                    manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                    last_s_time = now
+                if key == ord("a"):
+                    manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                    last_a_time = now
+                if key == ord("d"):
+                    manual_turn = max(0.0, min(1.0, args.drive_speed))
+                    last_d_time = now
+                if key == ord("x"):
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                # Hold-to-move: decay to 0 if key not pressed recently.
+                if manual_mode:
+                    if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                        manual_fwd = 0.0
+                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
+                        manual_turn = 0.0
         else:
             time.sleep(0.01)
+
+    if spatial_enabled:
+        zed_utils.disable_spatial_mapping(zed)
+    if mesh_viewer is not None:
+        mesh_viewer.close()
+    ros2_utils.shutdown_ros2(node)
 
 
 if __name__ == "__main__":
