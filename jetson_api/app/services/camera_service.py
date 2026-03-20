@@ -34,6 +34,7 @@ class CameraService:
         self._last_frame_ms: Optional[int] = None
         self._last_error: Optional[str] = None
         self._last_status_check_ms = 0
+        self._recent_activity_grace_ms = max(settings.camera_status_ttl_ms * 5, 10000)
 
     def get_mode(self) -> Tuple[CameraMode, Optional[int]]:
         return self._mode, self._snapshot_interval_ms
@@ -74,6 +75,22 @@ class CameraService:
         self._backend = backend
         self._last_frame_ms = _now_ms()
         self._last_error = None
+
+    def _has_recent_activity(self) -> bool:
+        return (
+            self._last_frame_ms is not None
+            and (_now_ms() - self._last_frame_ms) < self._recent_activity_grace_ms
+        )
+
+    def _preserve_recent_connection(self, error: Optional[str]) -> bool:
+        if not self._has_recent_activity() or self._backend is None:
+            return False
+
+        # A busy camera can fail a second open() even though the active pipeline is healthy.
+        self._connected = True
+        self._streaming = True
+        self._last_error = error
+        return True
 
     def _probe_zed(self) -> bool:
         try:
@@ -147,6 +164,9 @@ class CameraService:
 
         if backend not in ("auto", "zed", "opencv"):
             self._mark_disconnected(f"Unsupported camera backend '{settings.camera_backend}'")
+            return
+
+        if self._preserve_recent_connection(self._last_error):
             return
 
         self._mark_disconnected(self._last_error)
