@@ -33,6 +33,7 @@ import rviz_utils
 import ros2_utils
 import segmentation
 import map_utils
+import heatmap_utils
 import zed_utils
 import viewer_utils
 import stream_utils
@@ -70,8 +71,28 @@ def main():
     parser.add_argument("--occ-decay", type=float, default=None, help="Obstacle decay (defaults to --map-decay)")
     parser.add_argument("--hole-decay", type=float, default=None, help="Hole decay (defaults to --map-decay)")
     parser.add_argument("--map-camera-size", type=int, default=3, help="Camera marker size in cells")
+    parser.add_argument("--heatmap", action="store_true", help="Enable heatmap view for map confidence/risk")
+    parser.add_argument(
+        "--heatmap-mode",
+        default="risk",
+        choices=["risk", "obstacle", "hole", "free", "evidence"],
+        help="Heatmap mode",
+    )
+    parser.add_argument("--heatmap-alpha", type=float, default=0.35, help="Heatmap overlay alpha (0-1)")
+    parser.add_argument(
+        "--heatmap-min-evidence",
+        type=float,
+        default=1.0,
+        help="Min evidence needed before a heatmap cell is shown",
+    )
+    parser.add_argument(
+        "--heatmap-window",
+        action="store_true",
+        help="Show heatmap in a separate window instead of overlaying on map",
+    )
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
+    parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
@@ -94,6 +115,13 @@ def main():
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
+    parser.add_argument(
+        "--drive-ready-pulse-sec",
+        type=float,
+        default=0.10,
+        help="How long CommandReady stays high per command pulse",
+    )
+    parser.add_argument("--drive-debug", action="store_true", help="Print outgoing NT drive commands")
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
@@ -211,6 +239,7 @@ def main():
     nt_last_conn_log = 0.0
     nt_ready_high = False
     nt_ready_clear_time = 0.0
+    last_drive_debug_time = 0.0
     last_path_plan_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
@@ -240,17 +269,28 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def send_nt_command(enabled, fwd, turn, duration):
-        nonlocal nt_ready_high, nt_ready_clear_time
+        nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
         if sd is None:
             return
         sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
         sd.putNumber("Jetson/CommandForward", float(fwd))
         sd.putNumber("Jetson/CommandTurn", float(turn))
         sd.putNumber("Jetson/CommandDuration", float(duration))
+        if not enabled:
+            # Clear string-based legacy command channels when auto-drive is off.
+            sd.putString("Jetson/Command", "")
         # Pulse CommandReady high, then clear shortly after.
         sd.putBoolean("Jetson/CommandReady", True)
         nt_ready_high = True
-        nt_ready_clear_time = time.time() + 0.03
+        nt_ready_clear_time = time.time() + max(0.01, float(args.drive_ready_pulse_sec))
+        if args.drive_debug:
+            now = time.time()
+            if (now - last_drive_debug_time) >= 0.2:
+                print(
+                    f"NT cmd enabled={bool(enabled)} fwd={float(fwd):+.2f} "
+                    f"turn={float(turn):+.2f} dur={float(duration):.2f}"
+                )
+                last_drive_debug_time = now
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -309,7 +349,10 @@ def main():
             dist, ground_mask, obstacle_mask = segmentation.classify_points(
                 xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
             )
-            hole_mask = dist < -args.hole_thresh_m
+            if args.disable_holes:
+                hole_mask = np.zeros(dist.shape, dtype=bool)
+            else:
+                hole_mask = dist < -args.hole_thresh_m
             ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
 
             obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
@@ -326,6 +369,7 @@ def main():
             # Build a simple 2D top-down occupancy map (XZ) from ground/obstacle points.
             if HAS_CV2:
                 map_vis = None
+                heatmap_vis = None
                 if xyz.size > 0:
                     # Transform to world frame if tracking is enabled.
                     xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
@@ -409,6 +453,32 @@ def main():
                         gr, gc = goal_cell
                         if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
                             cv2.circle(map_vis, (gc, gr), 2, (0, 255, 255), -1)
+
+                    if args.heatmap:
+                        heatmap_vis = heatmap_utils.render_heatmap(
+                            occ_map,
+                            mode=args.heatmap_mode,
+                            min_evidence=args.heatmap_min_evidence,
+                        )
+                        if args.heatmap_window:
+                            # Keep normal map colors untouched when showing separate heatmap window.
+                            pass
+                        else:
+                            map_vis = heatmap_utils.blend_with_map(
+                                map_vis,
+                                heatmap_vis,
+                                alpha=args.heatmap_alpha,
+                            )
+                            cv2.putText(
+                                map_vis,
+                                f"HEAT:{args.heatmap_mode}",
+                                (8, 16),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.45,
+                                (255, 255, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
 
                     # Drive output to RoboRIO (optional).
                     if sd is not None:
@@ -511,6 +581,18 @@ def main():
                         mesh_viewer.poll()
                 else:
                     map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
+                    if args.heatmap:
+                        heatmap_vis = heatmap_utils.render_heatmap(
+                            occ_map,
+                            mode=args.heatmap_mode,
+                            min_evidence=args.heatmap_min_evidence,
+                        )
+                        if not args.heatmap_window:
+                            map_vis = heatmap_utils.blend_with_map(
+                                map_vis,
+                                heatmap_vis,
+                                alpha=args.heatmap_alpha,
+                            )
 
             # Live visualization (optional)
             if HAS_CV2:
@@ -567,6 +649,15 @@ def main():
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
                             map_window_ready = True
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_show = heatmap_vis
+                        if args.map_scale > 1:
+                            heatmap_show = cv2.resize(
+                                heatmap_show,
+                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break

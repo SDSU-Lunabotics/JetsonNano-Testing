@@ -51,16 +51,26 @@ cmd+=(--free-confirm-ratio "${FREE_CONFIRM_RATIO:-1.2}")
 cmd+=(--free-downgrade-factor "${FREE_DOWNGRADE_FACTOR:-0.6}")
 cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
 cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
+if [[ "${DISABLE_HOLES:-0}" == "1" ]]; then cmd+=(--disable-holes); fi
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
+if [[ "${HEATMAP:-0}" == "1" ]]; then
+  cmd+=(--heatmap)
+  cmd+=(--heatmap-mode "${HEATMAP_MODE:-risk}")
+  cmd+=(--heatmap-alpha "${HEATMAP_ALPHA:-0.35}")
+  cmd+=(--heatmap-min-evidence "${HEATMAP_MIN_EVIDENCE:-1.0}")
+  if [[ "${HEATMAP_WINDOW:-0}" == "1" ]]; then cmd+=(--heatmap-window); fi
+fi
 
 # Drive
 if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
   cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
+  cmd+=(--drive-ready-pulse-sec "${DRIVE_READY_PULSE_SEC:-0.10}")
+  if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
 fi
 
