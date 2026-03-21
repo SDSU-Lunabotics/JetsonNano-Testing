@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
@@ -431,7 +432,12 @@ def main():
                             clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
                             if clear_cells > 0:
                                 obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
-                            path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
+                            path_cells = map_utils.astar_path(
+                                cam_row_col,
+                                goal_cell,
+                                obs,
+                                connectivity=args.path_connectivity,
+                            )
                             if path_cells:
                                 last_path_cells = path_cells
                             else:

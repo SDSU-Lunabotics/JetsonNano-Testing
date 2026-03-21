@@ -178,8 +178,9 @@ class OccupancyMap:
         return evidence >= float(min_evidence)
 
 
-def astar_path(start_rc, goal_rc, obstacle_mask):
+def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
     import heapq
+    import math
 
     if start_rc is None or goal_rc is None:
         return None
@@ -194,10 +195,24 @@ def astar_path(start_rc, goal_rc, obstacle_mask):
     if gr < 0 or gr >= h or gc < 0 or gc >= w:
         return None
 
+    connectivity = int(connectivity)
+    if connectivity not in (4, 8):
+        connectivity = 8
+
     def heuristic(r, c):
-        return abs(r - gr) + abs(c - gc)
+        dr = abs(r - gr)
+        dc = abs(c - gc)
+        if connectivity == 4:
+            return dr + dc
+        # Octile distance for 8-connected grids.
+        dmin = min(dr, dc)
+        dmax = max(dr, dc)
+        return (dmax - dmin) + (math.sqrt(2.0) * dmin)
 
     neighbors = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0)]
+    if connectivity == 8:
+        diag = math.sqrt(2.0)
+        neighbors += [(1, 1, diag), (1, -1, diag), (-1, 1, diag), (-1, -1, diag)]
 
     open_set = []
     heapq.heappush(open_set, (heuristic(sr, sc), 0, (sr, sc)))
@@ -222,6 +237,10 @@ def astar_path(start_rc, goal_rc, obstacle_mask):
                 continue
             if obstacle_mask[nr, nc]:
                 continue
+            # Prevent cutting corners through blocked cells on diagonal moves.
+            if dr != 0 and dc != 0 and connectivity == 8:
+                if obstacle_mask[r, nc] or obstacle_mask[nr, c]:
+                    continue
             ng = g + step_cost
             if (nr, nc) not in cost or ng < cost[(nr, nc)]:
                 cost[(nr, nc)] = ng
@@ -234,20 +253,23 @@ def inflate_mask(mask, radius_cells):
     if radius_cells <= 0:
         return mask
     h, w = mask.shape
-    inflated = mask.copy()
     r = int(radius_cells)
-    for rr in range(h):
-        if not mask[rr].any():
-            continue
-        for cc in range(w):
-            if not mask[rr, cc]:
-                continue
-            r1 = max(0, rr - r)
-            r2 = min(h, rr + r + 1)
-            c1 = max(0, cc - r)
-            c2 = min(w, cc + r + 1)
-            inflated[r1:r2, c1:c2] = True
-    return inflated
+    # Fast square dilation with integral image (O(H*W)).
+    src = mask.astype(np.uint8)
+    ii = np.pad(src, ((1, 0), (1, 0)), mode="constant").cumsum(axis=0).cumsum(axis=1)
+
+    row_lo = np.clip(np.arange(h) - r, 0, h)
+    row_hi = np.clip(np.arange(h) + r + 1, 0, h)
+    col_lo = np.clip(np.arange(w) - r, 0, w)
+    col_hi = np.clip(np.arange(w) + r + 1, 0, w)
+
+    sum_window = (
+        ii[row_hi[:, None], col_hi[None, :]]
+        - ii[row_lo[:, None], col_hi[None, :]]
+        - ii[row_hi[:, None], col_lo[None, :]]
+        + ii[row_lo[:, None], col_lo[None, :]]
+    )
+    return sum_window > 0
 
 
 def clear_mask_circle(mask, center_rc, radius_cells):
