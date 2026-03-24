@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     camera_backend: str = "auto"
     camera_device_index: int = 0
     camera_status_ttl_ms: int = 2000
+    network_status_ttl_ms: int = 5000
     
     max_latency_ms: float = 200.0 # Update with acceptable latency threshold
     max_packet_loss_pct: float = 5.0 # Update with acceptable packet loss threshold
