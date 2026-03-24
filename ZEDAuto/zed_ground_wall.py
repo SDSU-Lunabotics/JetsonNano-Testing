@@ -305,9 +305,6 @@ def main():
         sd.putNumber("Jetson/CommandTurn", float(turn))
         sd.putNumber("Jetson/CommandDuration", float(duration))
         sd.putNumber("Jetson/CommandSeq", float(nt_command_seq))
-        # Compatibility mirror keys used by some robot-side readers.
-        sd.putNumber("Jetson/Speed", float(fwd))
-        sd.putNumber("Jetson/TurnSpeed", float(turn))
         if not enabled:
             # Clear string-based legacy command channels when auto-drive is off.
             sd.putString("Jetson/Command", "")
