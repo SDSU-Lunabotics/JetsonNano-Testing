@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    jetson_ip: str = "10.0.8.101"
+    jetson_ip: str = "10.0.8.100"
     roborio_ip: str = "10.0.9.2"
     camera_host: str = "10.0.8.102" # Update with actual IPs
     lidar_host: str = "10.0.8.103" # Update with actual IPs
