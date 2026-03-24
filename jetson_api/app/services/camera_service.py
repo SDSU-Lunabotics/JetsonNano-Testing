@@ -204,6 +204,9 @@ class CameraService:
 
     def get_status(self) -> CameraStatus:
         self.refresh_status()
+        return self.get_cached_status()
+
+    def get_cached_status(self) -> CameraStatus:
         return CameraStatus(
             connected=self._connected,
             backend=self._backend,
