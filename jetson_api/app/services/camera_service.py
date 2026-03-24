@@ -76,6 +76,30 @@ class CameraService:
         self._last_frame_ms = _now_ms()
         self._last_error = None
 
+    def _mark_in_use(self, backend: CameraBackend, error: Optional[str]) -> None:
+        # If another process already owns the camera, treat that as connected.
+        self._connected = True
+        self._streaming = True
+        self._backend = backend
+        if self._last_frame_ms is None:
+            self._last_frame_ms = _now_ms()
+        self._last_error = error
+
+    def _error_implies_camera_in_use(self, error: Optional[str]) -> bool:
+        if not error:
+            return False
+
+        normalized = error.lower()
+        markers = (
+            "busy",
+            "device in use",
+            "resource busy",
+            "camera stream failed to start",
+            "stream failed to start",
+            "already opened",
+        )
+        return any(marker in normalized for marker in markers)
+
     def _has_recent_activity(self) -> bool:
         return (
             self._last_frame_ms is not None
@@ -159,7 +183,14 @@ class CameraService:
 
         if backend in ("auto", "zed") and self._probe_zed():
             return
+        if backend in ("auto", "zed") and self._error_implies_camera_in_use(self._last_error):
+            self._mark_in_use("zed", self._last_error)
+            return
+
         if backend in ("auto", "opencv") and self._probe_opencv():
+            return
+        if backend in ("auto", "opencv") and self._error_implies_camera_in_use(self._last_error):
+            self._mark_in_use("opencv", self._last_error)
             return
 
         if backend not in ("auto", "zed", "opencv"):

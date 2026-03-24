@@ -1,6 +1,6 @@
 from typing import Optional
 
-from app.schemas.common import Heartbeat, ControllerStatus
+from app.schemas.common import Heartbeat, ControllerInput, ControllerStatus
 from app.schemas.health import StatusResponse
 from app.schemas.status import RoverStatus, ControlStatus
 from app.services.state_service import state_service, now_ms
@@ -34,11 +34,37 @@ class TelemetryService:
             age_ms=(None if last_seen_ms is None else now - last_seen_ms),
         )
 
+    def _controller_status(self, payload) -> ControllerStatus:
+        raw = payload.get("controller") or {}
+
+        raw_input = raw.get("last_input")
+        last_input = None
+        if raw_input:
+            try:
+                last_input = ControllerInput(str(raw_input))
+            except ValueError:
+                last_input = None
+
+        last_input_ms = raw.get("last_input_ms")
+        if last_input_ms is not None:
+            try:
+                last_input_ms = int(last_input_ms)
+            except (TypeError, ValueError):
+                last_input_ms = None
+
+        return ControllerStatus(
+            connected=bool(raw.get("connected", False)),
+            last_input_ms=last_input_ms,
+            last_input=last_input,
+        )
+
     def get_status(self) -> StatusResponse:
         now = now_ms()
         self._jetson_last_seen_ms = now
 
-        if roborio_bridge_service.is_connected():
+        bridge_status = roborio_bridge_service.get_status()
+
+        if bool(bridge_status.get("connected", False)):
             self._roborio_last_seen_ms = now
 
         rover = RoverStatus(
@@ -53,11 +79,7 @@ class TelemetryService:
             estop=state_service.estop,
             mode="manual",
             autonomy_running=state_service.autonomy_enabled,
-            controller=ControllerStatus(
-                connected=False,
-                last_input_ms=None,
-                last_input=None,
-            ),
+            controller=self._controller_status(bridge_status),
         )
 
         return StatusResponse(
