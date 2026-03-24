@@ -117,6 +117,12 @@ def main():
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     parser.add_argument(
+        "--manual-key-timeout-sec",
+        type=float,
+        default=0.45,
+        help="Hold-to-move timeout for manual key controls (seconds)",
+    )
+    parser.add_argument(
         "--drive-ready-pulse-sec",
         type=float,
         default=0.10,
@@ -247,7 +253,7 @@ def main():
     last_s_time = 0.0
     last_a_time = 0.0
     last_d_time = 0.0
-    key_hold_timeout = 0.2
+    key_hold_timeout = max(0.15, float(args.manual_key_timeout_sec))
     nt_last_conn_log = 0.0
     nt_last_health_log = 0.0
     nt_health_seq = 0
@@ -725,29 +731,31 @@ def main():
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
+                if key == ord("q") or key == ord("Q"):
                     break
-                if key == ord("m"):
+                if key == ord("m") or key == ord("M"):
                     manual_mode = not manual_mode
+                    if manual_mode:
+                        emergency_stop = False
                     print(f"Manual drive mode: {'ON' if manual_mode else 'OFF'}")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0
                     manual_turn = 0.0
                 now = time.time()
-                if key == ord("w"):
+                if key == ord("w") or key == ord("W"):
                     manual_fwd = max(0.0, min(1.0, args.drive_speed))
                     last_w_time = now
-                if key == ord("s"):
+                if key == ord("s") or key == ord("S"):
                     manual_fwd = -max(0.0, min(1.0, args.drive_speed))
                     last_s_time = now
-                if key == ord("a"):
+                if key == ord("a") or key == ord("A"):
                     manual_turn = -max(0.0, min(1.0, args.drive_speed))
                     last_a_time = now
-                if key == ord("d"):
+                if key == ord("d") or key == ord("D"):
                     manual_turn = max(0.0, min(1.0, args.drive_speed))
                     last_d_time = now
-                if key == ord("x"):
+                if key == ord("x") or key == ord("X"):
                     manual_fwd = 0.0
                     manual_turn = 0.0
                 # Hold-to-move: decay to 0 if key not pressed recently.
