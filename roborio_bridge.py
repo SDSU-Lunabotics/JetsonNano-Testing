@@ -34,6 +34,22 @@ DATA_KEYS = {
     "Jetson/ExcavatorEnabled": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
     "NavX/YawDeg": "number",
+    "Rover/HeartbeatSec": "number",
+    "Rover/Connected": "boolean",
+    "RoboRIO/HeartbeatSec": "number",
+    "RoboRIO/Connected": "boolean",
+    "RoboRIO/DriverStationAttached": "boolean",
+    "RoboRIO/Enabled": "boolean",
+    "RoboRIO/Mode": "string",
+    "Controller/Connected": "boolean",
+    "Controller/IsXbox": "boolean",
+    "Controller/Present": "boolean",
+    "Controller/ExpectedPortConnected": "boolean",
+    "Controller/ExpectedPortIsXbox": "boolean",
+    "Controller/Port": "number",
+    "Controller/DetectedPort": "number",
+    "Xbox/Connected": "boolean",
+    "Xbox/Port": "number",
     "LEDEnabled": "boolean",
     "LEDState": "boolean",
     "LEDButton": "boolean",
@@ -201,11 +217,41 @@ def read_dynamic_controller_values():
 
 
 def infer_controller_status(values):
+    controller_keys = {}
     connected = None
+    is_xbox = None
+    expected_port = None
+    detected_port = None
     last_input_ms = None
     last_input = None
 
     for key, value in values.items():
+        normalized = key.lower()
+
+        if any(token in normalized for token in ("controller", "xbox", "joystick", "gamepad")):
+            controller_keys[key] = value
+
+    for key in (
+        "Controller/Connected",
+        "Controller/Present",
+        "Xbox/Connected",
+        "Controller/ExpectedPortConnected",
+    ):
+        value = controller_keys.get(key)
+        if value is not None:
+            connected = parse_value("boolean", value)
+            break
+
+    for key in ("Controller/IsXbox", "Controller/ExpectedPortIsXbox"):
+        value = controller_keys.get(key)
+        if value is not None:
+            is_xbox = parse_value("boolean", value)
+            break
+
+    expected_port = controller_keys.get("Controller/Port")
+    detected_port = controller_keys.get("Controller/DetectedPort", controller_keys.get("Xbox/Port"))
+
+    for key, value in controller_keys.items():
         normalized = key.lower()
 
         if connected is None and any(token in normalized for token in ("connected", "present", "detected", "plugged")):
@@ -233,9 +279,18 @@ def infer_controller_status(values):
 
     return {
         "connected": bool(connected) if connected is not None else False,
+        "is_xbox": bool(is_xbox) if is_xbox is not None else False,
+        "expected_port": (
+            int(float(expected_port)) if expected_port is not None else None
+        ),
+        "detected_port": (
+            int(float(detected_port))
+            if detected_port is not None and float(detected_port) >= 0
+            else None
+        ),
         "last_input_ms": last_input_ms,
         "last_input": last_input,
-        "source_keys": sorted(values.keys()),
+        "source_keys": sorted(controller_keys.keys()),
     }
 
 
@@ -326,7 +381,7 @@ class Handler(BaseHTTPRequestHandler):
                     "timestamp_ms": now_ms(),
                     "connected": NetworkTables.isConnected(),
                     "values": values,
-                    "controller": infer_controller_status(dynamic_controller_values),
+                    "controller": infer_controller_status(values),
                     "warnings": torque_warnings(values),
                 },
             )
