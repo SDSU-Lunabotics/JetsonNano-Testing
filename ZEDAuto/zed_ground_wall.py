@@ -251,6 +251,7 @@ def main():
     nt_last_conn_log = 0.0
     nt_last_health_log = 0.0
     nt_health_seq = 0
+    nt_command_seq = 0
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
@@ -283,26 +284,36 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def send_nt_command(enabled, fwd, turn, duration):
-        nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
+        nonlocal nt_command_seq, nt_ready_high, nt_ready_clear_time, last_drive_debug_time
         if sd is None:
             return
+        nt_command_seq += 1
         sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
         sd.putNumber("Jetson/CommandForward", float(fwd))
         sd.putNumber("Jetson/CommandTurn", float(turn))
         sd.putNumber("Jetson/CommandDuration", float(duration))
+        sd.putNumber("Jetson/CommandSeq", float(nt_command_seq))
+        # Compatibility mirror keys used by some robot-side readers.
+        sd.putNumber("Jetson/Speed", float(fwd))
+        sd.putNumber("Jetson/TurnSpeed", float(turn))
         if not enabled:
             # Clear string-based legacy command channels when auto-drive is off.
             sd.putString("Jetson/Command", "")
         # Pulse CommandReady high, then clear shortly after.
-        sd.putBoolean("Jetson/CommandReady", True)
-        nt_ready_high = True
-        nt_ready_clear_time = time.time() + max(0.01, float(args.drive_ready_pulse_sec))
+        # Keep the pulse shorter than the command period so a distinct low interval exists.
+        cmd_period = max(0.02, float(duration))
+        pulse_sec = min(max(0.01, float(args.drive_ready_pulse_sec)), max(0.01, cmd_period * 0.4))
+        if not nt_ready_high:
+            sd.putBoolean("Jetson/CommandReady", True)
+            nt_ready_high = True
+            nt_ready_clear_time = time.time() + pulse_sec
         if args.drive_debug:
             now = time.time()
             if (now - last_drive_debug_time) >= 0.2:
                 print(
-                    f"NT cmd enabled={bool(enabled)} fwd={float(fwd):+.2f} "
-                    f"turn={float(turn):+.2f} dur={float(duration):.2f}"
+                    f"NT cmd seq={nt_command_seq:.0f} enabled={bool(enabled)} "
+                    f"fwd={float(fwd):+.2f} turn={float(turn):+.2f} "
+                    f"dur={float(duration):.2f} pulse={pulse_sec:.2f}"
                 )
                 last_drive_debug_time = now
 
