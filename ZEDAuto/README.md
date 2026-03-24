@@ -111,6 +111,8 @@ Additional settings that can be used (with defaults):
 - `--drive-goal-tol-m 0.3`: Goal tolerance (m).
 - `--drive-heading-tol-deg 10.0`: Heading tolerance (deg).
 - `--drive-ready-pulse-sec 0.10`: How long CommandReady stays high per command pulse.
+- `--nt-health-debug`: Print NetworkTables session health plus incoming robot-published `Jetson/*` drive keys.
+- `--nt-health-period-sec 1.0`: Seconds between NT health debug prints.
 - `--floor-update-sec 0.5`: Seconds between floor-plane updates.
 - `--floor-min-normal-y 0.5`: Reject floor planes with |normal.y| below this.
 - `--stream-ip`: UDP target IP for GStreamer stream.
@@ -170,4 +172,6 @@ Optional features:
 - `Failed to import pyzed.sl`: install ZED SDK and Python bindings on the target machine.
 - `OpenCV not found`: install OpenCV Python bindings.
 - `NetworkTables not available`: install `pynetworktables` or disable drive mode.
+- For communication debugging, set `NT_HEALTH_DEBUG=1` in `zed_ground_wall.env` and run `./ZEDAuto/RunAuto.sh`.
+  You should see logs like `NT health connected=True ... peers=[...] ... rx_fwd=... rx_turn=...`.
 - Stream pipeline fails: verify GStreamer plugins/codecs are installed and available to OpenCV.

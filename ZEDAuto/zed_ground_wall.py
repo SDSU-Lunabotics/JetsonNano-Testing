@@ -123,6 +123,17 @@ def main():
         help="How long CommandReady stays high per command pulse",
     )
     parser.add_argument("--drive-debug", action="store_true", help="Print outgoing NT drive commands")
+    parser.add_argument(
+        "--nt-health-debug",
+        action="store_true",
+        help="Print NetworkTables session health and robot-published Jetson drive keys",
+    )
+    parser.add_argument(
+        "--nt-health-period-sec",
+        type=float,
+        default=1.0,
+        help="Seconds between NetworkTables health debug prints",
+    )
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
@@ -238,6 +249,8 @@ def main():
     last_d_time = 0.0
     key_hold_timeout = 0.2
     nt_last_conn_log = 0.0
+    nt_last_health_log = 0.0
+    nt_health_seq = 0
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
@@ -292,6 +305,24 @@ def main():
                     f"turn={float(turn):+.2f} dur={float(duration):.2f}"
                 )
                 last_drive_debug_time = now
+
+    def nt_connections_summary():
+        if not HAS_NT:
+            return "nt-disabled"
+        try:
+            conns = NetworkTables.getConnections()
+        except Exception:
+            return "unavailable"
+        if not conns:
+            return "none"
+        parts = []
+        for conn in conns[:3]:
+            remote_id = getattr(conn, "remote_id", "?")
+            remote_ip = getattr(conn, "remote_ip", "?")
+            parts.append(f"{remote_id}@{remote_ip}")
+        if len(conns) > 3:
+            parts.append(f"+{len(conns) - 3} more")
+        return ", ".join(parts)
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -493,8 +524,26 @@ def main():
                         if nt_ready_high and now >= nt_ready_clear_time:
                             sd.putBoolean("Jetson/CommandReady", False)
                             nt_ready_high = False
-                        # Periodic connection status log.
-                        if (now - nt_last_conn_log) >= 2.0:
+                        if args.nt_health_debug and (now - nt_last_health_log) >= max(0.2, args.nt_health_period_sec):
+                            nt_last_health_log = now
+                            nt_health_seq += 1
+                            connected = NetworkTables.isConnected()
+                            sd.putNumber("Jetson/NTClientSeq", float(nt_health_seq))
+                            sd.putNumber("Jetson/NTClientUnix", float(now))
+                            sd.putString("Jetson/NTClientName", "zed_ground_wall.py")
+                            drive_forward_in = sd.getNumber("Jetson/DriveForward", float("nan"))
+                            drive_turn_in = sd.getNumber("Jetson/DriveTurn", float("nan"))
+                            speed_in = sd.getNumber("Jetson/Speed", float("nan"))
+                            turn_speed_in = sd.getNumber("Jetson/TurnSpeed", float("nan"))
+                            ack_seq = sd.getNumber("Jetson/NTServerAckSeq", -1.0)
+                            print(
+                                f"NT health connected={connected} target={args.roborio_ip} "
+                                f"peers=[{nt_connections_summary()}] tx_seq={nt_health_seq} ack_seq={ack_seq:.0f} "
+                                f"rx_fwd={drive_forward_in:+.2f} rx_turn={drive_turn_in:+.2f} "
+                                f"rx_speed={speed_in:+.2f} rx_turn_speed={turn_speed_in:+.2f}"
+                            )
+                        elif (now - nt_last_conn_log) >= 2.0:
+                            # Periodic lightweight connection status when health debug is off.
                             connected = NetworkTables.isConnected()
                             print(f"NT connected={connected} target={args.roborio_ip}")
                             nt_last_conn_log = now
