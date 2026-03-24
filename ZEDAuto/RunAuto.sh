@@ -51,6 +51,8 @@ cmd+=(--free-confirm-ratio "${FREE_CONFIRM_RATIO:-1.2}")
 cmd+=(--free-downgrade-factor "${FREE_DOWNGRADE_FACTOR:-0.6}")
 cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
 cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
+cmd+=(--obstacle-thresh-m "${OBSTACLE_THRESH_M:-0.05}")
+cmd+=(--hole-thresh-m "${HOLE_THRESH_M:-0.05}")
 if [[ "${DISABLE_HOLES:-0}" == "1" ]]; then cmd+=(--disable-holes); fi
 cmd+=(--path-avoid-occ-min "${PATH_AVOID_OCC_MIN:-5.0}")
 cmd+=(--path-avoid-occ-ratio "${PATH_AVOID_OCC_RATIO:-1.8}")
