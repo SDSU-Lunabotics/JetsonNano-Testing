@@ -171,6 +171,74 @@ def torque_warnings(values):
     return warnings
 
 
+def read_dynamic_controller_values():
+    """
+    Pull controller-related SmartDashboard entries even if they are not part of the
+    fixed DATA_KEYS whitelist. This lets the Jetson status API surface Xbox state
+    when the RoboRIO publishes it under controller-ish keys.
+    """
+    try:
+        keys = sd.getKeys()
+    except Exception:
+        return {}
+
+    controller_tokens = ("controller", "xbox", "joystick", "gamepad")
+    values = {}
+
+    for key in keys:
+        normalized = key.lower()
+        if not any(token in normalized for token in controller_tokens):
+            continue
+        if key in DATA_KEYS:
+            continue
+
+        try:
+            values[key] = sd.getValue(key)
+        except Exception:
+            continue
+
+    return values
+
+
+def infer_controller_status(values):
+    connected = None
+    last_input_ms = None
+    last_input = None
+
+    for key, value in values.items():
+        normalized = key.lower()
+
+        if connected is None and any(token in normalized for token in ("connected", "present", "detected", "plugged")):
+            connected = parse_value("boolean", value)
+            continue
+
+        if last_input_ms is None and any(token in normalized for token in ("lastinputms", "last_input_ms", "lastinput", "last_input", "timestamp")):
+            try:
+                numeric = int(float(value))
+            except Exception:
+                numeric = None
+
+            if numeric is not None and numeric > 0:
+                last_input_ms = numeric
+            continue
+
+        if last_input is None and any(token in normalized for token in ("lastaction", "last_action", "lastinputname", "last_input_name", "input", "action")):
+            if value is not None:
+                text = str(value).strip()
+                if text:
+                    last_input = text
+
+    if connected is None and last_input_ms is not None:
+        connected = (now_ms() - last_input_ms) < 5000
+
+    return {
+        "connected": bool(connected) if connected is not None else False,
+        "last_input_ms": last_input_ms,
+        "last_input": last_input,
+        "source_keys": sorted(values.keys()),
+    }
+
+
 def _float_arg(data, key, default):
     try:
         return float(data.get(key, default))
@@ -248,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 key: read_value(key, value_type)
                 for key, value_type in DATA_KEYS.items()
             }
+            dynamic_controller_values = read_dynamic_controller_values()
+            values.update(dynamic_controller_values)
 
             self._send_json(
                 200,
@@ -256,6 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                     "timestamp_ms": now_ms(),
                     "connected": NetworkTables.isConnected(),
                     "values": values,
+                    "controller": infer_controller_status(dynamic_controller_values),
                     "warnings": torque_warnings(values),
                 },
             )
