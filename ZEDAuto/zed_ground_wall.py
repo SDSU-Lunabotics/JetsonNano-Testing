@@ -729,7 +729,13 @@ def main():
                     break
                 if key == ord("m"):
                     manual_mode = not manual_mode
-                    print(f"Manual drive mode: {'ON' if manual_mode else 'OFF'}")
+                    if manual_mode:
+                        # Entering manual mode pauses auto navigation but keeps the last goal.
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                        print("Manual drive mode: ON (auto paused)")
+                    else:
+                        print("Manual drive mode: OFF (auto resumed)")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0
