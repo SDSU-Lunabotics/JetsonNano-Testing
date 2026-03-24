@@ -148,6 +148,7 @@ Then run the same single command:
 - `x`: Zero manual drive command.
 - `space`: Emergency stop.
 - `q`: Quit.
+- `ZED Drive Status` window: Live mode (`STOPPED`, `MANUAL`, `AUTO`, `IDLE`), goal/target location, NT connection state, and live forward/turn command bars.
 
 ## Optional Stream Receiver Example
 If streaming is enabled (`--stream-ip ...`), a receiver can use:
