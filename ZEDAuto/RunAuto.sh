@@ -62,7 +62,6 @@ cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
-cmd+=(--manual-key-timeout-sec "${MANUAL_KEY_TIMEOUT_SEC:-0.45}")
 if [[ "${HEATMAP:-0}" == "1" ]]; then
   cmd+=(--heatmap)
   cmd+=(--heatmap-mode "${HEATMAP_MODE:-risk}")
