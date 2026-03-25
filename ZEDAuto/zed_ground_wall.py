@@ -603,7 +603,10 @@ def main():
                             # Camera forward axis in world frame (Z in camera frame).
                             forward = R_world_cam[:, 2]
                             fx, fz = float(forward[0]), float(forward[2])
-                            ang = np.arctan2(fz, fx) + np.pi
+                            # Match visualization heading with drive-control heading convention.
+                            ang = np.arctan2(fz, fx)
+                            if args.drive_heading_flip:
+                                ang += np.pi
                             size = max(3, int(args.map_camera_size) * 2)
                             tip_r = int(r0 - np.sin(ang) * size)
                             tip_c = int(c0 + np.cos(ang) * size)
