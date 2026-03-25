@@ -800,7 +800,11 @@ def main():
                                     turn = 0.0
                                 else:
                                     turn = max(-1.0, min(1.0, args.drive_turn_k * err))
-                                fwd = max(0.0, min(1.0, args.drive_speed))
+
+                                # Slow/stop forward motion until heading is aligned so we do not
+                                # drive away from the target while turning.
+                                align_scale = max(0.0, math.cos(err))
+                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale
 
                                 send_nt_command(
                                     True,
