@@ -26,10 +26,14 @@ MotorCommandMode = Literal["percent", "rpm", "stop"]
 class MotorCommandRequest(BaseModel):
     mode: MotorCommandMode
     value: Optional[float] = None
-    duration_ms: Optional[int] = Field(default=None, ge=50)
+    duration_ms: Optional[int] = Field(default=None, ge=0)
 
 
 class MotorCommandResponse(BaseModel):
     ok: bool
     motor_id: str
+    mode: Optional[MotorCommandMode] = None
+    value: Optional[float] = None
+    duration_ms: Optional[int] = None
+    request_id: Optional[float] = None
     timestamp_ms: int

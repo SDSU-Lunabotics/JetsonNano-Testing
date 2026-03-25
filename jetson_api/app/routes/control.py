@@ -76,7 +76,7 @@ def set_estop(req: EstopRequest) -> EstopResponse:
         state_service.autonomy_enabled = False
         state_service.manual_motion_active = False
         state_service.excavator_running = False
-        state_service.conveyor_running = False
+        state_service.deposition_running = False
 
         # Clear last drive command info on estop
         state_service.last_drive_speed = None

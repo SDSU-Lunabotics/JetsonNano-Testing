@@ -1,6 +1,6 @@
 from typing import List
 
-from app.schemas.common import MotorId
+from app.schemas.common import Fault, FaultCode, MotorId
 from app.schemas.motors import (
     MotorHealth,
     MotorsStatusResponse,
@@ -13,79 +13,45 @@ from app.services.roborio_bridge_service import roborio_bridge_service
 
 class MotorService:
     def get_status(self) -> MotorsStatusResponse:
-        timestamp = now_ms()
+        payload = roborio_bridge_service.get_motors_status()
+        timestamp = int(payload.get("timestamp_ms") or now_ms())
+        motors: List[MotorHealth] = []
 
-        values = roborio_bridge_service.get_status().get("values", {})
+        for raw_motor in payload.get("motors", []):
+            motor_id_raw = raw_motor.get("motor_id")
+            if motor_id_raw is None:
+                continue
 
-        def num(key: str):
-            value = values.get(key)
             try:
-                return float(value) if value is not None else None
-            except Exception:
-                return None
+                motor_id = MotorId(motor_id_raw)
+            except ValueError:
+                continue
 
-        def boolean(key: str):
-            value = values.get(key)
-            if isinstance(value, bool):
-                return value
-            return None
+            faults: List[Fault] = []
+            if raw_motor.get("fault"):
+                bridge_fault_code = raw_motor.get("fault_code")
+                message = bridge_fault_code or f"{motor_id.value} reported a fault"
+                faults.append(
+                    Fault(
+                        code=FaultCode.MOTOR_TORQUE_FAULT,
+                        severity="error",
+                        message=message,
+                        source="roborio",
+                        timestamp_ms=timestamp,
+                    )
+                )
 
-        motors: List[MotorHealth] = [
-            MotorHealth(
-                motor_id=MotorId.left_front,
-                enabled=boolean("Kraken/LeftFront/Enabled"),
-                current_a=num("Kraken/LeftFront/TorqueCurrentA"),
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-            MotorHealth(
-                motor_id=MotorId.left_rear,
-                enabled=boolean("Kraken/LeftRear/Enabled"),
-                current_a=num("Kraken/LeftRear/TorqueCurrentA"),
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-            MotorHealth(
-                motor_id=MotorId.right_front,
-                enabled=boolean("Kraken/RightFront/Enabled"),
-                current_a=num("Kraken/RightFront/TorqueCurrentA"),
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-            MotorHealth(
-                motor_id=MotorId.right_rear,
-                enabled=boolean("Kraken/RightRear/Enabled"),
-                current_a=num("Kraken/RightRear/TorqueCurrentA"),
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-            MotorHealth(
-                motor_id=MotorId.excavator,
-                enabled=None,
-                current_a=None,
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-            MotorHealth(
-                motor_id=MotorId.deposition,
-                enabled=None,
-                current_a=None,
-                rpm=None,
-                torque_nm=None,
-                last_update_ms=timestamp,
-                faults=[],
-            ),
-        ]
+            motors.append(
+                MotorHealth(
+                    motor_id=motor_id,
+                    enabled=bool(raw_motor.get("enabled")) if raw_motor.get("enabled") is not None else None,
+                    current_a=_optional_float(raw_motor.get("current_a")),
+                    rpm=_optional_float(raw_motor.get("rpm")),
+                    torque_nm=None,
+                    last_update_ms=raw_motor.get("last_update_ms") or timestamp,
+                    faults=faults,
+                )
+            )
 
         return MotorsStatusResponse(
             timestamp_ms=timestamp,
@@ -93,12 +59,35 @@ class MotorService:
         )
 
     def command_motor(self, motor_id: MotorId, req: MotorCommandRequest) -> MotorCommandResponse:
-        # Placeholder until direct motor command wiring is added
-        return MotorCommandResponse(
-            ok=True,
+        response = roborio_bridge_service.command_motor(
             motor_id=motor_id.value,
-            timestamp_ms=now_ms(),
+            mode=req.mode,
+            value=req.value,
+            duration_ms=req.duration_ms,
         )
+        return MotorCommandResponse(
+            ok=bool(response.get("ok", False)),
+            motor_id=str(response.get("motor_id", motor_id.value)),
+            mode=str(response.get("mode", req.mode)),
+            value=_optional_float(response.get("value")),
+            duration_ms=_optional_int(response.get("duration_ms")),
+            request_id=_optional_float(response.get("request_id")),
+            timestamp_ms=int(response.get("timestamp_ms") or now_ms()),
+        )
+
+
+def _optional_float(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(value):
+    try:
+        return int(float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 motor_service = MotorService()

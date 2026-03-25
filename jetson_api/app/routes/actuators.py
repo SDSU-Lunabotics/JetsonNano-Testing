@@ -25,14 +25,24 @@ def excavator_stop():
     return {"ok": True, "timestamp_ms": now_ms()}
 
 
+@router.post("/deposition/start")
+def deposition_start():
+    _guard()
+    state_service.deposition_running = True
+    return {"ok": True, "timestamp_ms": now_ms()}
+
+
+@router.post("/deposition/stop")
+def deposition_stop():
+    state_service.deposition_running = False
+    return {"ok": True, "timestamp_ms": now_ms()}
+
+
 @router.post("/conveyor/start")
 def conveyor_start():
-    _guard()
-    state_service.conveyor_running = True
-    return {"ok": True, "timestamp_ms": now_ms()}
+    return deposition_start()
 
 
 @router.post("/conveyor/stop")
 def conveyor_stop():
-    state_service.conveyor_running = False
-    return {"ok": True, "timestamp_ms": now_ms()}
+    return deposition_stop()

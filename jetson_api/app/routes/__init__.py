@@ -11,7 +11,7 @@ from .motors import router as motors_router
 from .camera import router as camera_router
 from .lidar import router as lidar_router
 from .scripts import router as scripts_router
-from .admin import router as admin_router
+from .wireless import router as wireless_router
 
 router = APIRouter()
 
@@ -26,4 +26,4 @@ router.include_router(motors_router)
 router.include_router(camera_router)
 router.include_router(lidar_router)
 router.include_router(scripts_router)
-router.include_router(admin_router)
+router.include_router(wireless_router)
