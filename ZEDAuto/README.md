@@ -113,6 +113,9 @@ Additional settings that can be used (with defaults):
 - `--drive-ready-pulse-sec 0.10`: How long CommandReady stays high per command pulse.
 - `--nt-health-debug`: Print NetworkTables session health plus incoming robot-published `Jetson/*` drive keys.
 - `--nt-health-period-sec 1.0`: Seconds between NT health debug prints.
+- `--nt-enable-heartbeat-sec 0.10`: Re-publish automation state keys while driving.
+- `--nt-command-ack-timeout-sec 0.30`: Clear stale `CommandReady` if robot does not consume it.
+- `--nt-forward-scale 1.0`, `--nt-turn-scale 1.0`: Values written to `Jetson/Speed` and `Jetson/TurnSpeed`.
 - `--floor-update-sec 0.5`: Seconds between floor-plane updates.
 - `--floor-min-normal-y 0.5`: Reject floor planes with |normal.y| below this.
 - `--stream-ip`: UDP target IP for GStreamer stream.

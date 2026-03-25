@@ -134,6 +134,30 @@ def main():
         default=1.0,
         help="Seconds between NetworkTables health debug prints",
     )
+    parser.add_argument(
+        "--nt-enable-heartbeat-sec",
+        type=float,
+        default=0.10,
+        help="Seconds between automation-state heartbeat writes while driving",
+    )
+    parser.add_argument(
+        "--nt-command-ack-timeout-sec",
+        type=float,
+        default=0.30,
+        help="Seconds to wait before clearing a stuck CommandReady flag",
+    )
+    parser.add_argument(
+        "--nt-forward-scale",
+        type=float,
+        default=1.0,
+        help="Value written to Jetson/Speed while automation is enabled",
+    )
+    parser.add_argument(
+        "--nt-turn-scale",
+        type=float,
+        default=1.0,
+        help="Value written to Jetson/TurnSpeed while automation is enabled",
+    )
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
@@ -252,6 +276,8 @@ def main():
     nt_last_health_log = 0.0
     nt_health_seq = 0
     nt_command_seq = 0
+    nt_ready_stuck_since = 0.0
+    nt_last_auto_push = 0.0
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
@@ -291,33 +317,72 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def send_nt_command(enabled, fwd, turn, duration):
-        nonlocal nt_command_seq, nt_ready_high, nt_ready_clear_time, last_drive_debug_time
+        nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
+        nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
         nonlocal status_cmd_enabled, status_cmd_fwd, status_cmd_turn, status_cmd_duration
         if sd is None:
             return
-        nt_command_seq += 1
+        now = time.time()
+        enabled = bool(enabled)
         status_cmd_enabled = bool(enabled)
         status_cmd_fwd = float(fwd)
         status_cmd_turn = float(turn)
         status_cmd_duration = float(duration)
-        sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
+
+        def push_automation_state(force=False):
+            nonlocal nt_last_auto_push
+            if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
+                return
+            sd.putBoolean("Jetson/AutomationEnabled", enabled)
+            # Robot-side code may scale command by these keys.
+            if enabled:
+                sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
+                sd.putNumber("Jetson/TurnSpeed", float(args.nt_turn_scale))
+            else:
+                sd.putNumber("Jetson/Speed", 0.0)
+                sd.putNumber("Jetson/TurnSpeed", 0.0)
+            nt_last_auto_push = now
+
+        push_automation_state(force=not enabled)
+        if not enabled:
+            # Clear string-based legacy command channels when auto-drive is off.
+            sd.putString("Jetson/Command", "")
+            sd.putBoolean("Jetson/CommandReady", False)
+            nt_ready_high = False
+            nt_ready_stuck_since = 0.0
+            return
+
+        # Avoid stomping in-flight commands if robot has not consumed CommandReady yet.
+        remote_ready = sd.getBoolean("Jetson/CommandReady", False)
+        if remote_ready and not nt_ready_high:
+            if nt_ready_stuck_since <= 0.0:
+                nt_ready_stuck_since = now
+            if (now - nt_ready_stuck_since) >= max(0.05, float(args.nt_command_ack_timeout_sec)):
+                if args.drive_debug:
+                    print("Warning: stale CommandReady detected; clearing flag.")
+                sd.putBoolean("Jetson/CommandReady", False)
+                nt_ready_stuck_since = 0.0
+            else:
+                return
+        else:
+            nt_ready_stuck_since = 0.0
+
+        nt_command_seq += 1
         sd.putNumber("Jetson/CommandForward", float(fwd))
         sd.putNumber("Jetson/CommandTurn", float(turn))
         sd.putNumber("Jetson/CommandDuration", float(duration))
         sd.putNumber("Jetson/CommandSeq", float(nt_command_seq))
-        if not enabled:
-            # Clear string-based legacy command channels when auto-drive is off.
-            sd.putString("Jetson/Command", "")
+
         # Pulse CommandReady high, then clear shortly after.
-        # Keep the pulse shorter than the command period so a distinct low interval exists.
+        # Keep it near configured value, but ensure a short low interval exists each cycle.
         cmd_period = max(0.02, float(duration))
-        pulse_sec = min(max(0.01, float(args.drive_ready_pulse_sec)), max(0.01, cmd_period * 0.4))
+        pulse_sec = max(0.01, float(args.drive_ready_pulse_sec))
+        pulse_sec = min(pulse_sec, max(0.01, cmd_period - 0.01))
         if not nt_ready_high:
             sd.putBoolean("Jetson/CommandReady", True)
             nt_ready_high = True
-            nt_ready_clear_time = time.time() + pulse_sec
+            nt_ready_clear_time = now + pulse_sec
         if args.drive_debug:
-            now = time.time()
             if (now - last_drive_debug_time) >= 0.2:
                 print(
                     f"NT cmd seq={nt_command_seq:.0f} enabled={bool(enabled)} "
