@@ -17,4 +17,4 @@ def motor_command(motor_id: MotorId, req: MotorCommandRequest) -> MotorCommandRe
     try:
         return motor_service.command_motor(motor_id, req)
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))

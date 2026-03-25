@@ -32,3 +32,13 @@ class WirelessStatusResponse(BaseModel):
     devices: List[DeviceWirelessStatus] = Field(default_factory=list)
     average_bandwidth: float = 0.0
     team_ssid: str = "TEAM_00"
+
+
+class WirelessConfigUpdateRequest(BaseModel):
+    team_ssid: str = Field(min_length=1, max_length=128)
+
+
+class WirelessConfigUpdateResponse(BaseModel):
+    ok: bool = True
+    team_ssid: str
+    timestamp_ms: int = Field(default_factory=lambda: int(time.time() * 1000))

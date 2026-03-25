@@ -63,9 +63,12 @@ class NTService:
         self.initialize()
         self._table.putBoolean("Jetson/ExcavatorEnabled", bool(enabled))
 
-    def set_conveyor(self, enabled: bool) -> None:
+    def set_deposition(self, enabled: bool) -> None:
         self.initialize()
         self._table.putBoolean("Jetson/ConveyorEnabled", bool(enabled))
+
+    def set_conveyor(self, enabled: bool) -> None:
+        self.set_deposition(enabled)
 
     def stop_all_motion(self) -> None:
         self.initialize()

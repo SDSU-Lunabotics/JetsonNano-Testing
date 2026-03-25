@@ -21,7 +21,7 @@ class StateService:
 
         self.estop = False
         self.excavator_running = False
-        self.conveyor_running = False
+        self.deposition_running = False
 
     def status_dict(self) -> dict:
         return {
@@ -35,7 +35,9 @@ class StateService:
             "last_drive_timestamp_ms": self.last_drive_timestamp_ms,
             "estop": self.estop,
             "excavator_running": self.excavator_running,
-            "conveyor_running": self.conveyor_running,
+            "deposition_running": self.deposition_running,
+            # Keep the legacy key for older clients while the UI finishes migrating.
+            "conveyor_running": self.deposition_running,
             "timestamp_ms": now_ms(),
         }
 

@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pathlib import Path
 
 
 class Settings(BaseSettings):
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
 
     dry_run: bool = True
     allow_reboot: bool = False
+    wireless_state_file: str = str(Path(__file__).resolve().parents[2] / "data" / "wireless_state.json")
 
     class Config:
         env_file = ".env"
