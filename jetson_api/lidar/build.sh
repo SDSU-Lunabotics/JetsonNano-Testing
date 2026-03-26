@@ -9,9 +9,26 @@
 
 set -e
 
-SDK_DIR="$HOME/unilidar_sdk2/unitree_lidar_sdk"
+# Auto-detect SDK location — checks both common paths
+if [ -d "$HOME/unitree_ws/unilidar_sdk/unitree_lidar_sdk" ]; then
+    SDK_DIR="$HOME/unitree_ws/unilidar_sdk/unitree_lidar_sdk"
+elif [ -d "$HOME/unilidar_sdk2/unitree_lidar_sdk" ]; then
+    SDK_DIR="$HOME/unilidar_sdk2/unitree_lidar_sdk"
+else
+    echo "ERROR: Cannot find SDK. Checked:"
+    echo "  $HOME/unitree_ws/unilidar_sdk/unitree_lidar_sdk"
+    echo "  $HOME/unilidar_sdk2/unitree_lidar_sdk"
+    echo "Edit SDK_DIR in this script to match your path."
+    exit 1
+fi
+echo "=== SDK found at: $SDK_DIR ==="
 BIN_DIR="$SDK_DIR/bin"
-LIB_DIR="$SDK_DIR/lib/x86_64"
+
+# Auto-detect architecture — works on both x86_64 (WSL2/PC) and aarch64 (Jetson)
+ARCH=$(uname -m)
+LIB_DIR="$SDK_DIR/lib/$ARCH"
+echo "=== Detected architecture: $ARCH ==="
+echo "=== Using lib dir: $LIB_DIR ==="
 INC_DIR="$SDK_DIR/include"
 
 echo "=== Checking SDK paths ==="
