@@ -231,6 +231,7 @@ def infer_controller_status(values):
         if any(token in normalized for token in ("controller", "xbox", "joystick", "gamepad")):
             controller_keys[key] = value
 
+    connected_candidates = []
     for key in (
         "Controller/Connected",
         "Controller/Present",
@@ -239,14 +240,19 @@ def infer_controller_status(values):
     ):
         value = controller_keys.get(key)
         if value is not None:
-            connected = parse_value("boolean", value)
-            break
+            connected_candidates.append(parse_value("boolean", value))
 
+    if connected_candidates:
+        connected = any(connected_candidates)
+
+    xbox_candidates = []
     for key in ("Controller/IsXbox", "Controller/ExpectedPortIsXbox"):
         value = controller_keys.get(key)
         if value is not None:
-            is_xbox = parse_value("boolean", value)
-            break
+            xbox_candidates.append(parse_value("boolean", value))
+
+    if xbox_candidates:
+        is_xbox = any(xbox_candidates)
 
     expected_port = controller_keys.get("Controller/Port")
     detected_port = controller_keys.get("Controller/DetectedPort", controller_keys.get("Xbox/Port"))
@@ -254,8 +260,12 @@ def infer_controller_status(values):
     for key, value in controller_keys.items():
         normalized = key.lower()
 
-        if connected is None and any(token in normalized for token in ("connected", "present", "detected", "plugged")):
-            connected = parse_value("boolean", value)
+        if any(token in normalized for token in ("connected", "present", "detected", "plugged")):
+            candidate = parse_value("boolean", value)
+            if connected is None:
+                connected = candidate
+            else:
+                connected = connected or candidate
             continue
 
         if last_input_ms is None and any(token in normalized for token in ("lastinputms", "last_input_ms", "lastinput", "last_input", "timestamp")):

@@ -59,6 +59,44 @@ class TelemetryService:
             last_input=last_input,
         )
 
+    def _bool_value(self, value) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return None
+
+    def _armed_status(self, bridge_status) -> bool:
+        if self._combined_estop(bridge_status):
+            return False
+
+        if not bool(bridge_status.get("connected", False)):
+            return False
+
+        values = bridge_status.get("values") or {}
+        enabled = self._bool_value(values.get("RoboRIO/Enabled"))
+        if enabled is not None:
+            return enabled
+
+        driver_station_attached = self._bool_value(values.get("RoboRIO/DriverStationAttached"))
+        return bool(driver_station_attached)
+
+    def _combined_estop(self, bridge_status) -> bool:
+        if state_service.estop:
+            return True
+
+        values = bridge_status.get("values") or {}
+        roborio_estop = self._bool_value(values.get("Jetson/EStop"))
+        return bool(roborio_estop)
+
     def get_status(self) -> StatusResponse:
         now = now_ms()
         self._jetson_last_seen_ms = now
@@ -76,8 +114,8 @@ class TelemetryService:
         )
 
         control = ControlStatus(
-            armed=not state_service.estop,
-            estop=state_service.estop,
+            armed=self._armed_status(bridge_status),
+            estop=self._combined_estop(bridge_status),
             mode="manual",
             autonomy_running=state_service.autonomy_enabled,
             controller=self._controller_status(bridge_status),
