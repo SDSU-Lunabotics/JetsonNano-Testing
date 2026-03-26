@@ -136,12 +136,16 @@ def _render_semantic_map(
         cc1 = min(w, cc + 3)
         out[rr0:rr1, cc0:cc1] = (255, 255, 255)
 
-    # Legend panel
-    legend_h = max(20 * (len(class_names) + 1), 80)
+    # Legend panel (match map height so hstack always works)
+    legend_h = h
     legend = np.zeros((legend_h, 250, 3), dtype=np.uint8)
     cv2.putText(legend, "Semantic Map", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+    usable_h = max(20, legend_h - 44)
+    step = max(14, usable_h // max(1, len(class_names)))
     y = 38
     for i, name in enumerate(class_names):
+        if y >= (legend_h - 4):
+            break
         col = _class_color(i)
         cv2.rectangle(legend, (10, y - 10), (24, y + 2), col, -1)
         cv2.putText(
@@ -154,7 +158,7 @@ def _render_semantic_map(
             1,
             cv2.LINE_AA,
         )
-        y += 18
+        y += step
     return np.hstack((out, legend))
 
 
