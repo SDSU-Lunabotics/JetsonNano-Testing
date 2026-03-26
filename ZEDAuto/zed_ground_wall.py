@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
@@ -122,6 +123,41 @@ def main():
         help="How long CommandReady stays high per command pulse",
     )
     parser.add_argument("--drive-debug", action="store_true", help="Print outgoing NT drive commands")
+    parser.add_argument(
+        "--nt-health-debug",
+        action="store_true",
+        help="Print NetworkTables session health and robot-published Jetson drive keys",
+    )
+    parser.add_argument(
+        "--nt-health-period-sec",
+        type=float,
+        default=1.0,
+        help="Seconds between NetworkTables health debug prints",
+    )
+    parser.add_argument(
+        "--nt-enable-heartbeat-sec",
+        type=float,
+        default=0.10,
+        help="Seconds between automation-state heartbeat writes while driving",
+    )
+    parser.add_argument(
+        "--nt-command-ack-timeout-sec",
+        type=float,
+        default=0.30,
+        help="Seconds to wait before clearing a stuck CommandReady flag",
+    )
+    parser.add_argument(
+        "--nt-forward-scale",
+        type=float,
+        default=1.0,
+        help="Value written to Jetson/Speed while automation is enabled",
+    )
+    parser.add_argument(
+        "--nt-turn-scale",
+        type=float,
+        default=1.0,
+        help="Value written to Jetson/TurnSpeed while automation is enabled",
+    )
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
@@ -235,11 +271,23 @@ def main():
     last_s_time = 0.0
     last_a_time = 0.0
     last_d_time = 0.0
-    key_hold_timeout = 0.2
+    key_hold_timeout = 0.35
     nt_last_conn_log = 0.0
+    nt_last_health_log = 0.0
+    nt_health_seq = 0
+    nt_command_seq = 0
+    nt_ready_stuck_since = 0.0
+    nt_last_auto_push = 0.0
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
+    nt_connected_cached = False
+    status_cmd_enabled = False
+    status_cmd_fwd = 0.0
+    status_cmd_turn = 0.0
+    status_cmd_duration = 0.0
+    status_target_cell = None
+    status_target_world = None
     last_path_plan_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
@@ -269,28 +317,190 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def send_nt_command(enabled, fwd, turn, duration):
+        nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
         nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
+        nonlocal status_cmd_enabled, status_cmd_fwd, status_cmd_turn, status_cmd_duration
         if sd is None:
             return
-        sd.putBoolean("Jetson/AutomationEnabled", bool(enabled))
-        sd.putNumber("Jetson/CommandForward", float(fwd))
-        sd.putNumber("Jetson/CommandTurn", float(turn))
-        sd.putNumber("Jetson/CommandDuration", float(duration))
+        now = time.time()
+        enabled = bool(enabled)
+        status_cmd_enabled = bool(enabled)
+        status_cmd_fwd = float(fwd)
+        status_cmd_turn = float(turn)
+        status_cmd_duration = float(duration)
+
+        def push_automation_state(force=False):
+            nonlocal nt_last_auto_push
+            if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
+                return
+            sd.putBoolean("Jetson/AutomationEnabled", enabled)
+            # Robot-side code may scale command by these keys.
+            if enabled:
+                sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
+                sd.putNumber("Jetson/TurnSpeed", float(args.nt_turn_scale))
+            else:
+                sd.putNumber("Jetson/Speed", 0.0)
+                sd.putNumber("Jetson/TurnSpeed", 0.0)
+            nt_last_auto_push = now
+
+        push_automation_state(force=not enabled)
         if not enabled:
             # Clear string-based legacy command channels when auto-drive is off.
             sd.putString("Jetson/Command", "")
+            sd.putBoolean("Jetson/CommandReady", False)
+            nt_ready_high = False
+            nt_ready_stuck_since = 0.0
+            return
+
+        # Avoid stomping in-flight commands if robot has not consumed CommandReady yet.
+        remote_ready = sd.getBoolean("Jetson/CommandReady", False)
+        if remote_ready and not nt_ready_high:
+            if nt_ready_stuck_since <= 0.0:
+                nt_ready_stuck_since = now
+            if (now - nt_ready_stuck_since) >= max(0.05, float(args.nt_command_ack_timeout_sec)):
+                if args.drive_debug:
+                    print("Warning: stale CommandReady detected; clearing flag.")
+                sd.putBoolean("Jetson/CommandReady", False)
+                nt_ready_stuck_since = 0.0
+            else:
+                return
+        else:
+            nt_ready_stuck_since = 0.0
+
+        nt_command_seq += 1
+        sd.putNumber("Jetson/CommandForward", float(fwd))
+        sd.putNumber("Jetson/CommandTurn", float(turn))
+        sd.putNumber("Jetson/CommandDuration", float(duration))
+        sd.putNumber("Jetson/CommandSeq", float(nt_command_seq))
+
         # Pulse CommandReady high, then clear shortly after.
-        sd.putBoolean("Jetson/CommandReady", True)
-        nt_ready_high = True
-        nt_ready_clear_time = time.time() + max(0.01, float(args.drive_ready_pulse_sec))
+        # Keep it near configured value, but ensure a short low interval exists each cycle.
+        cmd_period = max(0.02, float(duration))
+        pulse_sec = max(0.01, float(args.drive_ready_pulse_sec))
+        pulse_sec = min(pulse_sec, max(0.01, cmd_period - 0.01))
+        if not nt_ready_high:
+            sd.putBoolean("Jetson/CommandReady", True)
+            nt_ready_high = True
+            nt_ready_clear_time = now + pulse_sec
         if args.drive_debug:
-            now = time.time()
             if (now - last_drive_debug_time) >= 0.2:
                 print(
-                    f"NT cmd enabled={bool(enabled)} fwd={float(fwd):+.2f} "
-                    f"turn={float(turn):+.2f} dur={float(duration):.2f}"
+                    f"NT cmd seq={nt_command_seq:.0f} enabled={bool(enabled)} "
+                    f"fwd={float(fwd):+.2f} turn={float(turn):+.2f} "
+                    f"dur={float(duration):.2f} pulse={pulse_sec:.2f}"
                 )
                 last_drive_debug_time = now
+
+    def nt_connections_summary():
+        if not HAS_NT:
+            return "nt-disabled"
+        try:
+            conns = NetworkTables.getConnections()
+        except Exception:
+            return "unavailable"
+        if not conns:
+            return "none"
+        parts = []
+        for conn in conns[:3]:
+            remote_id = getattr(conn, "remote_id", "?")
+            remote_ip = getattr(conn, "remote_ip", "?")
+            parts.append(f"{remote_id}@{remote_ip}")
+        if len(conns) > 3:
+            parts.append(f"+{len(conns) - 3} more")
+        return ", ".join(parts)
+
+    def render_status_panel(cam_cell):
+        panel_h = 300
+        panel_w = 620
+        panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
+        panel[:] = (24, 24, 24)
+
+        def put_line(text, y, color=(235, 235, 235), scale=0.55):
+            cv2.putText(
+                panel,
+                text,
+                (16, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                scale,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+        def draw_axis(label, value, y):
+            value = max(-1.0, min(1.0, float(value)))
+            put_line(f"{label}: {value:+.2f}", y - 10)
+            x0, x1 = 170, panel_w - 20
+            cx = (x0 + x1) // 2
+            cv2.line(panel, (x0, y), (x1, y), (90, 90, 90), 1)
+            cv2.line(panel, (cx, y - 9), (cx, y + 9), (140, 140, 140), 1)
+            half = (x1 - x0) // 2
+            vx = int(cx + value * half)
+            color = (0, 220, 0) if abs(value) <= 0.05 else ((0, 220, 255) if value > 0 else (255, 180, 0))
+            cv2.rectangle(panel, (min(cx, vx), y - 7), (max(cx, vx), y + 7), color, -1)
+
+        if not args.drive:
+            mode_label = "DRIVE OFF"
+            mode_color = (180, 180, 180)
+        elif emergency_stop:
+            mode_label = "STOPPED"
+            mode_color = (0, 80, 255)
+        elif manual_mode:
+            mode_label = "MANUAL"
+            mode_color = (0, 220, 255)
+        elif goal_cell is not None:
+            mode_label = "AUTO"
+            mode_color = (0, 220, 0)
+        else:
+            mode_label = "IDLE"
+            mode_color = (180, 180, 180)
+
+        put_line("ZED DRIVE STATUS", 30, (255, 255, 255), 0.72)
+        put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
+        put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
+        put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
+
+        if goal_cell is None:
+            put_line("Goal cell: none", 148, (190, 190, 190))
+            put_line("Goal world: none", 172, (190, 190, 190))
+        else:
+            goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 148, (220, 240, 255))
+            if goal_world is None:
+                put_line("Goal world: unavailable", 172, (190, 190, 190))
+            else:
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 172, (220, 240, 255))
+
+        if status_target_world is None:
+            put_line("Active target: none", 196, (190, 190, 190))
+        else:
+            tc = status_target_cell
+            if tc is None:
+                put_line(
+                    f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
+                    196,
+                    (255, 235, 170),
+                )
+            else:
+                put_line(
+                    f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
+                    196,
+                    (255, 235, 170),
+                )
+
+        if cam_cell is None:
+            put_line("Robot cell: unavailable", 220, (190, 190, 190))
+        else:
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 220, (180, 255, 220))
+
+        put_line(
+            f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
+            246,
+            (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
+        )
+        draw_axis("Forward", status_cmd_fwd, 270)
+        draw_axis("Turn", status_cmd_turn, 292)
+        return panel
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -370,6 +580,7 @@ def main():
             if HAS_CV2:
                 map_vis = None
                 heatmap_vis = None
+                cam_row_col = None
                 if xyz.size > 0:
                     # Transform to world frame if tracking is enabled.
                     xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
@@ -392,7 +603,10 @@ def main():
                             # Camera forward axis in world frame (Z in camera frame).
                             forward = R_world_cam[:, 2]
                             fx, fz = float(forward[0]), float(forward[2])
-                            ang = np.arctan2(fz, fx) + np.pi
+                            # Match visualization heading with drive-control heading convention.
+                            ang = np.arctan2(fz, fx)
+                            if args.drive_heading_flip:
+                                ang += np.pi
                             size = max(3, int(args.map_camera_size) * 2)
                             tip_r = int(r0 - np.sin(ang) * size)
                             tip_c = int(c0 + np.cos(ang) * size)
@@ -431,7 +645,12 @@ def main():
                             clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
                             if clear_cells > 0:
                                 obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
-                            path_cells = map_utils.astar_path(cam_row_col, goal_cell, obs)
+                            path_cells = map_utils.astar_path(
+                                cam_row_col,
+                                goal_cell,
+                                obs,
+                                connectivity=args.path_connectivity,
+                            )
                             if path_cells:
                                 last_path_cells = path_cells
                             else:
@@ -487,13 +706,35 @@ def main():
                         if nt_ready_high and now >= nt_ready_clear_time:
                             sd.putBoolean("Jetson/CommandReady", False)
                             nt_ready_high = False
-                        # Periodic connection status log.
-                        if (now - nt_last_conn_log) >= 2.0:
+                        if args.nt_health_debug and (now - nt_last_health_log) >= max(0.2, args.nt_health_period_sec):
+                            nt_last_health_log = now
+                            nt_health_seq += 1
                             connected = NetworkTables.isConnected()
+                            nt_connected_cached = bool(connected)
+                            sd.putNumber("Jetson/NTClientSeq", float(nt_health_seq))
+                            sd.putNumber("Jetson/NTClientUnix", float(now))
+                            sd.putString("Jetson/NTClientName", "zed_ground_wall.py")
+                            drive_forward_in = sd.getNumber("Jetson/DriveForward", float("nan"))
+                            drive_turn_in = sd.getNumber("Jetson/DriveTurn", float("nan"))
+                            speed_in = sd.getNumber("Jetson/Speed", float("nan"))
+                            turn_speed_in = sd.getNumber("Jetson/TurnSpeed", float("nan"))
+                            ack_seq = sd.getNumber("Jetson/NTServerAckSeq", -1.0)
+                            print(
+                                f"NT health connected={connected} target={args.roborio_ip} "
+                                f"peers=[{nt_connections_summary()}] tx_seq={nt_health_seq} ack_seq={ack_seq:.0f} "
+                                f"rx_fwd={drive_forward_in:+.2f} rx_turn={drive_turn_in:+.2f} "
+                                f"rx_speed={speed_in:+.2f} rx_turn_speed={turn_speed_in:+.2f}"
+                            )
+                        elif (now - nt_last_conn_log) >= 2.0:
+                            # Periodic lightweight connection status when health debug is off.
+                            connected = NetworkTables.isConnected()
+                            nt_connected_cached = bool(connected)
                             print(f"NT connected={connected} target={args.roborio_ip}")
                             nt_last_conn_log = now
                         if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
                             last_drive_send = now
+                            status_target_cell = None
+                            status_target_world = None
                             if emergency_stop:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif manual_mode:
@@ -514,6 +755,8 @@ def main():
                                     if wp_world is None:
                                         continue
                                     tx, tz = wp_world
+                                    status_target_cell = wp_rc
+                                    status_target_world = (float(tx), float(tz))
                                 elif goal_cell is not None:
                                     # Fallback: drive directly toward clicked goal if path is not ready yet.
                                     goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
@@ -521,6 +764,8 @@ def main():
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
                                     tx, tz = goal_world_fallback
+                                    status_target_cell = goal_cell
+                                    status_target_world = (float(tx), float(tz))
                                 else:
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
@@ -555,7 +800,11 @@ def main():
                                     turn = 0.0
                                 else:
                                     turn = max(-1.0, min(1.0, args.drive_turn_k * err))
-                                fwd = max(0.0, min(1.0, args.drive_speed))
+
+                                # Slow/stop forward motion until heading is aligned so we do not
+                                # drive away from the target while turning.
+                                align_scale = max(0.0, math.cos(err))
+                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale
 
                                 send_nt_command(
                                     True,
@@ -658,12 +907,20 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
+                cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     break
                 if key == ord("m"):
                     manual_mode = not manual_mode
-                    print(f"Manual drive mode: {'ON' if manual_mode else 'OFF'}")
+                    if manual_mode:
+                        # Entering manual mode pauses auto navigation but keeps the last goal.
+                        emergency_stop = False
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                        print("Manual drive mode: ON (auto paused)")
+                    else:
+                        print("Manual drive mode: OFF (auto resumed)")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0

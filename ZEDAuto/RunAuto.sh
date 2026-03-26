@@ -51,7 +51,13 @@ cmd+=(--free-confirm-ratio "${FREE_CONFIRM_RATIO:-1.2}")
 cmd+=(--free-downgrade-factor "${FREE_DOWNGRADE_FACTOR:-0.6}")
 cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
 cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
+cmd+=(--obstacle-thresh-m "${OBSTACLE_THRESH_M:-0.05}")
+cmd+=(--hole-thresh-m "${HOLE_THRESH_M:-0.05}")
 if [[ "${DISABLE_HOLES:-0}" == "1" ]]; then cmd+=(--disable-holes); fi
+cmd+=(--path-avoid-occ-min "${PATH_AVOID_OCC_MIN:-5.0}")
+cmd+=(--path-avoid-occ-ratio "${PATH_AVOID_OCC_RATIO:-1.8}")
+cmd+=(--path-connectivity "${PATH_CONNECTIVITY:-8}")
+cmd+=(--rover-size-m "${ROVER_SIZE_M:-0.30}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
@@ -70,7 +76,13 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
   cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
   cmd+=(--drive-ready-pulse-sec "${DRIVE_READY_PULSE_SEC:-0.10}")
+  cmd+=(--nt-health-period-sec "${NT_HEALTH_PERIOD_SEC:-1.0}")
+  cmd+=(--nt-enable-heartbeat-sec "${NT_ENABLE_HEARTBEAT_SEC:-0.10}")
+  cmd+=(--nt-command-ack-timeout-sec "${NT_COMMAND_ACK_TIMEOUT_SEC:-0.30}")
+  cmd+=(--nt-forward-scale "${NT_FORWARD_SCALE:-1.0}")
+  cmd+=(--nt-turn-scale "${NT_TURN_SCALE:-1.0}")
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
+  if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
   if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
 fi
 
