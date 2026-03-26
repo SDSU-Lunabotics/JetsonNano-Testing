@@ -42,6 +42,7 @@ cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py")
 # Core mapping/tracking
 if [[ "${TRACKING:-1}" == "1" ]]; then cmd+=(--tracking); fi
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
+if [[ "${MAP_FOLLOW_ROVER:-1}" == "1" ]]; then cmd+=(--map-follow-rover); fi
 cmd+=(--map-scale "${MAP_SCALE:-3}")
 cmd+=(--free-decay "${FREE_DECAY:-1.0}")
 cmd+=(--free-decay-unconfirmed "${FREE_DECAY_UNCONFIRMED:-0.995}")
@@ -53,6 +54,7 @@ cmd+=(--occ-decay "${OCC_DECAY:-0.98}")
 cmd+=(--hole-decay "${HOLE_DECAY:-0.98}")
 cmd+=(--obstacle-thresh-m "${OBSTACLE_THRESH_M:-0.05}")
 cmd+=(--hole-thresh-m "${HOLE_THRESH_M:-0.05}")
+cmd+=(--max-above-ground-m "${MAX_ABOVE_GROUND_M:-1.22}")
 if [[ "${DISABLE_HOLES:-0}" == "1" ]]; then cmd+=(--disable-holes); fi
 cmd+=(--path-avoid-occ-min "${PATH_AVOID_OCC_MIN:-5.0}")
 cmd+=(--path-avoid-occ-ratio "${PATH_AVOID_OCC_RATIO:-1.8}")

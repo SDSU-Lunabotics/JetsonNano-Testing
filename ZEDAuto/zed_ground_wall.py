@@ -58,6 +58,11 @@ def main():
     parser.add_argument("--map-z-min", type=float, default=0.0, help="Minimum Z (forward) bound for map")
     parser.add_argument("--map-scale", type=int, default=3, help="Upscale factor for map display window")
     parser.add_argument("--map-center", action="store_true", help="Center map on Z=0 (start camera in middle)")
+    parser.add_argument(
+        "--map-follow-rover",
+        action="store_true",
+        help="Keep rover centered in occupancy map view (toggle with 'c')",
+    )
     parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
@@ -92,6 +97,12 @@ def main():
     )
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
+    parser.add_argument(
+        "--max-above-ground-m",
+        type=float,
+        default=1.22,
+        help="Ignore points above this height over floor plane (m). Set <=0 to disable.",
+    )
     parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
@@ -293,18 +304,49 @@ def main():
     plane_fail_count = 0
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
     has_plane = False
+    follow_rover_map = bool(args.map_follow_rover)
+    map_view_shift_r = 0
+    map_view_shift_c = 0
+
+    def apply_map_view(frame, focus_cell):
+        # Returns (frame_for_display, row_shift, col_shift) where:
+        # display_row = source_row + row_shift, display_col = source_col + col_shift
+        if frame is None:
+            return frame, 0, 0
+        if (not follow_rover_map) or (focus_cell is None):
+            return frame, 0, 0
+
+        h, w = frame.shape[:2]
+        fr, fc = int(focus_cell[0]), int(focus_cell[1])
+        shift_r = int((h // 2) - fr)
+        shift_c = int((w // 2) - fc)
+        out = np.zeros_like(frame)
+
+        src_r0 = max(0, -shift_r)
+        src_r1 = min(h, h - shift_r)
+        src_c0 = max(0, -shift_c)
+        src_c1 = min(w, w - shift_c)
+
+        if src_r0 < src_r1 and src_c0 < src_c1:
+            dst_r0 = src_r0 + shift_r
+            dst_r1 = src_r1 + shift_r
+            dst_c0 = src_c0 + shift_c
+            dst_c1 = src_c1 + shift_c
+            out[dst_r0:dst_r1, dst_c0:dst_c1] = frame[src_r0:src_r1, src_c0:src_c1]
+
+        return out, shift_r, shift_c
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
-        nonlocal emergency_stop, last_path_plan_time
+        nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c
         if event != cv2.EVENT_LBUTTONDOWN:
             if event == cv2.EVENT_RBUTTONDOWN:
                 emergency_stop = True
                 print("EMERGENCY STOP")
             return
         scale = max(1, int(args.map_scale))
-        row = int(y / scale)
-        col = int(x / scale)
+        row = int(y / scale) - int(map_view_shift_r)
+        col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
             return
         goal_cell = (row, col)
@@ -410,7 +452,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 300
+        panel_h = 330
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -459,47 +501,48 @@ def main():
         put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
         put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
+        put_line(f"Map follow: {'ON' if follow_rover_map else 'OFF'} (c)", 140, (180, 255, 220))
 
         if goal_cell is None:
-            put_line("Goal cell: none", 148, (190, 190, 190))
-            put_line("Goal world: none", 172, (190, 190, 190))
+            put_line("Goal cell: none", 168, (190, 190, 190))
+            put_line("Goal world: none", 192, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 148, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 168, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 172, (190, 190, 190))
+                put_line("Goal world: unavailable", 192, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 172, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 192, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 196, (190, 190, 190))
+            put_line("Active target: none", 216, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    196,
+                    216,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    196,
+                    216,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 220, (190, 190, 190))
+            put_line("Robot cell: unavailable", 240, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 220, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 240, (180, 255, 220))
 
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            246,
+            266,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 270)
-        draw_axis("Turn", status_cmd_turn, 292)
+        draw_axis("Forward", status_cmd_fwd, 290)
+        draw_axis("Turn", status_cmd_turn, 312)
         return panel
 
     while True:
@@ -559,6 +602,14 @@ def main():
             dist, ground_mask, obstacle_mask = segmentation.classify_points(
                 xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
             )
+            if args.max_above_ground_m > 0.0:
+                keep_mask = dist <= float(args.max_above_ground_m)
+                if not np.any(keep_mask):
+                    continue
+                xyz = xyz[keep_mask]
+                dist = dist[keep_mask]
+                ground_mask = ground_mask[keep_mask]
+                obstacle_mask = obstacle_mask[keep_mask]
             if args.disable_holes:
                 hole_mask = np.zeros(dist.shape, dtype=bool)
             else:
@@ -598,15 +649,54 @@ def main():
                         c1 = max(0, c0 - half)
                         c2 = min(occ_map.grid_w, c0 + half + 1)
                         map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
-                        # Draw heading triangle (blue) if tracking is enabled.
-                        if tracking_enabled and HAS_CV2:
-                            # Camera forward axis in world frame (Z in camera frame).
+                        heading_ang = None
+                        if tracking_enabled:
                             forward = R_world_cam[:, 2]
                             fx, fz = float(forward[0]), float(forward[2])
-                            # Match visualization heading with drive-control heading convention.
-                            ang = np.arctan2(fz, fx)
+                            heading_ang = np.arctan2(fz, fx)
                             if args.drive_heading_flip:
-                                ang += np.pi
+                                heading_ang += np.pi
+                        # Draw rover footprint (orange outline), scaled by rover size.
+                        rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
+                        if heading_ang is None:
+                            rr = int(round(rover_half_cells))
+                            box_pts = np.array(
+                                [
+                                    [c0 - rr, r0 - rr],
+                                    [c0 + rr, r0 - rr],
+                                    [c0 + rr, r0 + rr],
+                                    [c0 - rr, r0 + rr],
+                                ],
+                                dtype=np.int32,
+                            )
+                        else:
+                            center = np.array([float(r0), float(c0)], dtype=np.float32)
+                            fwd_v = np.array(
+                                [-np.sin(heading_ang), np.cos(heading_ang)],
+                                dtype=np.float32,
+                            )
+                            right_v = np.array(
+                                [np.cos(heading_ang), np.sin(heading_ang)],
+                                dtype=np.float32,
+                            )
+                            p1 = center + fwd_v * rover_half_cells + right_v * rover_half_cells
+                            p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
+                            p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
+                            p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
+                            box_pts = np.array(
+                                [
+                                    [int(round(p1[1])), int(round(p1[0]))],
+                                    [int(round(p2[1])), int(round(p2[0]))],
+                                    [int(round(p3[1])), int(round(p3[0]))],
+                                    [int(round(p4[1])), int(round(p4[0]))],
+                                ],
+                                dtype=np.int32,
+                            )
+                        cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
+                        # Draw heading triangle (blue) if tracking is enabled.
+                        if tracking_enabled and HAS_CV2:
+                            # Match visualization heading with drive-control heading convention.
+                            ang = heading_ang
                             size = max(3, int(args.map_camera_size) * 2)
                             tip_r = int(r0 - np.sin(ang) * size)
                             tip_c = int(c0 + np.cos(ang) * size)
@@ -698,6 +788,11 @@ def main():
                                 1,
                                 cv2.LINE_AA,
                             )
+
+                    # Optional display-only map recentering around rover.
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
 
                     # Drive output to RoboRIO (optional).
                     if sd is not None:
@@ -842,6 +937,9 @@ def main():
                                 heatmap_vis,
                                 alpha=args.heatmap_alpha,
                             )
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
 
             # Live visualization (optional)
             if HAS_CV2:
@@ -871,6 +969,8 @@ def main():
 
                     ground = (np.abs(dist_full) < 0.10) & valid
                     obstacle = (dist_full > 0.10) & valid
+                    if args.max_above_ground_m > 0.0:
+                        obstacle = obstacle & (dist_full <= float(args.max_above_ground_m))
 
                     # Resize masks to full resolution
                     h, w, _ = img.shape
@@ -921,6 +1021,10 @@ def main():
                         print("Manual drive mode: ON (auto paused)")
                     else:
                         print("Manual drive mode: OFF (auto resumed)")
+                if key == ord("c"):
+                    follow_rover_map = not follow_rover_map
+                    state = "ON" if follow_rover_map else "OFF"
+                    print(f"Map follow mode: {state}")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0
