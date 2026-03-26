@@ -8,6 +8,7 @@ from app.schemas.control import (
     EstopRequest,
     EstopResponse,
 )
+from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.nt_service import nt_service
 from app.services.state_service import state_service, now_ms
 
@@ -70,7 +71,18 @@ def drive_forward(req: DriveForwardRequest) -> DriveForwardResponse:
 
 @router.post("/control/estop", response_model=EstopResponse)
 def set_estop(req: EstopRequest) -> EstopResponse:
-    state_service.estop = req.engage
+    if req.engage:
+        state_service.estop = True
+    else:
+        state_service.estop = False
+
+    try:
+        roborio_bridge_service.set_estop(req.engage)
+    except ValueError as exc:
+        if not req.engage:
+            # Stay latched on the Jetson side if we could not safely clear the RoboRIO e-stop.
+            state_service.estop = True
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if req.engage:
         state_service.autonomy_enabled = False

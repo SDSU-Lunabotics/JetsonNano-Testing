@@ -47,6 +47,24 @@ class RoboRIOBridgeService:
                 "motors": [],
             }
 
+    def set_value(self, key: str, value: Any) -> Dict[str, Any]:
+        try:
+            return self._post("/set", {"key": key, "value": value})
+        except requests.HTTPError as exc:
+            message = None
+            response = exc.response
+            if response is not None:
+                try:
+                    message = response.json().get("message")
+                except ValueError:
+                    message = response.text or None
+            raise ValueError(message or f"Failed to set '{key}'") from exc
+        except requests.RequestException as exc:
+            raise ValueError("RoboRIO bridge unavailable") from exc
+
+    def set_estop(self, engage: bool) -> Dict[str, Any]:
+        return self.set_value("Jetson/EStop", bool(engage))
+
     def command_motor(
         self,
         motor_id: str,
