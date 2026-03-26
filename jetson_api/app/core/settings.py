@@ -13,6 +13,16 @@ class Settings(BaseSettings):
     roborio_ip: str = "10.0.9.2"
     camera_host: str = "10.0.8.102" # Update with actual IPs
     lidar_host: str = "10.0.8.103" # Update with actual IPs
+    lidar_backend: str = "unitree"
+    lidar_tcp_host: str = "127.0.0.1"
+    lidar_data_port: int = 9876
+    lidar_command_port: int = 9877
+    lidar_mode: str = "2d"
+    lidar_frame_id: str = "unitree_l2"
+    lidar_status_ttl_ms: int = 2000
+    lidar_monitor_interval_ms: int = 500
+    lidar_bridge_command: str = "cd ./lidar && sudo ./lidar_bridge"
+    lidar_visualization_command: str = "cd ./lidar && python3 lidar_visualization.py"
     camera_backend: str = "auto"
     camera_device_index: int = 0
     camera_status_ttl_ms: int = 2000
