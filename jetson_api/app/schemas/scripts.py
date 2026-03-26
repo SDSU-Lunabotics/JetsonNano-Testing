@@ -9,6 +9,7 @@ ScriptArg = Union[str, int, float, bool]
 
 ScriptName = Literal[
     "start_ros",
+    "start_lidar",
     "restart_lidar",
     "restart_roborio",
     "restart_jetson",

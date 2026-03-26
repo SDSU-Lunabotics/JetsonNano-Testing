@@ -9,6 +9,7 @@ from app.services.battery_service import battery_service
 from app.services.wireless_service import wireless_service
 from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.camera_service import camera_service
+from app.services.lidar_service import lidar_service
 
 
 class TelemetryService:
@@ -71,7 +72,7 @@ class TelemetryService:
             heartbeat=self._hb(self._jetson_last_seen_ms, now),
             jetson=self._hb(self._jetson_last_seen_ms, now),
             roborio=self._hb(self._roborio_last_seen_ms, now),
-            lidar=self._hb(self._lidar_last_seen_ms, now),
+            lidar=lidar_service.get_status().heartbeat,
         )
 
         control = ControlStatus(

@@ -42,6 +42,7 @@ class ScriptService:
 
         self._script_map = {
             "start_ros": self._script_dir / "start_ros.sh",
+            "start_lidar": self._script_dir / "start_lidar.sh",
             "restart_lidar": self._script_dir / "restart_lidar.sh",
             "restart_roborio": self._script_dir / "restart_roborio.sh",
             "restart_jetson": self._script_dir / "restart_jetson.sh",

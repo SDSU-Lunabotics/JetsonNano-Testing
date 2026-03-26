@@ -1,19 +1,14 @@
 import asyncio
-import time
 from fastapi import APIRouter, Response, WebSocket, WebSocketDisconnect
 
 from app.schemas.lidar import (
     LidarStatusResponse,
     LidarMapInfoResponse,
-    LidarPreviewMessage,
 )
 from app.services.lidar_service import lidar_service
 
 router = APIRouter(prefix="/lidar", tags=["lidar"])
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+ws_router = APIRouter(tags=["lidar"])
 
 
 _ONE_PX_PNG = (
@@ -39,19 +34,24 @@ def get_map_image() -> Response:
     return Response(content=png, media_type="image/png")
 
 
-@router.websocket("/ws")
-async def ws_lidar(websocket: WebSocket) -> None:
+async def _stream_lidar(websocket: WebSocket) -> None:
     await websocket.accept()
     seq = 0
     try:
         while True:
             seq += 1
-            msg = LidarPreviewMessage(
-                type="lidar_preview",
-                seq=seq,
-                timestamp_ms=_now_ms(),
-            )
+            msg = lidar_service.get_preview_message(seq)
             await websocket.send_json(msg.model_dump())
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.25)
     except WebSocketDisconnect:
         return
+
+
+@router.websocket("/ws")
+async def ws_lidar_legacy(websocket: WebSocket) -> None:
+    await _stream_lidar(websocket)
+
+
+@ws_router.websocket("/ws/lidar")
+async def ws_lidar(websocket: WebSocket) -> None:
+    await _stream_lidar(websocket)
