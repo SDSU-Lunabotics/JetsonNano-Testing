@@ -116,8 +116,10 @@ def wait_for_connection(timeout=5.0):
     return NetworkTables.isConnected()
 
 
-def read_value(key, value_type):
+def read_value(key, value_type, available_keys=None):
     try:
+        if available_keys is not None and key not in available_keys:
+            return None
         if value_type == "boolean":
             return sd.getBoolean(key, False)
         if value_type == "number":
@@ -376,9 +378,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/status":
+            try:
+                available_keys = set(sd.getKeys())
+            except Exception:
+                available_keys = set()
 
             values = {
-                key: read_value(key, value_type)
+                key: read_value(key, value_type, available_keys)
                 for key, value_type in DATA_KEYS.items()
             }
             dynamic_controller_values = read_dynamic_controller_values()
