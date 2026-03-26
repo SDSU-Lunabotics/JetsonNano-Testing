@@ -8,7 +8,9 @@ without changing your autonomous driving pipeline.
 - Live geometry-based obstacle detection from ZED point cloud + floor plane.
 - Runtime controls (trackbars) for thresholds and filtering.
 - Obstacle bounding boxes from connected components.
-- Optional AI object boxes via YOLO (`ultralytics`) if a model is provided.
+- Object boxes from detector source:
+  - ZED SDK built-in detector (default, offline, no API key/Wi-Fi)
+  - Optional YOLO (`ultralytics`) if a custom model is provided.
 - Annotation mode: click/drag a box, then press class hotkey (`1..9`).
 - Semantic top-down map that updates from labeled boxes using ZED depth projection.
 
@@ -46,12 +48,15 @@ bash perception-testing/RunPerceptionLab.sh
 - In `Semantic Map (XZ)`: left-drag paints selected class, right-click erases
 
 ## Optional AI Detection
-To enable object labels like `person`, `rock`, `wall`, etc., use your own trained model:
+Default detector mode is `zed` (built-in ZED SDK object detection, local/offline).
+
+To use your own custom model labels like `rock`, `wall`, etc., switch to YOLO mode:
 
 1. Train/export a YOLO model.
 2. Set paths in `perception-testing/perception_lab.env`:
    - `AI_MODEL_PATH=/abs/path/to/model.pt`
    - `AI_LABELS_PATH=/abs/path/to/labels.txt` (optional)
+   - `DETECTOR_MODE="yolo"` (or `"both"`)
 3. Run again with `RunPerceptionLab.sh`.
 
 Notes:

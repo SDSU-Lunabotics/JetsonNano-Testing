@@ -68,6 +68,13 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _first_enum_attr(enum_obj: object, names: List[str]) -> Optional[object]:
+    for n in names:
+        if hasattr(enum_obj, n):
+            return getattr(enum_obj, n)
+    return None
+
+
 def _clamp_box(x1: int, y1: int, x2: int, y2: int, w: int, h: int) -> Optional[Tuple[int, int, int, int]]:
     x1 = max(0, min(w - 1, int(x1)))
     x2 = max(0, min(w - 1, int(x2)))
@@ -250,6 +257,117 @@ class OptionalYoloDetector:
         return out
 
 
+class OptionalZedSdkDetector:
+    def __init__(
+        self,
+        zed_cam: "sl.Camera",
+        enabled: bool,
+        confidence: int,
+        every_n: int,
+        use_tracking: bool,
+    ) -> None:
+        self.available = False
+        self.zed = zed_cam
+        self.objects = None
+        self.runtime = None
+        self.every_n = max(1, int(every_n))
+        self.last_boxes: List[Tuple[int, int, int, int, float, str]] = []
+        self.last_frame_idx = -999999
+        self.confidence = int(max(1, min(99, int(confidence))))
+
+        if not enabled:
+            return
+        if not hasattr(sl, "ObjectDetectionParameters"):
+            print("ZED SDK ObjectDetectionParameters not found; ZED detector disabled.")
+            return
+
+        try:
+            params = sl.ObjectDetectionParameters()
+            if hasattr(params, "enable_tracking"):
+                params.enable_tracking = bool(use_tracking)
+            model_enum = getattr(sl, "OBJECT_DETECTION_MODEL", None)
+            if model_enum is not None and hasattr(params, "detection_model"):
+                model_val = _first_enum_attr(
+                    model_enum,
+                    [
+                        "MULTI_CLASS_BOX_MEDIUM",
+                        "MULTI_CLASS_BOX_FAST",
+                        "MULTI_CLASS_BOX_ACCURATE",
+                        "MULTI_CLASS_BOX",
+                    ],
+                )
+                if model_val is not None:
+                    params.detection_model = model_val
+
+            err = self.zed.enable_object_detection(params)
+            if err != sl.ERROR_CODE.SUCCESS:
+                print(f"ZED built-in object detection enable failed: {err}")
+                return
+
+            self.objects = sl.Objects()
+            self.runtime = sl.ObjectDetectionRuntimeParameters()
+            if hasattr(self.runtime, "detection_confidence_threshold"):
+                self.runtime.detection_confidence_threshold = int(self.confidence)
+            self.available = True
+            print("ZED built-in object detection enabled.")
+        except Exception as exc:
+            print(f"Failed to initialize ZED built-in object detection: {exc}")
+            self.available = False
+
+    def detect(self, frame_idx: int, conf_percent: Optional[int] = None) -> List[Tuple[int, int, int, int, float, str]]:
+        if not self.available or self.objects is None or self.runtime is None:
+            return []
+        if (frame_idx - self.last_frame_idx) < self.every_n:
+            return self.last_boxes
+        self.last_frame_idx = frame_idx
+
+        if conf_percent is not None and hasattr(self.runtime, "detection_confidence_threshold"):
+            self.runtime.detection_confidence_threshold = int(max(1, min(99, int(conf_percent))))
+
+        out: List[Tuple[int, int, int, int, float, str]] = []
+        try:
+            err = self.zed.retrieve_objects(self.objects, self.runtime)
+            if err != sl.ERROR_CODE.SUCCESS:
+                self.last_boxes = []
+                return []
+            obj_list = getattr(self.objects, "object_list", [])
+            for obj in obj_list:
+                bb = getattr(obj, "bounding_box_2d", None)
+                if bb is None:
+                    continue
+                pts = np.array(bb, dtype=np.float32).reshape(-1, 2)
+                if pts.shape[0] == 0:
+                    continue
+                x1 = int(np.floor(np.min(pts[:, 0])))
+                y1 = int(np.floor(np.min(pts[:, 1])))
+                x2 = int(np.ceil(np.max(pts[:, 0])))
+                y2 = int(np.ceil(np.max(pts[:, 1])))
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                conf = float(getattr(obj, "confidence", 0.0)) / 100.0
+                raw_label = getattr(obj, "label", None)
+                label = str(raw_label) if raw_label is not None else "zed_object"
+                sublabel = getattr(obj, "sublabel", "")
+                if isinstance(sublabel, str) and sublabel:
+                    label = sublabel
+                out.append((x1, y1, x2, y2, conf, label))
+        except Exception as exc:
+            print(f"ZED built-in detect error: {exc}")
+            out = []
+
+        self.last_boxes = out
+        return out
+
+    def close(self) -> None:
+        if not self.available:
+            return
+        try:
+            self.zed.disable_object_detection()
+        except Exception:
+            pass
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Live ZED perception testing tool")
     p.add_argument("--tracking", action="store_true", help="Enable ZED positional tracking")
@@ -268,6 +386,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ai-every", type=int, default=2, help="Run AI every N frames")
     p.add_argument("--ai-imgsz", type=int, default=640, help="AI inference image size")
     p.add_argument("--ai-device", default="", help="AI device override (e.g. cuda:0, cpu)")
+    p.add_argument(
+        "--detector-mode",
+        default="zed",
+        choices=["none", "yolo", "zed", "both"],
+        help="Object detector source",
+    )
+    p.add_argument("--zed-od-confidence", type=int, default=40, help="ZED built-in OD confidence threshold (1..99)")
+    p.add_argument("--zed-od-every", type=int, default=1, help="Run ZED built-in OD every N frames")
+    p.add_argument("--zed-od-tracking", action="store_true", help="Enable ZED OD tracking (requires tracking)")
     p.add_argument(
         "--classes",
         default="rock,wall,person,cable,cone,other",
@@ -303,7 +430,8 @@ def create_controls(args: argparse.Namespace) -> None:
     cv2.createTrackbar("AI IoU %", "Perception Controls", int(max(1.0, min(99.0, args.ai_iou * 100.0))), 100, _noop)
     cv2.createTrackbar("ShowGeom", "Perception Controls", 1, 1, _noop)
     cv2.createTrackbar("ShowBoxes", "Perception Controls", 1, 1, _noop)
-    cv2.createTrackbar("ShowAI", "Perception Controls", 1 if args.ai_model else 0, 1, _noop)
+    ai_default_on = 1 if (args.ai_model or args.detector_mode in ("zed", "both")) else 0
+    cv2.createTrackbar("ShowAI", "Perception Controls", ai_default_on, 1, _noop)
 
 
 def read_controls() -> dict:
@@ -396,15 +524,27 @@ def main() -> int:
     if args.tracking:
         zed_utils.enable_tracking(zed, sl)
 
+    detector_mode = str(args.detector_mode).lower()
+    use_yolo = detector_mode in ("yolo", "both")
+    use_zed = detector_mode in ("zed", "both")
+
     yolo = OptionalYoloDetector(
-        model_path=args.ai_model,
+        model_path=args.ai_model if use_yolo else "",
         labels_path=args.ai_labels,
         imgsz=args.ai_imgsz,
         every_n=args.ai_every,
         device=args.ai_device,
     )
-    if not yolo.available and args.ai_model:
-        print("AI model configured but detector is unavailable; continuing with geometry only.")
+    if use_yolo and (not yolo.available) and args.ai_model:
+        print("YOLO model configured but unavailable; continuing.")
+
+    zed_detector = OptionalZedSdkDetector(
+        zed_cam=zed,
+        enabled=use_zed,
+        confidence=int(args.zed_od_confidence),
+        every_n=int(args.zed_od_every),
+        use_tracking=bool(args.zed_od_tracking and args.tracking),
+    )
 
     create_controls(args)
     cv2.namedWindow("Perception Lab", cv2.WINDOW_NORMAL)
@@ -765,27 +905,47 @@ def main() -> int:
 
             ai_boxes_for_ann: List[Tuple[int, int, int, int, str, str]] = []
             ai_count = 0
-            if yolo.available and (controls["show_ai"] or annotation_mode):
-                ai_boxes = yolo.detect(
-                    frame_bgr=frame,
-                    conf_thresh=float(controls["ai_conf"]),
-                    iou_thresh=float(controls["ai_iou"]),
-                    frame_idx=frame_idx,
-                )
-                for x1, y1, x2, y2, conf, label in ai_boxes:
-                    ai_boxes_for_ann.append((x1, y1, x2, y2, "ai", label))
-                    if controls["show_ai"]:
-                        cv2.rectangle(vis, (x1, y1), (x2, y2), (180, 255, 0), 2)
-                        cv2.putText(
-                            vis,
-                            f"{label} {conf:.2f}",
-                            (x1, max(16, y1 - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.52,
-                            (180, 255, 0),
-                            1,
-                            cv2.LINE_AA,
-                        )
+            if controls["show_ai"] or annotation_mode:
+                if yolo.available:
+                    yolo_boxes = yolo.detect(
+                        frame_bgr=frame,
+                        conf_thresh=float(controls["ai_conf"]),
+                        iou_thresh=float(controls["ai_iou"]),
+                        frame_idx=frame_idx,
+                    )
+                    for x1, y1, x2, y2, conf, label in yolo_boxes:
+                        ai_boxes_for_ann.append((x1, y1, x2, y2, "yolo", label))
+                        if controls["show_ai"]:
+                            cv2.rectangle(vis, (x1, y1), (x2, y2), (180, 255, 0), 2)
+                            cv2.putText(
+                                vis,
+                                f"YOLO {label} {conf:.2f}",
+                                (x1, max(16, y1 - 6)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.52,
+                                (180, 255, 0),
+                                1,
+                                cv2.LINE_AA,
+                            )
+                if zed_detector.available:
+                    zed_boxes = zed_detector.detect(
+                        frame_idx=frame_idx,
+                        conf_percent=int(max(1.0, min(99.0, controls["ai_conf"] * 100.0))),
+                    )
+                    for x1, y1, x2, y2, conf, label in zed_boxes:
+                        ai_boxes_for_ann.append((x1, y1, x2, y2, "zed", label))
+                        if controls["show_ai"]:
+                            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 120), 2)
+                            cv2.putText(
+                                vis,
+                                f"ZED {label} {conf:.2f}",
+                                (x1, max(16, y1 - 6)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.52,
+                                (0, 255, 120),
+                                1,
+                                cv2.LINE_AA,
+                            )
                 ai_count = len(ai_boxes_for_ann)
 
             annotation_candidates = ai_boxes_for_ann + geom_boxes_for_ann
@@ -841,7 +1001,7 @@ def main() -> int:
             status_lines = [
                 f"FPS {fps_smooth:.1f} | stride {stride} | plane={'OK' if has_plane else 'WAIT'}",
                 f"obs>{obstacle_thresh:.2f}m hole<{(-hole_thresh):.2f}m max_above={max_above:.2f}m max_fwd={controls['max_forward_m']:.1f}m",
-                f"geom_boxes={geom_count} ai_boxes={ai_count} ai={'ON' if controls['show_ai'] else 'OFF'} ann={'ON' if annotation_mode else 'OFF'}",
+                f"geom_boxes={geom_count} det_boxes={ai_count} det_mode={detector_mode} det={'ON' if controls['show_ai'] else 'OFF'} ann={'ON' if annotation_mode else 'OFF'}",
                 "Keys: q=quit p=pause r=refloor s=snapshot l=annmode 0=clear",
                 f"Label keys: {classes_hint}",
                 f"Map brush: class={class_names[brush_class_idx]} | Semantic map: L-drag paint, R-click erase",
@@ -885,6 +1045,10 @@ def main() -> int:
 
             frame_idx += 1
     finally:
+        try:
+            zed_detector.close()
+        except Exception:
+            pass
         try:
             zed.close()
         except Exception:

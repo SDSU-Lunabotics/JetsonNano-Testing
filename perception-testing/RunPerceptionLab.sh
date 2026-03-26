@@ -24,6 +24,9 @@ cmd+=(--ai-conf "${AI_CONF:-0.40}")
 cmd+=(--ai-iou "${AI_IOU:-0.45}")
 cmd+=(--ai-every "${AI_EVERY:-2}")
 cmd+=(--ai-imgsz "${AI_IMGSZ:-640}")
+cmd+=(--detector-mode "${DETECTOR_MODE:-zed}")
+cmd+=(--zed-od-confidence "${ZED_OD_CONFIDENCE:-40}")
+cmd+=(--zed-od-every "${ZED_OD_EVERY:-1}")
 cmd+=(--classes "${CLASSES:-rock,wall,person,cable,cone,other}")
 cmd+=(--dataset-dir "${DATASET_DIR:-${SCRIPT_DIR}/dataset}")
 cmd+=(--map-width-m "${MAP_WIDTH_M:-20.0}")
@@ -36,6 +39,7 @@ cmd+=(--ground-band-m "${GROUND_BAND_M:-0.10}")
 if [[ -n "${AI_DEVICE:-}" ]]; then cmd+=(--ai-device "${AI_DEVICE}"); fi
 if [[ -n "${AI_MODEL_PATH:-}" ]]; then cmd+=(--ai-model "${AI_MODEL_PATH}"); fi
 if [[ -n "${AI_LABELS_PATH:-}" ]]; then cmd+=(--ai-labels "${AI_LABELS_PATH}"); fi
+if [[ "${ZED_OD_TRACKING:-0}" == "1" ]]; then cmd+=(--zed-od-tracking); fi
 if [[ "${ANNOTATION_MODE:-1}" == "1" ]]; then cmd+=(--annotation-mode); fi
 if [[ "${SEMANTIC_MAP:-1}" == "1" ]]; then cmd+=(--semantic-map); fi
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
