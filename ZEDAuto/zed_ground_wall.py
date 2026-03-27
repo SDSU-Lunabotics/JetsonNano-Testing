@@ -52,6 +52,10 @@ def main():
     parser.add_argument("--ros2", action="store_true", help="Publish a PointCloud2 topic over ROS2")
     parser.add_argument("--frame", default="zed_camera", help="Frame ID for ROS2 point cloud")
     parser.add_argument("--tracking", action="store_true", help="Enable ZED positional tracking")
+    parser.add_argument("--area-memory", action="store_true", help="Enable ZED area-memory relocalization")
+    parser.add_argument("--area-load-path", default=None, help="Path to load ZED area memory (.area)")
+    parser.add_argument("--area-save-path", default=None, help="Path to save ZED area memory (.area)")
+    parser.add_argument("--area-save-every", type=float, default=30.0, help="Seconds between area-memory saves")
     parser.add_argument("--map-width-m", type=float, default=20.0, help="Top-down map width in meters (X axis)")
     parser.add_argument("--map-height-m", type=float, default=20.0, help="Top-down map height in meters (Z axis)")
     parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
@@ -199,12 +203,28 @@ def main():
     tracking_reset = sl.Transform()
     tracking_enabled = False
     pose_warned = False
+    tracking_pose_ok = False
+    tracking_prev_ok = False
+    tracking_loss_warned = False
     pose = None
     if args.tracking:
-        tracking_enabled, pose = zed_utils.enable_tracking(zed, sl)
+        tracking_enabled, pose = zed_utils.enable_tracking(
+            zed,
+            sl,
+            area_memory=args.area_memory,
+            area_load_path=args.area_load_path,
+        )
+        tracking_pose_ok = not tracking_enabled
+        tracking_prev_ok = tracking_pose_ok
+    else:
+        tracking_pose_ok = True
+        tracking_prev_ok = True
+    last_valid_R_world_cam = np.eye(3, dtype=np.float32)
+    last_valid_t_world_cam = np.zeros(3, dtype=np.float32)
     spatial_enabled = False
     spatial_mesh = None
     last_spatial_save = time.time()
+    last_area_save = time.time()
     if args.spatial_mapping:
         spatial_enabled, spatial_mesh = zed_utils.enable_spatial_mapping(
             zed,
@@ -487,6 +507,9 @@ def main():
         elif emergency_stop:
             mode_label = "STOPPED"
             mode_color = (0, 80, 255)
+        elif tracking_enabled and not tracking_pose_ok:
+            mode_label = "TRACK LOST"
+            mode_color = (0, 140, 255)
         elif manual_mode:
             mode_label = "MANUAL"
             mode_color = (0, 220, 255)
@@ -501,7 +524,22 @@ def main():
         put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
         put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
-        put_line(f"Map follow: {'ON' if follow_rover_map else 'OFF'} (c)", 140, (180, 255, 220))
+        if tracking_enabled:
+            track_txt = "OK" if tracking_pose_ok else "LOST"
+            if args.area_memory:
+                area_txt = "LOCKED" if tracking_pose_ok else "SEARCH"
+            else:
+                area_txt = "OFF"
+        else:
+            track_txt = "OFF"
+            area_txt = "OFF"
+        track_color = (170, 255, 170) if tracking_pose_ok else (0, 140, 255)
+        put_line(
+            f"Tracking: {track_txt} | AreaMem: {area_txt} | Follow: {'ON' if follow_rover_map else 'OFF'} (c)",
+            140,
+            track_color,
+            0.52,
+        )
 
         if goal_cell is None:
             put_line("Goal cell: none", 168, (190, 190, 190))
@@ -549,12 +587,28 @@ def main():
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
             # Update camera pose (world frame) if tracking is enabled.
             if tracking_enabled:
-                R_world_cam, t_world_cam, pose_warned = zed_utils.get_world_transform(
+                R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
+                if tracking_pose_ok:
+                    last_valid_R_world_cam = R_world_cam
+                    last_valid_t_world_cam = t_world_cam
+                    tracking_loss_warned = False
+                else:
+                    # Hold last known pose and pause map integration until tracking recovers.
+                    R_world_cam = last_valid_R_world_cam
+                    t_world_cam = last_valid_t_world_cam
+                    if not tracking_loss_warned:
+                        print("Tracking lost: holding last pose and pausing map integration.")
+                        tracking_loss_warned = True
+                if tracking_pose_ok and not tracking_prev_ok:
+                    print("Tracking recovered: relocalized/locked.")
+                tracking_prev_ok = tracking_pose_ok
             else:
                 R_world_cam = np.eye(3, dtype=np.float32)
                 t_world_cam = np.zeros(3, dtype=np.float32)
+                tracking_pose_ok = True
+                tracking_prev_ok = True
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -632,12 +686,14 @@ def main():
                 map_vis = None
                 heatmap_vis = None
                 cam_row_col = None
+                map_integration_ok = (not tracking_enabled) or tracking_pose_ok
                 if xyz.size > 0:
-                    # Transform to world frame if tracking is enabled.
-                    xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
-                    x = xyz_world[:, 0]
-                    z = xyz_world[:, 2]
-                    occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
+                    if map_integration_ok:
+                        # Transform to world frame if tracking is enabled.
+                        xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
+                        x = xyz_world[:, 0]
+                        z = xyz_world[:, 2]
+                        occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
                     map_vis = occ_map.render()
                     # Draw camera position marker (blue square).
                     cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
@@ -711,6 +767,17 @@ def main():
                                 dtype=np.int32,
                             )
                             cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+                    if (not map_integration_ok) and HAS_CV2:
+                        cv2.putText(
+                            map_vis,
+                            "TRACKING LOST - MAP PAUSED",
+                            (8, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 140, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
 
                     # Compute/update path to goal (avoid red obstacles only).
                     if goal_cell is not None and cam_row_col is not None:
@@ -839,6 +906,9 @@ def main():
                                     manual_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif tracking_enabled and (not tracking_pose_ok):
+                                # Keep robot safe while localization is uncertain.
+                                send_nt_command(False, 0.0, 0.0, 0.1)
                             elif cam_row_col is None:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             else:
@@ -911,6 +981,16 @@ def main():
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
                         last_save = time.time()
+                    # Periodically save ZED area memory for startup relocalization.
+                    if (
+                        tracking_enabled
+                        and args.area_save_path
+                        and args.area_save_every > 0
+                        and tracking_pose_ok
+                        and (time.time() - last_area_save) >= args.area_save_every
+                    ):
+                        if zed_utils.save_area_memory(zed, sl, args.area_save_path):
+                            last_area_save = time.time()
                     # Periodically update and save spatial map (mesh) if enabled.
                     if spatial_enabled and args.spatial_save_path and args.spatial_save_every > 0:
                         if (time.time() - last_spatial_save) >= args.spatial_save_every:
@@ -1056,6 +1136,8 @@ def main():
 
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
+    if tracking_enabled and args.area_save_path:
+        zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
     ros2_utils.shutdown_ros2(node)

@@ -6,6 +6,7 @@ Ground/wall segmentation, occupancy mapping, and optional RoboRIO drive output f
 - `zed_ground_wall.py`: Main application.
 - `RunAuto.sh`: One-command launcher that loads defaults from `zed_ground_wall.env`.
 - `zed_ground_wall.env`: Default configuration for mapping, drive, heatmap, and optional streaming.
+- `ResetMap.sh`: Delete persisted occupancy map and start fresh next run.
 
 ## Quick Start
 1. Open a terminal in the repo root:
@@ -146,6 +147,25 @@ Then run the same single command:
 ./ZEDAuto/RunAuto.sh
 ```
 
+## Crash Recovery Map Resume
+- Map persistence is now controlled in `ZEDAuto/zed_ground_wall.env`:
+  - `MAP_SAVE_PATH` (default `./ZEDAuto/zed_map.npz`)
+  - `MAP_SAVE_EVERY` (seconds, default `5.0`)
+  - `MAP_LOAD` (`1` to restore on startup)
+- With `MAP_LOAD=1`, the rover resumes from the last saved map after reboot/crash.
+- For localization resume from previously seen areas, enable ZED area memory:
+  - `AREA_MEMORY_ENABLE=1`
+  - `AREA_LOAD_PATH=./ZEDAuto/zed_area_memory.area`
+  - `AREA_SAVE_PATH=./ZEDAuto/zed_area_memory.area`
+  - `AREA_SAVE_EVERY=30.0`
+- This helps restart from a different nearby spot; exact same start point is no longer required when relocalization succeeds.
+
+To reset and start from an empty map:
+
+```bash
+./ZEDAuto/ResetMap.sh
+```
+
 ## Runtime Controls
 - Left click on the occupancy map: Set goal cell.
 - Right click on the occupancy map: Emergency stop.
@@ -156,6 +176,7 @@ Then run the same single command:
 - `space`: Emergency stop.
 - `q`: Quit.
 - `ZED Drive Status` window: Live mode (`STOPPED`, `MANUAL`, `AUTO`, `IDLE`), goal/target location, NT connection state, and live forward/turn command bars.
+- If tracking is lost, mode shows `TRACK LOST`; map integration is paused and auto-drive commands are paused until tracking recovers.
 
 ## Zone Datasheet Logger
 Use this standalone logger to auto-sample random obstacle/hole map cells and write world XYZ rows for LiDAR comparison:

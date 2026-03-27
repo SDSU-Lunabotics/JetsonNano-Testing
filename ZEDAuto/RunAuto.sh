@@ -41,6 +41,10 @@ cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py")
 
 # Core mapping/tracking
 if [[ "${TRACKING:-1}" == "1" ]]; then cmd+=(--tracking); fi
+if [[ "${AREA_MEMORY_ENABLE:-1}" == "1" ]]; then cmd+=(--area-memory); fi
+if [[ -n "${AREA_LOAD_PATH:-}" ]]; then cmd+=(--area-load-path "${AREA_LOAD_PATH}"); fi
+if [[ -n "${AREA_SAVE_PATH:-}" ]]; then cmd+=(--area-save-path "${AREA_SAVE_PATH}"); fi
+cmd+=(--area-save-every "${AREA_SAVE_EVERY:-30.0}")
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
 if [[ "${MAP_FOLLOW_ROVER:-1}" == "1" ]]; then cmd+=(--map-follow-rover); fi
 cmd+=(--map-scale "${MAP_SCALE:-3}")
@@ -64,6 +68,9 @@ cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
+cmd+=(--map-save-path "${MAP_SAVE_PATH:-${SCRIPT_DIR}/zed_map.npz}")
+cmd+=(--map-save-every "${MAP_SAVE_EVERY:-5.0}")
+if [[ "${MAP_LOAD:-1}" == "1" ]]; then cmd+=(--map-load); fi
 if [[ "${HEATMAP:-0}" == "1" ]]; then
   cmd+=(--heatmap)
   cmd+=(--heatmap-mode "${HEATMAP_MODE:-risk}")
