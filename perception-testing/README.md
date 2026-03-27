@@ -44,7 +44,8 @@ bash perception-testing/RunPerceptionLab.sh
 - `s`: save snapshot
 - `l`: toggle annotation mode on/off
 - `0`: clear pending box
-- `1..9`: assign class to pending box and save label
+- `1..8`: assign class from `CLASSES` order
+- `9`: type a class name in terminal prompt, then label with that class
 - In `Semantic Map (XZ)`: left-drag paints selected class, right-click erases
 
 ## Optional AI Detection
@@ -67,7 +68,7 @@ Notes:
 1. Run `./perception-testing/RunPerceptionLab.sh`.
 2. In `Perception Lab` window:
 - Drag a box manually around an object, or click inside an AI/geom box to select it.
-3. Press class key `1..9` (from `CLASSES` order in `perception_lab.env`).
+3. Press class key `1..8` (from `CLASSES` order in `perception_lab.env`), or press `9` to type a class name.
 4. The tool saves:
 - Image: `perception-testing/dataset/images/*.jpg`
 - YOLO label: `perception-testing/dataset/labels/*.txt`

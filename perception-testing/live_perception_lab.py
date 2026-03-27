@@ -68,6 +68,11 @@ def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def _normalize_class_name(raw: str) -> str:
+    # Keep labels filesystem/CSV friendly and stable across sessions.
+    return "_".join(raw.strip().lower().split())
+
+
 def _first_enum_attr(enum_obj: object, names: List[str]) -> Optional[object]:
     for n in names:
         if hasattr(enum_obj, n):
@@ -486,8 +491,6 @@ def main() -> int:
     class_names = [x.strip() for x in str(args.classes).split(",") if x.strip()]
     if not class_names:
         class_names = ["obstacle"]
-    if len(class_names) > 9:
-        class_names = class_names[:9]
 
     images_dir = os.path.join(args.dataset_dir, "images")
     labels_dir = os.path.join(args.dataset_dir, "labels")
@@ -514,7 +517,7 @@ def main() -> int:
 
     print("Starting Perception Lab...")
     print("Keys: q=quit, p=pause, r=force floor update, s=snapshot, l=annotation mode")
-    print("Annotation: drag/click box, then press 1..9 for class")
+    print("Annotation: drag/click box, then press 1..8 or 9 to type class")
 
     zed = zed_utils.open_zed_camera(sl)
     runtime = sl.RuntimeParameters()
@@ -589,6 +592,20 @@ def main() -> int:
             if x1 <= px <= x2 and y1 <= py <= y2:
                 return (x1, y1, x2, y2), source
         return None, "manual"
+
+    def get_or_add_class_id(raw_label: str) -> int:
+        nonlocal class_names, sem_counts
+        label = _normalize_class_name(raw_label)
+        if not label:
+            return -1
+        for idx, name in enumerate(class_names):
+            if _normalize_class_name(name) == label:
+                return idx
+        class_names.append(label)
+        # Expand semantic map channels for new class.
+        sem_counts = np.pad(sem_counts, ((0, 1), (0, 0), (0, 0)), mode="constant")
+        print(f"Added new class: {label} (id={len(class_names) - 1})")
+        return len(class_names) - 1
 
     def on_mouse(event: int, x: int, y: int, flags: int, param: object) -> None:
         nonlocal mouse_down, drag_start, drag_curr, pending_box, pending_source
@@ -780,10 +797,23 @@ def main() -> int:
                 pending_box = None
 
             selected_class_idx = -1
-            if ord("1") <= key <= ord("9"):
+            if ord("1") <= key <= ord("8"):
                 selected_class_idx = key - ord("1")
                 if selected_class_idx < len(class_names):
                     brush_class_idx = selected_class_idx
+            elif key == ord("9"):
+                try:
+                    typed = input("Type class name and press Enter: ").strip()
+                except EOFError:
+                    typed = ""
+                if typed:
+                    idx = get_or_add_class_id(typed)
+                    if idx >= 0:
+                        selected_class_idx = idx
+                        brush_class_idx = idx
+                        print(f"Typed class selected: {class_names[idx]}")
+                else:
+                    print("Typed class canceled.")
 
             if paused:
                 continue
@@ -981,7 +1011,7 @@ def main() -> int:
                 cv2.rectangle(vis, (x1, y1), (x2, y2), (255, 0, 255), 2)
                 cv2.putText(
                     vis,
-                    f"pending [{pending_source}] press 1..{len(class_names)}",
+                    "pending box: press 1..8 or 9:type",
                     (x1, max(16, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.52,
@@ -1001,13 +1031,15 @@ def main() -> int:
             fps = 1.0 / dt
             fps_smooth = fps if fps_smooth <= 0.0 else (0.9 * fps_smooth + 0.1 * fps)
 
-            classes_hint = " ".join([f"{i + 1}:{name}" for i, name in enumerate(class_names)])
+            fixed_hint = " ".join(
+                [f"{i + 1}:{class_names[i]}" for i in range(min(8, len(class_names)))]
+            )
             status_lines = [
                 f"FPS {fps_smooth:.1f} | stride {stride} | plane={'OK' if has_plane else 'WAIT'}",
                 f"obs>{obstacle_thresh:.2f}m hole<{(-hole_thresh):.2f}m max_above={max_above:.2f}m max_fwd={controls['max_forward_m']:.1f}m",
                 f"geom_boxes={geom_count} det_boxes={ai_count} det_mode={detector_mode} det={'ON' if controls['show_ai'] else 'OFF'} ann={'ON' if annotation_mode else 'OFF'}",
                 "Keys: q=quit p=pause r=refloor s=snapshot l=annmode 0=clear",
-                f"Label keys: {classes_hint}",
+                f"Label keys: {fixed_hint} 9:type",
                 f"Map brush: class={class_names[brush_class_idx]} | Semantic map: L-drag paint, R-click erase",
             ]
             if last_saved_msg:
