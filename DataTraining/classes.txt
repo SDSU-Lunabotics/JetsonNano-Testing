@@ -1,0 +1,5 @@
+pole
+rock
+berm_marker
+hole_rgb
+unknown_obstacle
