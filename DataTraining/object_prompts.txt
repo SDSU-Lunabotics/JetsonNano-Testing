@@ -1,0 +1,12 @@
+rock
+stone
+boulder
+pole
+marker
+person
+robot
+cone
+box
+crate
+cable
+barrel
