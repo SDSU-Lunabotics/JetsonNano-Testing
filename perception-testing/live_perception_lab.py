@@ -42,6 +42,7 @@ if ZEDAUTO_DIR not in sys.path:
     sys.path.insert(0, ZEDAUTO_DIR)
 
 import segmentation
+import map_utils
 import zed_utils
 
 
@@ -62,6 +63,11 @@ def _class_color(idx: int) -> Tuple[int, int, int]:
         (200, 200, 200), # gray
     ]
     return palette[idx % len(palette)]
+
+
+def _is_person_label(label: str) -> bool:
+    s = str(label).strip().lower()
+    return s in {"person", "people", "human", "pedestrian"}
 
 
 def _ensure_dir(path: str) -> None:
@@ -118,6 +124,9 @@ def _render_semantic_map(
     sem_counts: np.ndarray,
     class_names: List[str],
     cam_row_col: Optional[Tuple[int, int]] = None,
+    det_points: Optional[List[Tuple[int, int, str, bool]]] = None,
+    hazard_state: str = "CLEAR",
+    hazard_distance_m: float = -1.0,
 ) -> np.ndarray:
     # sem_counts: (C, H, W)
     cnum, h, w = sem_counts.shape
@@ -141,11 +150,39 @@ def _render_semantic_map(
         cc1 = min(w, cc + 3)
         out[rr0:rr1, cc0:cc1] = (255, 255, 255)
 
+    if det_points:
+        for rr, cc, _label, is_person in det_points:
+            if rr < 0 or rr >= h or cc < 0 or cc >= w:
+                continue
+            if is_person:
+                cv2.circle(out, (cc, rr), 3, (0, 0, 255), -1)
+                cv2.circle(out, (cc, rr), 6, (0, 0, 255), 1)
+            else:
+                cv2.circle(out, (cc, rr), 2, (255, 255, 255), -1)
+
     # Legend panel (match map height so hstack always works)
     legend_h = h
     legend = np.zeros((legend_h, 250, 3), dtype=np.uint8)
     cv2.putText(legend, "Semantic Map", (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
-    usable_h = max(20, legend_h - 44)
+    hz_color = (60, 220, 60)
+    if hazard_state == "SLOW":
+        hz_color = (0, 220, 255)
+    elif hazard_state == "STOP":
+        hz_color = (0, 0, 255)
+    dist_txt = "--"
+    if hazard_distance_m >= 0.0:
+        dist_txt = f"{hazard_distance_m:.2f}m"
+    cv2.putText(
+        legend,
+        f"Human Hazard: {hazard_state} ({dist_txt})",
+        (10, 36),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.48,
+        hz_color,
+        1,
+        cv2.LINE_AA,
+    )
+    usable_h = max(20, legend_h - 64)
     step = max(14, usable_h // max(1, len(class_names)))
     y = 38
     for i, name in enumerate(class_names):
@@ -423,6 +460,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--semantic-point-stride", type=int, default=4, help="Pixel stride when projecting labeled boxes to map")
     p.add_argument("--semantic-decay", type=float, default=1.0, help="Semantic map decay per frame (1.0=none)")
     p.add_argument("--ground-band-m", type=float, default=0.10, help="Floor band for ground class projection (m)")
+    p.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP state (m)")
+    p.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW state (m)")
+    p.add_argument("--human-min-conf", type=float, default=0.55, help="Minimum person confidence for hazard state")
+    p.add_argument("--zedauto-map", action="store_true", help="Show ZEDAuto-style depth occupancy map")
+    p.add_argument("--zedauto-map-decay", type=float, default=0.97, help="Decay for ZEDAuto-style occupancy map")
     return p.parse_args()
 
 
@@ -558,6 +600,8 @@ def main() -> int:
     cv2.namedWindow("Obstacle Mask", cv2.WINDOW_NORMAL)
     if args.semantic_map:
         cv2.namedWindow("Semantic Map (XZ)", cv2.WINDOW_NORMAL)
+    if args.zedauto_map:
+        cv2.namedWindow("ZEDAuto Map (Depth)", cv2.WINDOW_NORMAL)
 
     has_plane = False
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
@@ -580,12 +624,23 @@ def main() -> int:
     brush_class_idx = 0
     map_mouse_down = False
     map_display_scale = 2
+    human_clear_hold_frames = 12
+    human_clear_countdown = 0
+    human_hazard_state = "CLEAR"
+    human_nearest_distance_m = -1.0
     # Semantic map state
     map_w = int(max(10, np.round(float(args.map_width_m) / float(args.map_res_m))))
     map_h = int(max(10, np.round(float(args.map_height_m) / float(args.map_res_m))))
     sem_counts = np.zeros((len(class_names), map_h, map_w), dtype=np.float32)
     map_x_min = -float(args.map_width_m) / 2.0
     map_z_min = -float(args.map_height_m) / 2.0 if args.map_center else 0.0
+    zedauto_occ_map = map_utils.OccupancyMap(
+        map_res_m=float(args.map_res_m),
+        map_width_m=float(args.map_width_m),
+        map_height_m=float(args.map_height_m),
+        map_z_min=float(map_z_min),
+        decay=float(args.zedauto_map_decay),
+    )
 
     def find_candidate_box(px: int, py: int) -> Tuple[Optional[Tuple[int, int, int, int]], str]:
         for x1, y1, x2, y2, source, _label in annotation_candidates:
@@ -939,6 +994,8 @@ def main() -> int:
 
             ai_boxes_for_ann: List[Tuple[int, int, int, int, str, str]] = []
             ai_count = 0
+            map_det_points: List[Tuple[int, int, str, bool]] = []
+            nearest_human_m: Optional[float] = None
             if controls["show_ai"] or annotation_mode:
                 if yolo.available:
                     yolo_boxes = yolo.detect(
@@ -949,6 +1006,27 @@ def main() -> int:
                     )
                     for x1, y1, x2, y2, conf, label in yolo_boxes:
                         ai_boxes_for_ann.append((x1, y1, x2, y2, "yolo", label))
+                        is_person = _is_person_label(label)
+                        cx = int(max(0, min(w - 1, (x1 + x2) // 2)))
+                        cy = int(max(0, min(h - 1, (y1 + y2) // 2)))
+                        p3 = cloud[cy, cx, :3]
+                        if np.isfinite(p3).all():
+                            pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_world_cam
+                            rr, cc, inb = _world_to_grid(
+                                np.array([float(pw[0])]),
+                                np.array([float(pw[2])]),
+                                map_x_min,
+                                map_z_min,
+                                float(args.map_res_m),
+                                map_h,
+                                map_w,
+                            )
+                            if bool(inb[0]):
+                                map_det_points.append((int(rr[0]), int(cc[0]), str(label), is_person))
+                            if is_person and float(conf) >= float(args.human_min_conf):
+                                dist = float(np.linalg.norm(p3))
+                                if nearest_human_m is None or dist < nearest_human_m:
+                                    nearest_human_m = dist
                         if controls["show_ai"]:
                             cv2.rectangle(vis, (x1, y1), (x2, y2), (180, 255, 0), 2)
                             cv2.putText(
@@ -968,6 +1046,27 @@ def main() -> int:
                     )
                     for x1, y1, x2, y2, conf, label in zed_boxes:
                         ai_boxes_for_ann.append((x1, y1, x2, y2, "zed", label))
+                        is_person = _is_person_label(label)
+                        cx = int(max(0, min(w - 1, (x1 + x2) // 2)))
+                        cy = int(max(0, min(h - 1, (y1 + y2) // 2)))
+                        p3 = cloud[cy, cx, :3]
+                        if np.isfinite(p3).all():
+                            pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_world_cam
+                            rr, cc, inb = _world_to_grid(
+                                np.array([float(pw[0])]),
+                                np.array([float(pw[2])]),
+                                map_x_min,
+                                map_z_min,
+                                float(args.map_res_m),
+                                map_h,
+                                map_w,
+                            )
+                            if bool(inb[0]):
+                                map_det_points.append((int(rr[0]), int(cc[0]), str(label), is_person))
+                            if is_person and float(conf) >= float(args.human_min_conf):
+                                dist = float(np.linalg.norm(p3))
+                                if nearest_human_m is None or dist < nearest_human_m:
+                                    nearest_human_m = dist
                         if controls["show_ai"]:
                             cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 120), 2)
                             cv2.putText(
@@ -982,7 +1081,40 @@ def main() -> int:
                             )
                 ai_count = len(ai_boxes_for_ann)
 
+            if nearest_human_m is not None:
+                human_clear_countdown = human_clear_hold_frames
+                human_nearest_distance_m = float(nearest_human_m)
+                if human_nearest_distance_m <= float(args.human_stop_m):
+                    human_hazard_state = "STOP"
+                elif human_nearest_distance_m <= float(args.human_slow_m):
+                    human_hazard_state = "SLOW"
+                else:
+                    human_hazard_state = "CLEAR"
+            else:
+                if human_clear_countdown > 0:
+                    human_clear_countdown -= 1
+                else:
+                    human_hazard_state = "CLEAR"
+                    human_nearest_distance_m = -1.0
+
             annotation_candidates = ai_boxes_for_ann + geom_boxes_for_ann
+
+            if args.zedauto_map:
+                pts = xyz_small.reshape(-1, 3)
+                valid_flat = valid.reshape(-1)
+                if np.any(valid_flat):
+                    pts = pts[valid_flat]
+                    gflat = ground_small.reshape(-1)[valid_flat]
+                    oflat = obstacle_small.reshape(-1)[valid_flat]
+                    hflat = hole_small.reshape(-1)[valid_flat]
+                    pts_world = (R_world_cam @ pts.T).T + t_world_cam.reshape(1, 3)
+                    zedauto_occ_map.update(
+                        x=pts_world[:, 0],
+                        z=pts_world[:, 2],
+                        ground_mask=gflat,
+                        obstacle_mask=oflat,
+                        hole_mask=hflat,
+                    )
 
             if selected_class_idx >= 0:
                 if selected_class_idx >= len(class_names):
@@ -1038,6 +1170,8 @@ def main() -> int:
                 f"FPS {fps_smooth:.1f} | stride {stride} | plane={'OK' if has_plane else 'WAIT'}",
                 f"obs>{obstacle_thresh:.2f}m hole<{(-hole_thresh):.2f}m max_above={max_above:.2f}m max_fwd={controls['max_forward_m']:.1f}m",
                 f"geom_boxes={geom_count} det_boxes={ai_count} det_mode={detector_mode} det={'ON' if controls['show_ai'] else 'OFF'} ann={'ON' if annotation_mode else 'OFF'}",
+                f"Human hazard={human_hazard_state} nearest={('--' if human_nearest_distance_m < 0 else f'{human_nearest_distance_m:.2f}m')} stop<{float(args.human_stop_m):.2f} slow<{float(args.human_slow_m):.2f}",
+                f"ZEDAuto map={'ON' if args.zedauto_map else 'OFF'} semantic_map={'ON' if args.semantic_map else 'OFF'}",
                 "Keys: q=quit p=pause r=refloor s=snapshot l=annmode 0=clear",
                 f"Label keys: {fixed_hint} 9:type",
                 f"Map brush: class={class_names[brush_class_idx]} | Semantic map: L-drag paint, R-click erase",
@@ -1065,13 +1199,62 @@ def main() -> int:
                 )
                 if bool(inb[0]):
                     cam_rc = (int(rr[0]), int(cc[0]))
-                sem_vis = _render_semantic_map(sem_counts, class_names, cam_rc)
+                sem_vis = _render_semantic_map(
+                    sem_counts,
+                    class_names,
+                    cam_rc,
+                    det_points=map_det_points,
+                    hazard_state=human_hazard_state,
+                    hazard_distance_m=human_nearest_distance_m,
+                )
                 sem_show = cv2.resize(
                     sem_vis,
                     (sem_vis.shape[1] * map_display_scale, sem_vis.shape[0] * map_display_scale),
                     interpolation=cv2.INTER_NEAREST,
                 )
                 cv2.imshow("Semantic Map (XZ)", sem_show)
+
+            if args.zedauto_map:
+                occ_vis = zedauto_occ_map.render()
+                cam_cell = zedauto_occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
+                if cam_cell is not None:
+                    r0, c0 = cam_cell
+                    cv2.circle(occ_vis, (c0, r0), 2, (255, 255, 255), -1)
+
+                for rr, cc, _label, is_person in map_det_points:
+                    if rr < 0 or rr >= occ_vis.shape[0] or cc < 0 or cc >= occ_vis.shape[1]:
+                        continue
+                    if is_person:
+                        cv2.circle(occ_vis, (cc, rr), 3, (0, 0, 255), -1)
+                        cv2.circle(occ_vis, (cc, rr), 6, (0, 0, 255), 1)
+                    else:
+                        cv2.circle(occ_vis, (cc, rr), 2, (255, 255, 255), -1)
+
+                hz_color = (60, 220, 60)
+                if human_hazard_state == "SLOW":
+                    hz_color = (0, 220, 255)
+                elif human_hazard_state == "STOP":
+                    hz_color = (0, 0, 255)
+                hz_dist = "--"
+                if human_nearest_distance_m >= 0.0:
+                    hz_dist = f"{human_nearest_distance_m:.2f}m"
+                cv2.putText(
+                    occ_vis,
+                    f"Human Hazard: {human_hazard_state} ({hz_dist})",
+                    (8, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    hz_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+                occ_show = cv2.resize(
+                    occ_vis,
+                    (occ_vis.shape[1] * map_display_scale, occ_vis.shape[0] * map_display_scale),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                cv2.imshow("ZEDAuto Map (Depth)", occ_show)
 
             if key == ord("s"):
                 stamp = time.strftime("%Y%m%d_%H%M%S")
