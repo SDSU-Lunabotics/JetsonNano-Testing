@@ -56,17 +56,36 @@ class OccupancyMap:
         }
 
     def load(self, path):
-        data = np.load(path)
+        data = np.load(path, allow_pickle=True)
         loaded_free = data["free_counts"].astype(np.float32)
         loaded_occ = data["occ_counts"].astype(np.float32)
         loaded_hole = data["hole_counts"].astype(np.float32) if "hole_counts" in data else None
-        meta = data["meta"].item()
         if (
-            meta.get("map_res_m") == self.map_res_m
-            and meta.get("map_width_m") == self.map_width_m
-            and meta.get("map_height_m") == self.map_height_m
-            and meta.get("map_z_min") == self.map_z_min
+            "map_res_m" in data
+            and "map_width_m" in data
+            and "map_height_m" in data
+            and "map_z_min" in data
         ):
+            meta = {
+                "map_res_m": float(data["map_res_m"]),
+                "map_width_m": float(data["map_width_m"]),
+                "map_height_m": float(data["map_height_m"]),
+                "map_z_min": float(data["map_z_min"]),
+            }
+        elif "meta" in data:
+            meta_val = data["meta"]
+            if hasattr(meta_val, "item"):
+                meta_val = meta_val.item()
+            meta = meta_val if isinstance(meta_val, dict) else {}
+        else:
+            meta = {}
+        same_meta = (
+            np.isclose(float(meta.get("map_res_m", np.nan)), float(self.map_res_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_width_m", np.nan)), float(self.map_width_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_height_m", np.nan)), float(self.map_height_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_z_min", np.nan)), float(self.map_z_min), atol=1e-6)
+        )
+        if same_meta:
             if loaded_free.shape == self.free_counts.shape and loaded_occ.shape == self.occ_counts.shape:
                 self.free_counts[:] = loaded_free
                 self.occ_counts[:] = loaded_occ
@@ -85,6 +104,10 @@ class OccupancyMap:
             free_counts=self.free_counts,
             occ_counts=self.occ_counts,
             hole_counts=self.hole_counts,
+            map_res_m=np.float32(self.map_res_m),
+            map_width_m=np.float32(self.map_width_m),
+            map_height_m=np.float32(self.map_height_m),
+            map_z_min=np.float32(self.map_z_min),
             meta=self.meta(),
         )
 
