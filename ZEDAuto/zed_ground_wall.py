@@ -110,6 +110,12 @@ def main():
     parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument(
+        "--path-avoid-occ-advantage",
+        type=float,
+        default=2.0,
+        help="Min (occupied - free) evidence margin for path blocking",
+    )
     parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
@@ -912,6 +918,7 @@ def main():
                             obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
+                                min_occ_advantage=args.path_avoid_occ_advantage,
                             )
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)

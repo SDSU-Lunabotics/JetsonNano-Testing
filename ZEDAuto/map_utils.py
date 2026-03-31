@@ -138,23 +138,28 @@ class OccupancyMap:
         self.occ_counts *= self.occ_decay
         self.hole_counts *= self.hole_decay
 
+        def _unique_cells(rr, cc):
+            if rr.size == 0:
+                return rr, cc
+            flat = np.ravel_multi_index((rr, cc), (self.grid_h, self.grid_w))
+            uniq = np.unique(flat)
+            ur, uc = np.unravel_index(uniq, (self.grid_h, self.grid_w))
+            return ur, uc
+
         if np.any(gmask):
-            np.add.at(self.free_counts, (row[gmask], col[gmask]), 1.0)
+            g_r, g_c = _unique_cells(row[gmask], col[gmask])
+            self.free_counts[g_r, g_c] += 1.0
         if np.any(omask):
-            occ_r = row[omask]
-            occ_c = col[omask]
-            np.add.at(self.occ_counts, (occ_r, occ_c), 1.0)
+            occ_r, occ_c = _unique_cells(row[omask], col[omask])
+            self.occ_counts[occ_r, occ_c] += 1.0
             # New obstacle evidence should degrade prior free-space confidence.
             if self.free_downgrade_factor < 1.0:
-                uniq_occ = np.unique(np.stack((occ_r, occ_c), axis=1), axis=0)
-                self.free_counts[uniq_occ[:, 0], uniq_occ[:, 1]] *= self.free_downgrade_factor
+                self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
         if hmask is not None and np.any(hmask):
-            hole_r = row[hmask]
-            hole_c = col[hmask]
-            np.add.at(self.hole_counts, (hole_r, hole_c), 1.0)
+            hole_r, hole_c = _unique_cells(row[hmask], col[hmask])
+            self.hole_counts[hole_r, hole_c] += 1.0
             if self.free_downgrade_factor < 1.0:
-                uniq_hole = np.unique(np.stack((hole_r, hole_c), axis=1), axis=0)
-                self.free_counts[uniq_hole[:, 0], uniq_hole[:, 1]] *= self.free_downgrade_factor
+                self.free_counts[hole_r, hole_c] *= self.free_downgrade_factor
 
     def render(self):
         # Visualize: green = free, red = occupied, blue = holes, black = unknown.
@@ -192,13 +197,14 @@ class OccupancyMap:
         z = self.z_min + (self.grid_h - 1 - row + 0.5) * self.map_res_m
         return x, z
 
-    def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5):
+    def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5, min_occ_advantage=0.0):
         # Mark as obstacle only if we have enough occupied evidence
         # and it significantly outweighs free evidence.
         occ = self.occ_counts
         free = self.free_counts
         ratio_ok = occ >= (free * float(min_occ_ratio))
-        return (occ >= float(min_occ_count)) & ratio_ok
+        adv_ok = (occ - free) >= float(min_occ_advantage)
+        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok
 
     def known_mask(self, min_evidence=1.0):
         evidence = self.free_counts + self.occ_counts + self.hole_counts

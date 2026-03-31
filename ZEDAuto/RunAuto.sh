@@ -62,6 +62,7 @@ cmd+=(--max-above-ground-m "${MAX_ABOVE_GROUND_M:-1.22}")
 if [[ "${DISABLE_HOLES:-0}" == "1" ]]; then cmd+=(--disable-holes); fi
 cmd+=(--path-avoid-occ-min "${PATH_AVOID_OCC_MIN:-5.0}")
 cmd+=(--path-avoid-occ-ratio "${PATH_AVOID_OCC_RATIO:-1.8}")
+cmd+=(--path-avoid-occ-advantage "${PATH_AVOID_OCC_ADVANTAGE:-3.0}")
 cmd+=(--path-connectivity "${PATH_CONNECTIVITY:-8}")
 cmd+=(--rover-size-m "${ROVER_SIZE_M:-0.30}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
