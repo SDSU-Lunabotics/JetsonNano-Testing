@@ -134,6 +134,36 @@ def main():
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
+    parser.add_argument(
+        "--backup-close-dist-m",
+        type=float,
+        default=0.45,
+        help="If obstacle points are this close in front of camera, command reverse (m). Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--backup-lane-half-width-m",
+        type=float,
+        default=0.35,
+        help="Half-width of forward safety lane for close-obstacle backup detection (m).",
+    )
+    parser.add_argument(
+        "--backup-min-obstacle-points",
+        type=int,
+        default=30,
+        help="Minimum close obstacle points in safety lane before backup triggers.",
+    )
+    parser.add_argument(
+        "--backup-speed",
+        type=float,
+        default=0.35,
+        help="Reverse command magnitude when close-obstacle backup triggers (0-1).",
+    )
+    parser.add_argument(
+        "--backup-hold-sec",
+        type=float,
+        default=0.40,
+        help="How long to continue backup once triggered (seconds).",
+    )
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
@@ -364,6 +394,8 @@ def main():
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
+    last_backup_log_time = 0.0
+    backup_hold_until = 0.0
     nt_connected_cached = False
     status_cmd_enabled = False
     status_cmd_fwd = 0.0
@@ -802,6 +834,25 @@ def main():
                     obstacle_pct = 0.0
                     hole_pct = 0.0
 
+            close_obstacle_detected = False
+            close_obstacle_min_z = None
+            if (
+                xyz.shape[0] > 0
+                and float(args.backup_close_dist_m) > 0.0
+                and int(args.backup_min_obstacle_points) > 0
+            ):
+                lane_half = max(0.05, float(args.backup_lane_half_width_m))
+                close_mask = (
+                    obstacle_mask
+                    & (xyz[:, 2] > 0.0)
+                    & (xyz[:, 2] <= float(args.backup_close_dist_m))
+                    & (np.abs(xyz[:, 0]) <= lane_half)
+                )
+                close_count = int(np.count_nonzero(close_mask))
+                if close_count >= int(args.backup_min_obstacle_points):
+                    close_obstacle_detected = True
+                    close_obstacle_min_z = float(np.min(xyz[close_mask, 2]))
+
             print(
                 f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "
                 f"| Holes {hole_pct:5.1f}% | Points {xyz.shape[0]}"
@@ -1028,8 +1079,26 @@ def main():
                             last_drive_send = now
                             status_target_cell = None
                             status_target_world = None
+                            if close_obstacle_detected:
+                                backup_hold_until = max(
+                                    backup_hold_until,
+                                    now + max(0.05, float(args.backup_hold_sec)),
+                                )
                             if emergency_stop:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif now < backup_hold_until:
+                                if (now - last_backup_log_time) >= 0.5:
+                                    if close_obstacle_min_z is not None:
+                                        print(f"Close obstacle {close_obstacle_min_z:.2f}m ahead: backing up.")
+                                    else:
+                                        print("Close obstacle ahead: backing up.")
+                                    last_backup_log_time = now
+                                send_nt_command(
+                                    True,
+                                    -max(0.0, min(1.0, float(args.backup_speed))),
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif manual_mode:
                                 send_nt_command(
                                     True,
