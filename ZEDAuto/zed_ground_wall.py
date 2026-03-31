@@ -175,6 +175,42 @@ def main():
     )
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
+    parser.add_argument(
+        "--plane-ema-alpha",
+        type=float,
+        default=0.25,
+        help="Smoothing factor for accepted floor-plane updates (0-1, higher=faster response)",
+    )
+    parser.add_argument(
+        "--plane-max-tilt-delta-deg",
+        type=float,
+        default=8.0,
+        help="Reject floor-plane updates that tilt more than this from prior plane (deg)",
+    )
+    parser.add_argument(
+        "--plane-max-height-jump-m",
+        type=float,
+        default=0.08,
+        help="Reject floor-plane updates with abrupt height offset jump (m)",
+    )
+    parser.add_argument(
+        "--sample-stride",
+        type=int,
+        default=8,
+        help="Point-cloud downsample stride (higher = fewer points, lower CPU/noise)",
+    )
+    parser.add_argument(
+        "--min-range-z-m",
+        type=float,
+        default=0.25,
+        help="Ignore points closer than this forward distance (m) to reduce near-field depth noise",
+    )
+    parser.add_argument(
+        "--max-range-z-m",
+        type=float,
+        default=6.0,
+        help="Ignore points beyond this forward distance (m). Set <=0 to disable.",
+    )
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
     parser.add_argument("--stream-port", type=int, default=5600, help="UDP port for GStreamer stream")
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
@@ -322,6 +358,7 @@ def main():
     last_path_plan_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
+    plane_reject_count = 0
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
     has_plane = False
     follow_rover_map = bool(args.map_follow_rover)
@@ -621,11 +658,43 @@ def main():
                 last_plane_update_time = now
                 if status == sl.ERROR_CODE.SUCCESS:
                     a0, b0, c0, d0 = segmentation.plane_params(ground_plane)
-                    a0, b0, c0, d0 = segmentation.normalize_plane(a0, b0, c0, d0)
+                    a0, b0, c0, d0 = segmentation.canonical_plane(a0, b0, c0, d0)
                     if abs(float(b0)) >= float(args.floor_min_normal_y):
-                        a, b, c, d = a0, b0, c0, d0
-                        has_plane = True
-                        plane_fail_count = 0
+                        accept_plane = True
+                        if has_plane:
+                            prev_n = np.array([a, b, c], dtype=np.float32)
+                            new_n = np.array([a0, b0, c0], dtype=np.float32)
+                            dot = float(np.clip(np.dot(prev_n, new_n), -1.0, 1.0))
+                            tilt_deg = float(np.degrees(np.arccos(dot)))
+                            d_jump = abs(float(d0) - float(d))
+                            if (
+                                tilt_deg > float(args.plane_max_tilt_delta_deg)
+                                or d_jump > float(args.plane_max_height_jump_m)
+                            ):
+                                accept_plane = False
+                                plane_reject_count += 1
+                                if plane_reject_count % 10 == 1:
+                                    print(
+                                        "Rejected floor plane jump: "
+                                        f"tilt_delta={tilt_deg:.2f}deg d_jump={d_jump:.3f}m"
+                                    )
+                        if accept_plane:
+                            alpha = max(0.0, min(1.0, float(args.plane_ema_alpha)))
+                            if not has_plane or alpha >= 1.0:
+                                a, b, c, d = a0, b0, c0, d0
+                            else:
+                                blend_n = (1.0 - alpha) * np.array([a, b, c], dtype=np.float32) + (
+                                    alpha * np.array([a0, b0, c0], dtype=np.float32)
+                                )
+                                n_norm = float(np.linalg.norm(blend_n))
+                                if n_norm <= 1e-6:
+                                    blend_n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                                    n_norm = 1.0
+                                blend_n /= n_norm
+                                a, b, c = float(blend_n[0]), float(blend_n[1]), float(blend_n[2])
+                                d = float((1.0 - alpha) * float(d) + alpha * float(d0))
+                            has_plane = True
+                            plane_fail_count = 0
                     else:
                         plane_fail_count += 1
                         if plane_fail_count % 10 == 1:
@@ -644,10 +713,14 @@ def main():
             if cloud is None:
                 continue
             # Downsample for speed
-            stride = 8
+            stride = max(1, int(args.sample_stride))
             xyz = cloud[::stride, ::stride, :3].reshape(-1, 3)
             # Filter invalid points
             mask = np.isfinite(xyz).all(axis=1)
+            if float(args.min_range_z_m) > 0.0:
+                mask &= xyz[:, 2] >= float(args.min_range_z_m)
+            if float(args.max_range_z_m) > 0.0:
+                mask &= xyz[:, 2] <= float(args.max_range_z_m)
             xyz = xyz[mask]
             if xyz.size == 0:
                 continue
@@ -1047,8 +1120,9 @@ def main():
                     if np.any(valid):
                         dist_full[valid] = (dist_num[valid] / denom).astype(np.float32)
 
-                    ground = (np.abs(dist_full) < 0.10) & valid
-                    obstacle = (dist_full > 0.10) & valid
+                    vis_thresh = float(args.obstacle_thresh_m)
+                    ground = (np.abs(dist_full) < vis_thresh) & valid
+                    obstacle = (dist_full > vis_thresh) & valid
                     if args.max_above_ground_m > 0.0:
                         obstacle = obstacle & (dist_full <= float(args.max_above_ground_m))
 

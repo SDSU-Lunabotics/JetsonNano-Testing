@@ -35,6 +35,16 @@ def normalize_plane(a, b, c, d):
     return a, b, c, d
 
 
+def canonical_plane(a, b, c, d):
+    # Return a unit-length plane with upward-facing normal.
+    a, b, c, d = normalize_plane(a, b, c, d)
+    denom = np.sqrt(a * a + b * b + c * c)
+    if denom <= 1e-6:
+        return 0.0, 1.0, 0.0, 0.0
+    inv = 1.0 / denom
+    return a * inv, b * inv, c * inv, d * inv
+
+
 def classify_points(xyz, a, b, c, d, ground_thresh=0.10):
     # Distance to plane (signed)
     denom = np.sqrt(a * a + b * b + c * c)
