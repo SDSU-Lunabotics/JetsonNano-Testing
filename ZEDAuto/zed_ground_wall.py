@@ -783,9 +783,14 @@ def main():
                         ground_mask = np.zeros((0,), dtype=bool)
                         obstacle_mask = np.zeros((0,), dtype=bool)
                 if args.disable_holes:
-                    # When holes are disabled, do not leave below-plane regions "unknown":
-                    # treat every valid non-obstacle point as ground.
-                    ground_mask = np.logical_and(np.isfinite(dist), np.logical_not(obstacle_mask))
+                    # When holes are disabled, keep a limited below-plane band as ground
+                    # so shallow floor dips don't become unknown, but avoid painting all
+                    # deep below-plane points as ground.
+                    ground_mask = (
+                        np.isfinite(dist)
+                        & (dist >= -float(args.hole_thresh_m))
+                        & np.logical_not(obstacle_mask)
+                    )
                     hole_mask = np.zeros(dist.shape, dtype=bool)
                 else:
                     hole_mask = dist < -args.hole_thresh_m
@@ -1179,8 +1184,8 @@ def main():
                     if args.max_above_ground_m > 0.0:
                         obstacle = obstacle & (dist_full <= float(args.max_above_ground_m))
                     if args.disable_holes:
-                        # Mirror map behavior: with holes disabled, non-obstacle valid points are ground.
-                        ground = valid & (~obstacle)
+                        # Mirror map behavior when holes are disabled.
+                        ground = valid & (~obstacle) & (dist_full >= -float(args.hole_thresh_m))
                     else:
                         ground = (np.abs(dist_full) < vis_thresh) & valid
 
