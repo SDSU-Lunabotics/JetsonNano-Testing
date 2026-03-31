@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 
@@ -76,6 +77,9 @@ class OccupancyMap:
         return False, "Map settings differ; starting with empty map."
 
     def save(self, path):
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
         np.savez_compressed(
             path,
             free_counts=self.free_counts,
