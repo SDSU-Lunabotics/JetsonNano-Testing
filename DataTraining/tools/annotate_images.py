@@ -3,7 +3,7 @@ import argparse
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -98,6 +98,7 @@ def color_for_class(class_id: int) -> Tuple[int, int, int]:
 def draw_overlay(
     image,
     boxes: List[Box],
+    box_confidences: Optional[List[Optional[float]]],
     class_names: List[str],
     index: int,
     total: int,
@@ -137,9 +138,13 @@ def draw_overlay(
         cls_name = class_names[cls_id] if 0 <= cls_id < len(class_names) else f"cls{cls_id}"
         color = color_for_class(cls_id)
         cv2.rectangle(canvas, p1, p2, color, 2)
+        score = None
+        if box_confidences is not None and i < len(box_confidences):
+            score = box_confidences[i]
+        label_text = f"{i}:{cls_name}" if score is None else f"{i}:{cls_name} {score * 100.0:.1f}%"
         cv2.putText(
             canvas,
-            f"{i}:{cls_name}",
+            label_text,
             (p1[0], max(20, p1[1] - 6)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -197,9 +202,10 @@ def run_auto_detect(image, model, class_names: List[str], conf: float, iou: floa
 
     results = model.predict(source=image, conf=conf, iou=iou, max_det=max_det, verbose=False)
     if not results:
-        return [], 0, 0
+        return [], [], 0, 0
 
     out_boxes: List[Box] = []
+    out_confidences: List[Optional[float]] = []
     used = 0
     skipped = 0
 
@@ -207,7 +213,7 @@ def run_auto_detect(image, model, class_names: List[str], conf: float, iou: floa
     names = result.names if hasattr(result, "names") else {}
 
     if result.boxes is None:
-        return [], 0, 0
+        return [], [], 0, 0
 
     for det in result.boxes:
         cls_idx = int(det.cls[0])
@@ -219,9 +225,11 @@ def run_auto_detect(image, model, class_names: List[str], conf: float, iou: floa
 
         x1, y1, x2, y2 = det.xyxy[0].tolist()
         out_boxes.append((local_idx, float(x1), float(y1), float(x2), float(y2)))
+        det_conf = float(det.conf[0]) if hasattr(det, "conf") and len(det.conf) else None
+        out_confidences.append(det_conf)
         used += 1
 
-    return out_boxes, used, skipped
+    return out_boxes, out_confidences, used, skipped
 
 
 def main() -> int:
@@ -272,6 +280,7 @@ def main() -> int:
     idx = 0
     active_class_id = 0
     cache: Dict[Path, List[Box]] = {}
+    confidence_cache: Dict[Path, List[Optional[float]]] = {}
     action_history: Dict[Path, List[int]] = {}
 
     status_text = ""
@@ -295,16 +304,24 @@ def main() -> int:
 
         if image_path not in cache:
             cache[image_path] = load_label_file(label_path, w, h)
+        if image_path not in confidence_cache:
+            confidence_cache[image_path] = [None] * len(cache[image_path])
         if image_path not in action_history:
             action_history[image_path] = []
 
         boxes: List[Box] = cache[image_path]
+        box_confidences = confidence_cache[image_path]
+        if len(box_confidences) < len(boxes):
+            box_confidences.extend([None] * (len(boxes) - len(box_confidences)))
+        elif len(box_confidences) > len(boxes):
+            del box_confidences[len(boxes):]
 
         while True:
             msg = status_text if time.time() < status_until else ""
             view = draw_overlay(
                 image,
                 boxes,
+                box_confidences,
                 class_names,
                 idx,
                 len(image_paths),
@@ -337,6 +354,7 @@ def main() -> int:
                 x, y, rw, rh = roi
                 if rw > 1 and rh > 1:
                     boxes.append((active_class_id, float(x), float(y), float(x + rw), float(y + rh)))
+                    box_confidences.append(None)
                     action_history[image_path].append(1)
                     set_status(f"Added 1 box as {class_names[active_class_id]}")
                 else:
@@ -346,7 +364,7 @@ def main() -> int:
                     set_status("Auto-detect disabled. Restart with --auto-model")
                     continue
 
-                auto_boxes, used, skipped = run_auto_detect(
+                auto_boxes, auto_confs, used, skipped = run_auto_detect(
                     image,
                     auto_model,
                     class_names,
@@ -356,6 +374,7 @@ def main() -> int:
                 )
                 if auto_boxes:
                     boxes.extend(auto_boxes)
+                    box_confidences.extend(auto_confs)
                     action_history[image_path].append(len(auto_boxes))
                     set_status(f"Auto-detect added {used} boxes (skipped {skipped} unmapped)")
                 else:
@@ -363,6 +382,8 @@ def main() -> int:
             elif ch in (ord("r"), ord("R")):
                 if boxes:
                     boxes.pop()
+                    if box_confidences:
+                        box_confidences.pop()
                     set_status("Removed last box")
                 else:
                     set_status("No boxes to remove")
@@ -371,11 +392,13 @@ def main() -> int:
                     count = action_history[image_path].pop()
                     if count > 0 and boxes:
                         del boxes[max(0, len(boxes) - count):]
+                        del box_confidences[max(0, len(box_confidences) - count):]
                         set_status(f"Undid last batch ({count} boxes)")
                 else:
                     set_status("Nothing to undo")
             elif ch in (ord("c"), ord("C")):
                 boxes.clear()
+                box_confidences.clear()
                 action_history[image_path].clear()
                 set_status("Cleared all boxes")
             elif ch in (ord("s"), ord("S")):
