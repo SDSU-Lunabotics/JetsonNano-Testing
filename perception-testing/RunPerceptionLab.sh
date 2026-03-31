@@ -35,6 +35,9 @@ cmd+=(--map-res-m "${MAP_RES_M:-0.05}")
 cmd+=(--semantic-point-stride "${SEMANTIC_POINT_STRIDE:-4}")
 cmd+=(--semantic-decay "${SEMANTIC_DECAY:-1.0}")
 cmd+=(--ground-band-m "${GROUND_BAND_M:-0.10}")
+cmd+=(--zedauto-map-decay "${ZEDAUTO_MAP_DECAY:-0.97}")
+cmd+=(--zedauto-clear-passes "${ZEDAUTO_CLEAR_PASSES:-12}")
+cmd+=(--zedauto-occ-decay "${ZEDAUTO_OCC_DECAY:-0}")
 
 if [[ -n "${AI_DEVICE:-}" ]]; then cmd+=(--ai-device "${AI_DEVICE}"); fi
 if [[ -n "${AI_MODEL_PATH:-}" ]]; then cmd+=(--ai-model "${AI_MODEL_PATH}"); fi
@@ -43,6 +46,8 @@ if [[ "${ZED_OD_TRACKING:-0}" == "1" ]]; then cmd+=(--zed-od-tracking); fi
 if [[ "${ANNOTATION_MODE:-1}" == "1" ]]; then cmd+=(--annotation-mode); fi
 if [[ "${SEMANTIC_MAP:-1}" == "1" ]]; then cmd+=(--semantic-map); fi
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
+if [[ "${ZEDAUTO_MAP:-1}" == "1" ]]; then cmd+=(--zedauto-map); fi
+if [[ "${OBSTACLES_ONLY:-1}" == "1" ]]; then cmd+=(--obstacles-only); fi
 
 echo "Running: ${cmd[*]} $*"
 exec "${cmd[@]}" "$@"

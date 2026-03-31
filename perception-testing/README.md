@@ -27,6 +27,30 @@ If executable bit is missing:
 bash perception-testing/RunPerceptionLab.sh
 ```
 
+## Simple Terrain View (Ground + Wall)
+If you want a lightweight terrain-only view (similar to ZEDAuto ground/wall map), run:
+
+```bash
+./perception-testing/RunTerrainSimple.sh
+```
+
+This mode:
+- skips AI/annotation workflow
+- shows a camera overlay (`green=ground`, `red=obstacle/wall`, `blue=hole`)
+- shows a top-down occupancy map (`Terrain Map (XZ)`)
+- does **not** run people/object detectors (use `RunPerceptionLab.sh` for that)
+
+Keys:
+- `q` or `Esc`: quit
+- `r`: refresh floor plane fit
+- `c`: clear occupancy map
+
+If you want people detection and terrain map together, use:
+
+```bash
+./perception-testing/RunPerceptionLab.sh
+```
+
 ## Live Controls (Trackbars)
 - `Obstacle cm`: height above floor treated as obstacle.
 - `Hole cm`: depth below floor treated as hole.

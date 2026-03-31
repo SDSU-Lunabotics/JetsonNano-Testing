@@ -463,8 +463,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP state (m)")
     p.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW state (m)")
     p.add_argument("--human-min-conf", type=float, default=0.55, help="Minimum person confidence for hazard state")
+    p.add_argument(
+        "--obstacles-only",
+        action="store_true",
+        help="Use geometry as obstacles only (no ground/hole painting in main overlay or ZEDAuto map updates)",
+    )
     p.add_argument("--zedauto-map", action="store_true", help="Show ZEDAuto-style depth occupancy map")
     p.add_argument("--zedauto-map-decay", type=float, default=0.97, help="Decay for ZEDAuto-style occupancy map")
+    p.add_argument(
+        "--zedauto-clear-passes",
+        type=int,
+        default=12,
+        help="Approx frames before stale obstacle map evidence fades (0 disables auto tuning)",
+    )
+    p.add_argument(
+        "--zedauto-occ-decay",
+        type=float,
+        default=0.0,
+        help="Obstacle decay override for ZEDAuto map (0 uses clear-passes heuristic)",
+    )
     return p.parse_args()
 
 
@@ -634,12 +651,22 @@ def main() -> int:
     sem_counts = np.zeros((len(class_names), map_h, map_w), dtype=np.float32)
     map_x_min = -float(args.map_width_m) / 2.0
     map_z_min = -float(args.map_height_m) / 2.0 if args.map_center else 0.0
+    zedauto_occ_decay = float(args.zedauto_occ_decay)
+    if zedauto_occ_decay <= 0.0 and int(args.zedauto_clear_passes) > 0:
+        # Decay to ~5% after N updates when obstacle is no longer observed.
+        n = max(1, int(args.zedauto_clear_passes))
+        zedauto_occ_decay = float(np.exp(np.log(0.05) / float(n)))
+    if zedauto_occ_decay <= 0.0 or zedauto_occ_decay > 1.0:
+        zedauto_occ_decay = float(args.zedauto_map_decay)
     zedauto_occ_map = map_utils.OccupancyMap(
         map_res_m=float(args.map_res_m),
         map_width_m=float(args.map_width_m),
         map_height_m=float(args.map_height_m),
         map_z_min=float(map_z_min),
         decay=float(args.zedauto_map_decay),
+        free_decay=1.0,
+        occ_decay=zedauto_occ_decay,
+        hole_decay=1.0,
     )
 
     def find_candidate_box(px: int, py: int) -> Tuple[Optional[Tuple[int, int, int, int]], str]:
@@ -945,9 +972,11 @@ def main() -> int:
 
             overlay = frame.copy()
             if controls["show_geom"]:
-                overlay[ground == 1] = (0, 190, 0)
+                if not args.obstacles_only:
+                    overlay[ground == 1] = (0, 190, 0)
                 overlay[obstacle == 1] = (0, 0, 255)
-                overlay[hole == 1] = (255, 0, 0)
+                if not args.obstacles_only:
+                    overlay[hole == 1] = (255, 0, 0)
             vis = cv2.addWeighted(frame, 0.65, overlay, 0.35, 0)
 
             obstacle_mask = (obstacle * 255).astype(np.uint8)
@@ -1107,6 +1136,9 @@ def main() -> int:
                     gflat = ground_small.reshape(-1)[valid_flat]
                     oflat = obstacle_small.reshape(-1)[valid_flat]
                     hflat = hole_small.reshape(-1)[valid_flat]
+                    if args.obstacles_only:
+                        gflat = np.zeros_like(oflat, dtype=bool)
+                        hflat = np.zeros_like(oflat, dtype=bool)
                     pts_world = (R_world_cam @ pts.T).T + t_world_cam.reshape(1, 3)
                     zedauto_occ_map.update(
                         x=pts_world[:, 0],
