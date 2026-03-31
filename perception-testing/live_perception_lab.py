@@ -432,6 +432,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ai-every", type=int, default=2, help="Run AI every N frames")
     p.add_argument("--ai-imgsz", type=int, default=640, help="AI inference image size")
     p.add_argument("--ai-device", default="", help="AI device override (e.g. cuda:0, cpu)")
+    p.add_argument("--show-controls", action="store_true", help="Show runtime trackbar controls window")
     p.add_argument(
         "--detector-mode",
         default="zed",
@@ -529,6 +530,23 @@ def read_controls() -> dict:
     }
 
 
+def controls_from_args(args: argparse.Namespace) -> dict:
+    ai_default_on = bool(args.ai_model or args.detector_mode in ("zed", "both"))
+    return {
+        "stride": max(2, int(args.stride)),
+        "obstacle_thresh_m": max(0.01, float(args.obstacle_thresh_m)),
+        "hole_thresh_m": max(0.01, float(args.hole_thresh_m)),
+        "max_above_ground_m": max(0.0, float(args.max_above_ground_m)),
+        "max_forward_m": max(0.0, float(args.max_forward_m)),
+        "min_box_area_px": max(100, int(args.min_box_area_px)),
+        "ai_conf": max(0.01, min(0.99, float(args.ai_conf))),
+        "ai_iou": max(0.01, min(0.99, float(args.ai_iou))),
+        "show_geom": True,
+        "show_boxes": True,
+        "show_ai": ai_default_on,
+    }
+
+
 def normalize_bgr(img: np.ndarray) -> Optional[np.ndarray]:
     if img is None:
         return None
@@ -612,13 +630,12 @@ def main() -> int:
         use_tracking=bool(args.zed_od_tracking and args.tracking),
     )
 
-    create_controls(args)
+    if args.show_controls:
+        create_controls(args)
     cv2.namedWindow("Perception Lab", cv2.WINDOW_NORMAL)
-    cv2.namedWindow("Obstacle Mask", cv2.WINDOW_NORMAL)
-    if args.semantic_map:
-        cv2.namedWindow("Semantic Map (XZ)", cv2.WINDOW_NORMAL)
-    if args.zedauto_map:
-        cv2.namedWindow("ZEDAuto Map (Depth)", cv2.WINDOW_NORMAL)
+    map_window_name = "Perception Map"
+    if args.semantic_map or args.zedauto_map:
+        cv2.namedWindow(map_window_name, cv2.WINDOW_NORMAL)
 
     has_plane = False
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
@@ -640,6 +657,7 @@ def main() -> int:
     last_frame_shape = (720, 1280)
     brush_class_idx = 0
     map_mouse_down = False
+    sem_mouse_x_offset = 0
     map_display_scale = 2
     human_clear_hold_frames = 12
     human_clear_countdown = 0
@@ -727,9 +745,10 @@ def main() -> int:
     cv2.setMouseCallback("Perception Lab", on_mouse)
 
     def on_semantic_map_mouse(event: int, x: int, y: int, flags: int, param: object) -> None:
-        nonlocal map_mouse_down
+        nonlocal map_mouse_down, sem_mouse_x_offset
         if not args.semantic_map:
             return
+        x = int(x - sem_mouse_x_offset)
         map_w_disp = map_w * map_display_scale
         map_h_disp = map_h * map_display_scale
         if x < 0 or y < 0 or x >= map_w_disp or y >= map_h_disp:
@@ -762,8 +781,8 @@ def main() -> int:
         elif event == cv2.EVENT_RBUTTONDOWN:
             paint(False)
 
-    if args.semantic_map:
-        cv2.setMouseCallback("Semantic Map (XZ)", on_semantic_map_mouse)
+    if args.semantic_map and (args.semantic_map or args.zedauto_map):
+        cv2.setMouseCallback(map_window_name, on_semantic_map_mouse)
 
     def save_annotation(
         frame_bgr: np.ndarray,
@@ -922,7 +941,7 @@ def main() -> int:
                 continue
             last_frame_shape = frame.shape[:2]
 
-            controls = read_controls()
+            controls = read_controls() if args.show_controls else controls_from_args(args)
             now = time.time()
             if (not has_plane) or ((now - last_floor_update) >= max(0.05, float(args.floor_update_sec))):
                 status = zed.find_floor_plane(ground_plane, tracking_reset)
@@ -1008,14 +1027,14 @@ def main() -> int:
                 y2 = y + hh
                 geom_boxes_for_ann.append((x, y, x2, y2, "geom", "geom_obstacle"))
                 if controls["show_boxes"]:
-                    cv2.rectangle(vis, (x, y), (x2, y2), (0, 255, 255), 2)
+                    cv2.rectangle(vis, (x, y), (x2, y2), (0, 0, 255), 2)
                     cv2.putText(
                         vis,
                         f"geom_obstacle area={area}",
                         (x, max(18, y - 6)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.45,
-                        (0, 255, 255),
+                        (0, 0, 255),
                         1,
                         cv2.LINE_AA,
                     )
@@ -1057,14 +1076,15 @@ def main() -> int:
                                 if nearest_human_m is None or dist < nearest_human_m:
                                     nearest_human_m = dist
                         if controls["show_ai"]:
-                            cv2.rectangle(vis, (x1, y1), (x2, y2), (180, 255, 0), 2)
+                            box_color = (0, 255, 120) if is_person else (0, 0, 255)
+                            cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2)
                             cv2.putText(
                                 vis,
                                 f"YOLO {label} {conf:.2f}",
                                 (x1, max(16, y1 - 6)),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.52,
-                                (180, 255, 0),
+                                box_color,
                                 1,
                                 cv2.LINE_AA,
                             )
@@ -1097,14 +1117,15 @@ def main() -> int:
                                 if nearest_human_m is None or dist < nearest_human_m:
                                     nearest_human_m = dist
                         if controls["show_ai"]:
-                            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 120), 2)
+                            box_color = (0, 255, 120) if is_person else (0, 0, 255)
+                            cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2)
                             cv2.putText(
                                 vis,
                                 f"ZED {label} {conf:.2f}",
                                 (x1, max(16, y1 - 6)),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.52,
-                                (0, 255, 120),
+                                box_color,
                                 1,
                                 cv2.LINE_AA,
                             )
@@ -1216,8 +1237,8 @@ def main() -> int:
                 ytxt += 22
 
             cv2.imshow("Perception Lab", vis)
-            cv2.imshow("Obstacle Mask", obstacle_mask)
-
+            occ_show = None
+            sem_show = None
             if args.semantic_map:
                 cam_rc = None
                 rr, cc, inb = _world_to_grid(
@@ -1244,7 +1265,6 @@ def main() -> int:
                     (sem_vis.shape[1] * map_display_scale, sem_vis.shape[0] * map_display_scale),
                     interpolation=cv2.INTER_NEAREST,
                 )
-                cv2.imshow("Semantic Map (XZ)", sem_show)
 
             if args.zedauto_map:
                 occ_vis = zedauto_occ_map.render()
@@ -1286,7 +1306,20 @@ def main() -> int:
                     (occ_vis.shape[1] * map_display_scale, occ_vis.shape[0] * map_display_scale),
                     interpolation=cv2.INTER_NEAREST,
                 )
-                cv2.imshow("ZEDAuto Map (Depth)", occ_show)
+
+            if args.semantic_map or args.zedauto_map:
+                map_panels: List[np.ndarray] = []
+                if occ_show is not None:
+                    map_panels.append(occ_show)
+                if sem_show is not None:
+                    map_panels.append(sem_show)
+                if map_panels:
+                    if len(map_panels) == 2 and occ_show is not None:
+                        sem_mouse_x_offset = int(occ_show.shape[1])
+                    else:
+                        sem_mouse_x_offset = 0
+                    map_show = map_panels[0] if len(map_panels) == 1 else np.hstack(map_panels)
+                    cv2.imshow(map_window_name, map_show)
 
             if key == ord("s"):
                 stamp = time.strftime("%Y%m%d_%H%M%S")

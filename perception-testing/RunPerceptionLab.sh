@@ -43,6 +43,7 @@ if [[ -n "${AI_DEVICE:-}" ]]; then cmd+=(--ai-device "${AI_DEVICE}"); fi
 if [[ -n "${AI_MODEL_PATH:-}" ]]; then cmd+=(--ai-model "${AI_MODEL_PATH}"); fi
 if [[ -n "${AI_LABELS_PATH:-}" ]]; then cmd+=(--ai-labels "${AI_LABELS_PATH}"); fi
 if [[ "${ZED_OD_TRACKING:-0}" == "1" ]]; then cmd+=(--zed-od-tracking); fi
+if [[ "${SHOW_CONTROLS:-0}" == "1" ]]; then cmd+=(--show-controls); fi
 if [[ "${ANNOTATION_MODE:-1}" == "1" ]]; then cmd+=(--annotation-mode); fi
 if [[ "${SEMANTIC_MAP:-1}" == "1" ]]; then cmd+=(--semantic-map); fi
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi

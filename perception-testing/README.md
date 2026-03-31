@@ -13,6 +13,7 @@ without changing your autonomous driving pipeline.
   - Optional YOLO (`ultralytics`) if a custom model is provided.
 - Annotation mode: click/drag a box, then press class hotkey (`1..9`).
 - Semantic top-down map that updates from labeled boxes using ZED depth projection.
+- Single combined `Perception Map` window for map outputs (terrain + semantic overlays).
 
 ## Run
 From repo root:
@@ -52,6 +53,7 @@ If you want people detection and terrain map together, use:
 ```
 
 ## Live Controls (Trackbars)
+Set `SHOW_CONTROLS=1` in `perception-testing/perception_lab.env` to open this window.
 - `Obstacle cm`: height above floor treated as obstacle.
 - `Hole cm`: depth below floor treated as hole.
 - `MaxAbove cm`: ignore obstacle points above this floor-relative height.
