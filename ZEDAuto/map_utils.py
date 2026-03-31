@@ -158,8 +158,8 @@ class OccupancyMap:
         if hmask is not None and np.any(hmask):
             hole_r, hole_c = _unique_cells(row[hmask], col[hmask])
             self.hole_counts[hole_r, hole_c] += 1.0
-            if self.free_downgrade_factor < 1.0:
-                self.free_counts[hole_r, hole_c] *= self.free_downgrade_factor
+            # Keep holes informational (blue) without making them non-traversable by
+            # degrading free-space confidence. Obstacle evidence still controls blocking.
 
     def render(self):
         # Visualize: green = free, red = occupied, blue = holes, black = unknown.
