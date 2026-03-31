@@ -153,6 +153,18 @@ def main():
         help="Minimum close obstacle points in safety lane before backup triggers.",
     )
     parser.add_argument(
+        "--backup-critical-dist-m",
+        type=float,
+        default=0.30,
+        help="Critical forward distance (m). If enough obstacle points are inside this, backup triggers immediately.",
+    )
+    parser.add_argument(
+        "--backup-critical-min-points",
+        type=int,
+        default=6,
+        help="Minimum critical-distance obstacle points required for immediate backup trigger.",
+    )
+    parser.add_argument(
         "--backup-speed",
         type=float,
         default=0.35,
@@ -839,19 +851,37 @@ def main():
             if (
                 xyz.shape[0] > 0
                 and float(args.backup_close_dist_m) > 0.0
-                and int(args.backup_min_obstacle_points) > 0
+                and (int(args.backup_min_obstacle_points) > 0 or int(args.backup_critical_min_points) > 0)
             ):
                 lane_half = max(0.05, float(args.backup_lane_half_width_m))
-                close_mask = (
+                in_lane = (
                     obstacle_mask
                     & (xyz[:, 2] > 0.0)
-                    & (xyz[:, 2] <= float(args.backup_close_dist_m))
                     & (np.abs(xyz[:, 0]) <= lane_half)
                 )
+                close_mask = in_lane & (xyz[:, 2] <= float(args.backup_close_dist_m))
                 close_count = int(np.count_nonzero(close_mask))
-                if close_count >= int(args.backup_min_obstacle_points):
+                critical_count = 0
+                critical_mask = None
+                if float(args.backup_critical_dist_m) > 0.0:
+                    critical_mask = in_lane & (xyz[:, 2] <= float(args.backup_critical_dist_m))
+                    critical_count = int(np.count_nonzero(critical_mask))
+                critical_trigger = (
+                    float(args.backup_critical_dist_m) > 0.0
+                    and int(args.backup_critical_min_points) > 0
+                    and critical_count >= int(args.backup_critical_min_points)
+                )
+                close_trigger = (
+                    int(args.backup_min_obstacle_points) > 0
+                    and close_count >= int(args.backup_min_obstacle_points)
+                )
+                if critical_trigger or close_trigger:
                     close_obstacle_detected = True
-                    close_obstacle_min_z = float(np.min(xyz[close_mask, 2]))
+                    trigger_mask = close_mask
+                    if critical_trigger and critical_mask is not None and np.any(critical_mask):
+                        trigger_mask = critical_mask
+                    if np.any(trigger_mask):
+                        close_obstacle_min_z = float(np.min(xyz[trigger_mask, 2]))
 
             print(
                 f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "

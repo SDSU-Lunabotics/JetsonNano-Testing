@@ -95,6 +95,8 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
   cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
   cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
+  cmd+=(--backup-critical-dist-m "${BACKUP_CRITICAL_DIST_M:-0.30}")
+  cmd+=(--backup-critical-min-points "${BACKUP_CRITICAL_MIN_POINTS:-6}")
   cmd+=(--backup-speed "${BACKUP_SPEED:-0.35}")
   cmd+=(--backup-hold-sec "${BACKUP_HOLD_SEC:-0.40}")
   cmd+=(--drive-ready-pulse-sec "${DRIVE_READY_PULSE_SEC:-0.10}")
