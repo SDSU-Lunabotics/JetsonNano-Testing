@@ -770,6 +770,13 @@ def main():
                 dist, ground_mask, obstacle_mask = segmentation.classify_points(
                     xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
                 )
+                # Use an explicit signed band for ground classification:
+                #   - above lower bound (hole threshold)
+                #   - below upper bound (obstacle threshold)
+                # This avoids "unknown gaps" between hole and ground and keeps sky/ceiling
+                # from being marked ground when max-above filtering is active.
+                ground_mask = (dist >= -float(args.hole_thresh_m)) & (dist <= float(args.obstacle_thresh_m))
+                obstacle_mask = dist > float(args.obstacle_thresh_m)
                 if args.max_above_ground_m > 0.0:
                     keep_mask = dist <= float(args.max_above_ground_m)
                     if np.any(keep_mask):
@@ -783,14 +790,6 @@ def main():
                         ground_mask = np.zeros((0,), dtype=bool)
                         obstacle_mask = np.zeros((0,), dtype=bool)
                 if args.disable_holes:
-                    # When holes are disabled, keep a limited below-plane band as ground
-                    # so shallow floor dips don't become unknown, but avoid painting all
-                    # deep below-plane points as ground.
-                    ground_mask = (
-                        np.isfinite(dist)
-                        & (dist >= -float(args.hole_thresh_m))
-                        & np.logical_not(obstacle_mask)
-                    )
                     hole_mask = np.zeros(dist.shape, dtype=bool)
                 else:
                     hole_mask = dist < -args.hole_thresh_m
@@ -1182,12 +1181,17 @@ def main():
                     vis_thresh = float(args.obstacle_thresh_m)
                     obstacle = (dist_full > vis_thresh) & valid
                     if args.max_above_ground_m > 0.0:
-                        obstacle = obstacle & (dist_full <= float(args.max_above_ground_m))
-                    if args.disable_holes:
-                        # Mirror map behavior when holes are disabled.
-                        ground = valid & (~obstacle) & (dist_full >= -float(args.hole_thresh_m))
+                        max_above = float(args.max_above_ground_m)
+                        obstacle = obstacle & (dist_full <= max_above)
                     else:
-                        ground = (np.abs(dist_full) < vis_thresh) & valid
+                        max_above = None
+                    ground = (
+                        valid
+                        & (dist_full >= -float(args.hole_thresh_m))
+                        & (dist_full <= vis_thresh)
+                    )
+                    if max_above is not None:
+                        ground = ground & (dist_full <= max_above)
 
                     # Resize masks to full resolution
                     h, w, _ = img.shape
