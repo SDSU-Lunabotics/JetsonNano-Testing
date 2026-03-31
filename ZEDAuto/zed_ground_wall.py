@@ -777,6 +777,9 @@ def main():
                         ground_mask = np.zeros((0,), dtype=bool)
                         obstacle_mask = np.zeros((0,), dtype=bool)
                 if args.disable_holes:
+                    # When holes are disabled, do not leave below-plane regions "unknown":
+                    # treat every valid non-obstacle point as ground.
+                    ground_mask = np.logical_and(np.isfinite(dist), np.logical_not(obstacle_mask))
                     hole_mask = np.zeros(dist.shape, dtype=bool)
                 else:
                     hole_mask = dist < -args.hole_thresh_m
@@ -1165,10 +1168,14 @@ def main():
                         dist_full[valid] = (dist_num[valid] / denom).astype(np.float32)
 
                     vis_thresh = float(args.obstacle_thresh_m)
-                    ground = (np.abs(dist_full) < vis_thresh) & valid
                     obstacle = (dist_full > vis_thresh) & valid
                     if args.max_above_ground_m > 0.0:
                         obstacle = obstacle & (dist_full <= float(args.max_above_ground_m))
+                    if args.disable_holes:
+                        # Mirror map behavior: with holes disabled, non-obstacle valid points are ground.
+                        ground = valid & (~obstacle)
+                    else:
+                        ground = (np.abs(dist_full) < vis_thresh) & valid
 
                     # Resize masks to full resolution
                     h, w, _ = img.shape
