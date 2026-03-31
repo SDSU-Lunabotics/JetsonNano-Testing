@@ -194,6 +194,12 @@ def main():
         help="Reject floor-plane updates with abrupt height offset jump (m)",
     )
     parser.add_argument(
+        "--plane-force-accept-rejects",
+        type=int,
+        default=20,
+        help="Force-accept next valid floor plane after this many consecutive jump rejections (0 disables)",
+    )
+    parser.add_argument(
         "--sample-stride",
         type=int,
         default=8,
@@ -282,6 +288,10 @@ def main():
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
         print("  sudo apt install -y python3-opencv")
+    elif args.no_gui:
+        print("GUI disabled (--no-gui): map/camera windows will not open.")
+    else:
+        print("GUI enabled: opening camera/map windows.")
 
     print("Running. Press Ctrl+C to exit.")
     # Simple 2D occupancy map settings (XZ plane, Y up).
@@ -359,6 +369,7 @@ def main():
     last_plane_update_time = 0.0
     plane_fail_count = 0
     plane_reject_count = 0
+    no_points_count = 0
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
     has_plane = False
     follow_rover_map = bool(args.map_follow_rover)
@@ -678,6 +689,15 @@ def main():
                                         "Rejected floor plane jump: "
                                         f"tilt_delta={tilt_deg:.2f}deg d_jump={d_jump:.3f}m"
                                     )
+                                if (
+                                    int(args.plane_force_accept_rejects) > 0
+                                    and plane_reject_count >= int(args.plane_force_accept_rejects)
+                                ):
+                                    print(
+                                        "Too many plane rejections; force-accepting new plane "
+                                        "to recover live mapping."
+                                    )
+                                    accept_plane = True
                         if accept_plane:
                             alpha = max(0.0, min(1.0, float(args.plane_ema_alpha)))
                             if not has_plane or alpha >= 1.0:
@@ -695,6 +715,7 @@ def main():
                                 d = float((1.0 - alpha) * float(d) + alpha * float(d0))
                             has_plane = True
                             plane_fail_count = 0
+                            plane_reject_count = 0
                     else:
                         plane_fail_count += 1
                         if plane_fail_count % 10 == 1:
@@ -722,29 +743,51 @@ def main():
             if float(args.max_range_z_m) > 0.0:
                 mask &= xyz[:, 2] <= float(args.max_range_z_m)
             xyz = xyz[mask]
+
             if xyz.size == 0:
-                continue
-
-            # Distance to plane (signed)
-            dist, ground_mask, obstacle_mask = segmentation.classify_points(
-                xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
-            )
-            if args.max_above_ground_m > 0.0:
-                keep_mask = dist <= float(args.max_above_ground_m)
-                if not np.any(keep_mask):
-                    continue
-                xyz = xyz[keep_mask]
-                dist = dist[keep_mask]
-                ground_mask = ground_mask[keep_mask]
-                obstacle_mask = obstacle_mask[keep_mask]
-            if args.disable_holes:
-                hole_mask = np.zeros(dist.shape, dtype=bool)
+                no_points_count += 1
+                if no_points_count % 30 == 1:
+                    print(
+                        "No valid depth points after filtering; "
+                        "consider lowering --min-range-z-m or disabling range limits."
+                    )
+                dist = np.empty((0,), dtype=np.float32)
+                ground_mask = np.zeros((0,), dtype=bool)
+                obstacle_mask = np.zeros((0,), dtype=bool)
+                hole_mask = np.zeros((0,), dtype=bool)
+                ground_pct = 0.0
+                obstacle_pct = 0.0
+                hole_pct = 0.0
             else:
-                hole_mask = dist < -args.hole_thresh_m
-            ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
-
-            obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
-            hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
+                no_points_count = 0
+                # Distance to plane (signed)
+                dist, ground_mask, obstacle_mask = segmentation.classify_points(
+                    xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
+                )
+                if args.max_above_ground_m > 0.0:
+                    keep_mask = dist <= float(args.max_above_ground_m)
+                    if np.any(keep_mask):
+                        xyz = xyz[keep_mask]
+                        dist = dist[keep_mask]
+                        ground_mask = ground_mask[keep_mask]
+                        obstacle_mask = obstacle_mask[keep_mask]
+                    else:
+                        xyz = np.empty((0, 3), dtype=np.float32)
+                        dist = np.empty((0,), dtype=np.float32)
+                        ground_mask = np.zeros((0,), dtype=bool)
+                        obstacle_mask = np.zeros((0,), dtype=bool)
+                if args.disable_holes:
+                    hole_mask = np.zeros(dist.shape, dtype=bool)
+                else:
+                    hole_mask = dist < -args.hole_thresh_m
+                if xyz.shape[0] > 0:
+                    ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
+                    obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
+                    hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
+                else:
+                    ground_pct = 0.0
+                    obstacle_pct = 0.0
+                    hole_pct = 0.0
 
             print(
                 f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "
@@ -752,7 +795,8 @@ def main():
             )
 
             # Publish point cloud to ROS2 (optional)
-            ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
+            if xyz.shape[0] > 0:
+                ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
 
             # Build a simple 2D top-down occupancy map (XZ) from ground/obstacle points.
             if HAS_CV2:
@@ -1077,7 +1121,7 @@ def main():
                     if mesh_viewer is not None:
                         mesh_viewer.poll()
                 else:
-                    map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
+                    map_vis = occ_map.render()
                     if args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
