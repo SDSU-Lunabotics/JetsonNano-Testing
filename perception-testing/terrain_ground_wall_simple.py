@@ -99,6 +99,8 @@ def main() -> None:
         tracking_pose_ok = not tracking_enabled
     last_valid_R = np.eye(3, dtype=np.float32)
     last_valid_t = np.zeros(3, dtype=np.float32)
+    map_origin_set = False
+    map_origin_t = np.zeros(3, dtype=np.float32)
 
     map_z_min = -args.map_height_m / 2.0 if args.map_center else args.map_z_min
     occ_map = map_utils.OccupancyMap(
@@ -131,12 +133,24 @@ def main() -> None:
                 if tracking_pose_ok:
                     last_valid_R = R
                     last_valid_t = t
+                    if not map_origin_set:
+                        map_origin_t = np.array(t, dtype=np.float32)
+                        map_origin_set = True
+                        print(
+                            "Map origin anchored at "
+                            f"x={map_origin_t[0]:+.2f}, y={map_origin_t[1]:+.2f}, z={map_origin_t[2]:+.2f}"
+                        )
                 else:
                     R = last_valid_R
                     t = last_valid_t
             else:
                 R = np.eye(3, dtype=np.float32)
                 t = np.zeros(3, dtype=np.float32)
+
+            if tracking_enabled and map_origin_set:
+                t_map = np.array(t, dtype=np.float32) - map_origin_t
+            else:
+                t_map = np.array(t, dtype=np.float32)
 
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
@@ -179,7 +193,7 @@ def main() -> None:
                     hole_mask = np.zeros(dist.shape, dtype=bool)
 
                 # Keep map integration alive using the best available pose (current or held last-valid).
-                xyz_world = (R @ xyz.T).T + t
+                xyz_world = (R @ xyz.T).T + t_map
                 occ_map.update(
                     x=xyz_world[:, 0],
                     z=xyz_world[:, 2],
@@ -236,7 +250,7 @@ def main() -> None:
 
             # Top-down map
             map_vis = occ_map.render()
-            cam_rc = occ_map.world_to_grid(float(t[0]), float(t[2]))
+            cam_rc = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
             if cam_rc is not None:
                 rr, cc = cam_rc
                 r1, r2 = max(0, rr - 1), min(occ_map.grid_h, rr + 2)
