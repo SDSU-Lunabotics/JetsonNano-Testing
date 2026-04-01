@@ -40,6 +40,7 @@ fi
 cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py")
 
 # Core mapping/tracking
+if [[ "${COMPLEX_MAPPING:-0}" == "1" ]]; then cmd+=(--complex); fi
 if [[ "${TRACKING:-1}" == "1" ]]; then cmd+=(--tracking); fi
 if [[ "${AREA_MEMORY_ENABLE:-1}" == "1" ]]; then cmd+=(--area-memory); fi
 if [[ -n "${AREA_LOAD_PATH:-}" ]]; then cmd+=(--area-load-path "${AREA_LOAD_PATH}"); fi

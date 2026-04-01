@@ -99,6 +99,11 @@ def main():
         action="store_true",
         help="Show heatmap in a separate window instead of overlaying on map",
     )
+    parser.add_argument(
+        "--complex",
+        action="store_true",
+        help="Use complex mapping (EMA plane smoothing, tilt/jump rejection, tracking-gated map). Default is simple mode.",
+    )
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
     parser.add_argument(
@@ -311,6 +316,8 @@ def main():
         tracking_prev_ok = True
     last_valid_R_world_cam = np.eye(3, dtype=np.float32)
     last_valid_t_world_cam = np.zeros(3, dtype=np.float32)
+    map_origin_set = False
+    map_origin_t = np.zeros(3, dtype=np.float32)
     spatial_enabled = False
     spatial_mesh = None
     last_spatial_save = time.time()
@@ -342,6 +349,8 @@ def main():
         print("GUI enabled: opening camera/map windows.")
 
     print("Running. Press Ctrl+C to exit.")
+    mapping_mode = "complex" if args.complex else "simple"
+    print(f"Mapping mode: {mapping_mode}")
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
     map_z_min = args.map_z_min
@@ -692,6 +701,13 @@ def main():
                     last_valid_R_world_cam = R_world_cam
                     last_valid_t_world_cam = t_world_cam
                     tracking_loss_warned = False
+                    if not args.complex and not map_origin_set:
+                        map_origin_t = np.array(t_world_cam, dtype=np.float32)
+                        map_origin_set = True
+                        print(
+                            "Map origin anchored at "
+                            f"x={map_origin_t[0]:+.2f}, y={map_origin_t[1]:+.2f}, z={map_origin_t[2]:+.2f}"
+                        )
                 else:
                     # Hold last known pose and pause map integration until tracking recovers.
                     R_world_cam = last_valid_R_world_cam
@@ -721,48 +737,56 @@ def main():
                     a0, b0, c0, d0 = segmentation.plane_params(ground_plane)
                     a0, b0, c0, d0 = segmentation.canonical_plane(a0, b0, c0, d0)
                     if abs(float(b0)) >= float(args.floor_min_normal_y):
-                        accept_plane = True
-                        if has_plane:
-                            prev_n = np.array([a, b, c], dtype=np.float32)
-                            new_n = np.array([a0, b0, c0], dtype=np.float32)
-                            dot = float(np.clip(np.dot(prev_n, new_n), -1.0, 1.0))
-                            tilt_deg = float(np.degrees(np.arccos(dot)))
-                            d_jump = abs(float(d0) - float(d))
-                            if (
-                                tilt_deg > float(args.plane_max_tilt_delta_deg)
-                                or d_jump > float(args.plane_max_height_jump_m)
-                            ):
-                                accept_plane = False
-                                plane_reject_count += 1
-                                if plane_reject_count % 10 == 1:
-                                    print(
-                                        "Rejected floor plane jump: "
-                                        f"tilt_delta={tilt_deg:.2f}deg d_jump={d_jump:.3f}m"
-                                    )
+                        if args.complex:
+                            # Complex mode: EMA smoothing + tilt/jump rejection
+                            accept_plane = True
+                            if has_plane:
+                                prev_n = np.array([a, b, c], dtype=np.float32)
+                                new_n = np.array([a0, b0, c0], dtype=np.float32)
+                                dot = float(np.clip(np.dot(prev_n, new_n), -1.0, 1.0))
+                                tilt_deg = float(np.degrees(np.arccos(dot)))
+                                d_jump = abs(float(d0) - float(d))
                                 if (
-                                    int(args.plane_force_accept_rejects) > 0
-                                    and plane_reject_count >= int(args.plane_force_accept_rejects)
+                                    tilt_deg > float(args.plane_max_tilt_delta_deg)
+                                    or d_jump > float(args.plane_max_height_jump_m)
                                 ):
-                                    print(
-                                        "Too many plane rejections; force-accepting new plane "
-                                        "to recover live mapping."
+                                    accept_plane = False
+                                    plane_reject_count += 1
+                                    if plane_reject_count % 10 == 1:
+                                        print(
+                                            "Rejected floor plane jump: "
+                                            f"tilt_delta={tilt_deg:.2f}deg d_jump={d_jump:.3f}m"
+                                        )
+                                    if (
+                                        int(args.plane_force_accept_rejects) > 0
+                                        and plane_reject_count >= int(args.plane_force_accept_rejects)
+                                    ):
+                                        print(
+                                            "Too many plane rejections; force-accepting new plane "
+                                            "to recover live mapping."
+                                        )
+                                        accept_plane = True
+                            if accept_plane:
+                                alpha = max(0.0, min(1.0, float(args.plane_ema_alpha)))
+                                if not has_plane or alpha >= 1.0:
+                                    a, b, c, d = a0, b0, c0, d0
+                                else:
+                                    blend_n = (1.0 - alpha) * np.array([a, b, c], dtype=np.float32) + (
+                                        alpha * np.array([a0, b0, c0], dtype=np.float32)
                                     )
-                                    accept_plane = True
-                        if accept_plane:
-                            alpha = max(0.0, min(1.0, float(args.plane_ema_alpha)))
-                            if not has_plane or alpha >= 1.0:
-                                a, b, c, d = a0, b0, c0, d0
-                            else:
-                                blend_n = (1.0 - alpha) * np.array([a, b, c], dtype=np.float32) + (
-                                    alpha * np.array([a0, b0, c0], dtype=np.float32)
-                                )
-                                n_norm = float(np.linalg.norm(blend_n))
-                                if n_norm <= 1e-6:
-                                    blend_n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-                                    n_norm = 1.0
-                                blend_n /= n_norm
-                                a, b, c = float(blend_n[0]), float(blend_n[1]), float(blend_n[2])
-                                d = float((1.0 - alpha) * float(d) + alpha * float(d0))
+                                    n_norm = float(np.linalg.norm(blend_n))
+                                    if n_norm <= 1e-6:
+                                        blend_n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                                        n_norm = 1.0
+                                    blend_n /= n_norm
+                                    a, b, c = float(blend_n[0]), float(blend_n[1]), float(blend_n[2])
+                                    d = float((1.0 - alpha) * float(d) + alpha * float(d0))
+                                has_plane = True
+                                plane_fail_count = 0
+                                plane_reject_count = 0
+                        else:
+                            # Simple mode: accept plane directly, no smoothing
+                            a, b, c, d = a0, b0, c0, d0
                             has_plane = True
                             plane_fail_count = 0
                             plane_reject_count = 0
@@ -897,17 +921,26 @@ def main():
                 map_vis = None
                 heatmap_vis = None
                 cam_row_col = None
-                map_integration_ok = (not tracking_enabled) or tracking_pose_ok
+                if args.complex:
+                    map_integration_ok = (not tracking_enabled) or tracking_pose_ok
+                else:
+                    # Simple mode: always integrate map
+                    map_integration_ok = True
+                # Compute map-local translation for simple mode
+                if not args.complex and map_origin_set:
+                    t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
+                else:
+                    t_map = np.array(t_world_cam, dtype=np.float32)
                 if xyz.size > 0:
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
-                        xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
+                        xyz_world = (R_world_cam @ xyz.T).T + t_map
                         x = xyz_world[:, 0]
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
                     map_vis = occ_map.render()
                     # Draw camera position marker (blue square).
-                    cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
+                    cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
                     if cam_row_col is not None:
                         r0, c0 = cam_row_col
                         half = max(1, int(args.map_camera_size) // 2)
@@ -1164,8 +1197,8 @@ def main():
                                 else:
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
-                                # Current pose in world.
-                                cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
+                                # Current pose in map coordinates.
+                                cx, cz = float(t_map[0]), float(t_map[2])
                                 dx = tx - cx
                                 dz = tz - cz
 
