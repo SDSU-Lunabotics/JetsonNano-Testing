@@ -28,7 +28,16 @@ def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
                 tracking_params.area_file_path = area_load_path
             elif hasattr(tracking_params, "set_area_file_path"):
                 tracking_params.set_area_file_path(area_load_path)
-        track_err = zed.enable_positional_tracking(tracking_params)
+        # Some pyzed builds only accept no-arg enable_positional_tracking().
+        track_err = None
+        try:
+            track_err = zed.enable_positional_tracking(tracking_params)
+        except TypeError:
+            track_err = zed.enable_positional_tracking()
+        except Exception as exc:
+            # Fallback for SDK/binding mismatches where params object isn't accepted.
+            print(f"Tracking init with parameters failed; retrying default init: {exc}")
+            track_err = zed.enable_positional_tracking()
         if track_err == sl.ERROR_CODE.SUCCESS:
             if area_load_path and os.path.exists(area_load_path):
                 print(f"Positional tracking enabled (area memory load: {area_load_path}).")
