@@ -120,6 +120,16 @@ fi
 if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
 if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 
+# Human detection
+if [[ "${HUMAN_DETECT:-1}" == "1" ]]; then
+  cmd+=(--human-detect)
+  cmd+=(--human-od-confidence "${HUMAN_OD_CONFIDENCE:-40}")
+  cmd+=(--human-od-every "${HUMAN_OD_EVERY:-1}")
+  cmd+=(--human-stop-m "${HUMAN_STOP_M:-1.5}")
+  cmd+=(--human-slow-m "${HUMAN_SLOW_M:-3.0}")
+  cmd+=(--human-min-conf "${HUMAN_MIN_CONF:-0.40}")
+fi
+
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"
 exec "${cmd[@]}" "$@"

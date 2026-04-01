@@ -281,6 +281,12 @@ def main():
         action="store_true",
         help="Show only red (obstacle) overlay on camera view, hide green ground coloring",
     )
+    parser.add_argument("--human-detect", action="store_true", help="Enable ZED SDK human/person detection")
+    parser.add_argument("--human-od-confidence", type=int, default=40, help="ZED OD confidence threshold (1-99)")
+    parser.add_argument("--human-od-every", type=int, default=1, help="Run ZED OD every N frames")
+    parser.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP (m)")
+    parser.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW (m)")
+    parser.add_argument("--human-min-conf", type=float, default=0.40, help="Min person confidence for hazard state")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -356,6 +362,45 @@ def main():
     print("Running. Press Ctrl+C to exit.")
     mapping_mode = "complex" if args.complex else "simple"
     print(f"Mapping mode: {mapping_mode}")
+
+    # Human detection via ZED SDK built-in object detection
+    human_detect_available = False
+    human_objects = None
+    human_od_runtime = None
+    human_last_frame = -999999
+    human_hazard_state = "CLEAR"
+    human_nearest_m = -1.0
+    human_clear_hold = 12
+    human_clear_countdown = 0
+    if args.human_detect:
+        if hasattr(sl, "ObjectDetectionParameters"):
+            try:
+                od_params = sl.ObjectDetectionParameters()
+                if hasattr(od_params, "enable_tracking"):
+                    od_params.enable_tracking = False
+                model_enum = getattr(sl, "OBJECT_DETECTION_MODEL", None)
+                if model_enum is not None and hasattr(od_params, "detection_model"):
+                    for mn in ["MULTI_CLASS_BOX_MEDIUM", "MULTI_CLASS_BOX_FAST", "MULTI_CLASS_BOX"]:
+                        if hasattr(model_enum, mn):
+                            od_params.detection_model = getattr(model_enum, mn)
+                            break
+                err = zed.enable_object_detection(od_params)
+                if err == sl.ERROR_CODE.SUCCESS:
+                    human_objects = sl.Objects()
+                    human_od_runtime = sl.ObjectDetectionRuntimeParameters()
+                    if hasattr(human_od_runtime, "detection_confidence_threshold"):
+                        human_od_runtime.detection_confidence_threshold = int(
+                            max(1, min(99, args.human_od_confidence))
+                        )
+                    human_detect_available = True
+                    print("Human detection enabled (ZED SDK object detection).")
+                else:
+                    print(f"Failed to enable ZED object detection: {err}")
+            except Exception as exc:
+                print(f"ZED object detection init error: {exc}")
+        else:
+            print("ZED SDK ObjectDetectionParameters not available; human detection disabled.")
+
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
     map_z_min = args.map_z_min
@@ -439,6 +484,8 @@ def main():
     follow_rover_map = bool(args.map_follow_rover)
     map_view_shift_r = 0
     map_view_shift_c = 0
+    frame_idx = 0
+    human_person_map_points = []  # list of (row, col) for map markers
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -697,6 +744,7 @@ def main():
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+            frame_idx += 1
             # Update camera pose (world frame) if tracking is enabled.
             if tracking_enabled:
                 R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
@@ -1344,9 +1392,105 @@ def main():
                     overlay[obstacle_full == 1] = (0, 0, 255)
                     # Blend
                     vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+
+                    # Human detection overlay
+                    human_person_map_points = []
+                    if human_detect_available and human_objects is not None and human_od_runtime is not None:
+                        if (frame_idx - human_last_frame) >= max(1, args.human_od_every):
+                            human_last_frame = frame_idx
+                            try:
+                                od_err = zed.retrieve_objects(human_objects, human_od_runtime)
+                                if od_err == sl.ERROR_CODE.SUCCESS:
+                                    obj_list = getattr(human_objects, "object_list", [])
+                                    nearest_m = None
+                                    for obj in obj_list:
+                                        bb = getattr(obj, "bounding_box_2d", None)
+                                        if bb is None:
+                                            continue
+                                        raw_label = getattr(obj, "sublabel", "") or getattr(obj, "label", "")
+                                        label = str(raw_label).strip().lower()
+                                        conf = float(getattr(obj, "confidence", 0.0)) / 100.0
+                                        pts = np.array(bb, dtype=np.float32).reshape(-1, 2)
+                                        if pts.shape[0] == 0:
+                                            continue
+                                        x1 = int(np.floor(np.min(pts[:, 0])))
+                                        y1 = int(np.floor(np.min(pts[:, 1])))
+                                        x2 = int(np.ceil(np.max(pts[:, 0])))
+                                        y2 = int(np.ceil(np.max(pts[:, 1])))
+                                        if x2 <= x1 or y2 <= y1:
+                                            continue
+                                        is_person = label in {"person", "people", "human", "pedestrian"}
+                                        # Draw box on camera view
+                                        box_color = (0, 255, 120) if is_person else (0, 200, 255)
+                                        cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2)
+                                        cv2.putText(
+                                            vis,
+                                            f"{label} {conf:.0%}",
+                                            (x1, max(16, y1 - 6)),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.52,
+                                            box_color,
+                                            1,
+                                            cv2.LINE_AA,
+                                        )
+                                        # Get 3D position from point cloud center of box
+                                        cx_px = max(0, min(w - 1, (x1 + x2) // 2))
+                                        cy_px = max(0, min(h - 1, (y1 + y2) // 2))
+                                        p3 = cloud[cy_px, cx_px, :3]
+                                        if np.isfinite(p3).all():
+                                            pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_map
+                                            rc = occ_map.world_to_grid(float(pw[0]), float(pw[2]))
+                                            if rc is not None:
+                                                human_person_map_points.append((rc[0], rc[1], is_person))
+                                            if is_person and conf >= float(args.human_min_conf):
+                                                dist = float(np.linalg.norm(p3))
+                                                if nearest_m is None or dist < nearest_m:
+                                                    nearest_m = dist
+                                    # Update hazard state
+                                    if nearest_m is not None:
+                                        human_nearest_m = nearest_m
+                                        if nearest_m <= float(args.human_stop_m):
+                                            human_hazard_state = "STOP"
+                                        elif nearest_m <= float(args.human_slow_m):
+                                            human_hazard_state = "SLOW"
+                                        else:
+                                            human_hazard_state = "CLEAR"
+                                        human_clear_countdown = human_clear_hold
+                                    else:
+                                        if human_clear_countdown > 0:
+                                            human_clear_countdown -= 1
+                                        else:
+                                            human_hazard_state = "CLEAR"
+                                            human_nearest_m = -1.0
+                            except Exception as exc:
+                                if frame_idx % 60 == 1:
+                                    print(f"Human detect error: {exc}")
+
+                    # Show hazard state on camera
+                    if human_detect_available and human_hazard_state != "CLEAR":
+                        hz_color = (0, 220, 255) if human_hazard_state == "SLOW" else (0, 0, 255)
+                        dist_txt = f"{human_nearest_m:.1f}m" if human_nearest_m > 0 else "--"
+                        cv2.putText(
+                            vis,
+                            f"HUMAN: {human_hazard_state} ({dist_txt})",
+                            (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            hz_color,
+                            2,
+                            cv2.LINE_AA,
+                        )
+
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
+                        # Draw detected persons on the map
+                        for pr, pc_col, is_p in human_person_map_points:
+                            if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
+                                color = (0, 0, 255) if is_p else (0, 200, 255)
+                                cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
+                                if is_p:
+                                    cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
                         if args.map_scale > 1:
                             map_vis = cv2.resize(
                                 map_vis,
@@ -1413,6 +1557,11 @@ def main():
         else:
             time.sleep(0.01)
 
+    if human_detect_available:
+        try:
+            zed.disable_object_detection()
+        except Exception:
+            pass
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
     if tracking_enabled and args.area_save_path:
