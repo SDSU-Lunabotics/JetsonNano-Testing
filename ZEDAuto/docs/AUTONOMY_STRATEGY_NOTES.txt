@@ -1,0 +1,238 @@
+LUNABOTICS AUTONOMY STRATEGY NOTES
+=================================
+
+Purpose
+-------
+This file tracks strategy ideas for excavation, berm deposition, path efficiency,
+and endgame behavior. Keep this separate from implementation details in code.
+
+1) Mission-Level State Machine
+------------------------------
+- LOCALIZE_START
+- TRANSIT_TO_DIG
+- DIG_PASS
+- REVERSE_OUT
+- TRANSIT_TO_BERM
+- DUMP
+- RETURN_TO_DIG
+- RECOVERY
+
+Notes:
+- RECOVERY handles tracking loss, blocked routes, and command timeout cases.
+- Keep transitions deterministic and based on measurable conditions.
+
+
+2) Excavation Sweep Strategy
+----------------------------
+- Divide excavation zone into strips using effective dig width.
+- Use strip overlap to avoid uncut material between passes.
+- Use serpentine traversal to reduce turning:
+  pass 1 left->right, pass 2 right->left, etc.
+- Prefer reverse exit when it reduces turn cost.
+
+Recommended parameters:
+- strip_pitch = dig_width * 0.8
+- minimum_pass_length gate to skip inefficient tiny passes
+
+
+3) Berm Deposition Strategy
+---------------------------
+Goal: place material consistently inside berm area and distribute fill across sections.
+
+- Represent berm zone as a local occupancy/fill grid.
+- Create deposition "slots" (target poses) along candidate edges.
+- Maintain a scheduler with:
+  - active_edge
+  - row_index
+  - slot_index
+  - fill_progress map
+- Use serpentine slot ordering to minimize extra turns.
+- After one row is filled, shift inward by row_pitch and repeat.
+
+Recommended start values:
+- slot_pitch = 0.18 to 0.25 m (depends on spread)
+- row_pitch = 0.15 to 0.20 m
+- final_approach_distance = 0.8 to 1.2 m
+
+
+4) Edge Selection (Long Side vs Short Side)
+-------------------------------------------
+Do NOT force one side. Evaluate all feasible berm edges every cycle.
+
+For each edge candidate, compute:
+- path_length_cost
+- turn_cost
+- obstacle_cost
+- crater_risk_cost
+- alignment_cost
+- local_traffic_cost (if previous path repeatedly fails)
+
+Pick lowest total score among feasible candidates.
+
+Example weighted score:
+score =
+  1.0 * path_length_cost +
+  1.5 * turn_cost +
+  2.0 * obstacle_cost +
+  2.5 * crater_risk_cost +
+  1.2 * alignment_cost
+
+Add hysteresis:
+- keep current edge for N dumps unless blocked or strongly dominated.
+
+
+5) Crater/Obstacle-Aware Berm Alignment
+---------------------------------------
+If a crater blocks the preferred approach:
+- switch approach side/edge automatically
+- route to pre-dump waypoint first
+- then execute short straight-line final approach
+
+Alignment steps:
+1. Navigate to pre-dump anchor pose.
+2. Slow down and re-localize.
+3. Perform final straight approach.
+4. Dump.
+5. Back out along same line if possible.
+
+
+6) Reverse-Driving + Servo Camera Strategy
+------------------------------------------
+Hardware concept:
+- Use the 180 degree servo to rotate the camera toward the current travel direction.
+- Forward travel: camera_yaw_cmd = 0 deg.
+- Reverse travel: camera_yaw_cmd = 180 deg.
+
+Control strategy:
+- Keep software drive_direction mode (+1 forward, -1 reverse).
+- Planner decides reverse when heading error/turn penalty is high.
+- Camera servo follows drive_direction with a short settle delay before high-speed motion.
+
+Required safeguards:
+- Maintain calibrated transform offsets for both camera poses (0 deg and 180 deg).
+- Rate-limit camera flipping (no rapid oscillation between forward/reverse).
+- If servo state is unknown or fails, drop to safe speed and hold last reliable mode.
+- Add status telemetry: drive_direction, camera_yaw_cmd, camera_yaw_measured, servo_ok.
+
+Why this helps:
+- Better visibility in actual travel direction.
+- Reduces blind reverse driving risk.
+- Preserves low-turn path strategy while keeping perception useful.
+
+
+7) Endgame Time Strategy ("Deposit NOW")
+----------------------------------------
+Switch behavior based on remaining mission time.
+
+Mode A: NORMAL
+- Full dig + planned dump optimization.
+
+Mode B: FAST_DUMP (example < 120 s)
+- Shorter dig passes.
+- Prioritize nearest feasible berm slot.
+
+Mode C: EMERGENCY_DUMP (example < 45 s)
+- Stop new digging.
+- Travel to nearest legal dump pose and unload immediately.
+
+Mode D: FINAL_SAFE (example < 15 s)
+- Attempt only safest low-risk dump path.
+- Avoid high-turn/high-risk recovery maneuvers.
+
+
+8) Reliability/Recovery Rules
+-----------------------------
+- If tracking quality drops below threshold, stop map integration and motion command output.
+- If route fails K consecutive times, mark edge/path segment as temporarily penalized.
+- If CommandReady/ack handshake times out repeatedly, trigger comm-health warning state.
+- Persist mission scheduler state so restart can resume strategy progress.
+
+
+9) Metrics to Log Per Cycle
+---------------------------
+- active_mode
+- selected_berm_edge
+- selected_slot and row
+- planned_turn_count
+- route_length_m
+- blocked_reason (if any)
+- dump_success (boolean)
+- cycle_time_sec
+- remaining_time_sec
+
+Use logs to tune weights and threshold values after each field run.
+
+
+10) First Implementation Priorities
+-----------------------------------
+1. Add berm slot scheduler data model.
+2. Add multi-edge candidate scoring.
+3. Add time-based mode switching (NORMAL/FAST/EMERGENCY/FINAL).
+4. Add concise status panel fields for edge/slot/mode.
+5. Add persistent state save/load for mission progress.
+
+
+11) Guidebook Hard Constraints (From Current Text Copy)
+-------------------------------------------------------
+Use these as non-negotiable constraints in planner/state-machine logic.
+
+A) Berm scoring geometry
+- Only berm volume inside the target berm area counts.
+- UCF target berm area: 1.5 m x 0.9 m.
+- Strategy impact: deposition scheduler must clamp target slots inside berm box bounds.
+
+B) Start orientation and localization
+- Starting position/orientation is randomly selected each run.
+- Teams may begin in remote control only inside starting zone to localize, then switch to hands-free.
+- Strategy impact: add a fast START_LOCALIZE routine and do not assume fixed heading at run start.
+
+C) Fiducial usage limits
+- Beacons/fiducials are allowed only in the starting zone for navigation.
+- Strategy impact: do not rely on fiducials outside starting zone; switch to map+odometry+vision/LiDAR fusion after departure.
+
+D) Wall usage restrictions
+- Walls cannot be used as autonomy sensing features (including touch/spring wall sensors).
+- Strategy impact: avoid any wall-following rule that depends on wall contact sensing for autonomy scoring attempts.
+
+E) Hands-free autonomy protocol
+- Every autonomy attempt must be announced to MCJ before starting.
+- Team must announce attempt completion/failure before touching controls.
+- If not announced correctly, attempt can score zero.
+- Strategy impact: add a MCC callout checklist tied to software mode transitions.
+
+F) Travel autonomy penalties
+- Contact with obstacle or driving through crater in obstacle zone applies point reduction.
+- Travel autonomy attempt made after prior teleop obstacle crossing can receive additional penalty.
+- Strategy impact: first crossing should be autonomy-first when aiming for high autonomy score.
+
+G) Full autonomy scoring thresholds
+- Full autonomy levels require continuous hands-free behavior and at least two complete cycles for top tier.
+- Strategy impact: prioritize robust repeatable cycles over risky high-speed behavior.
+
+H) Camera usage scoring
+- Arena camera usage affects construction points (0 cameras highest points, 1 reduced, 2 none).
+- Strategy impact: minimize dependency on arena cameras during run; prioritize onboard sensing.
+
+I) Run-end behavior
+- At timer end, cease operations; if actively dumping, offload completion may be allowed.
+- Strategy impact: in final-time mode, favor being in berm zone with active dump rather than mid-transit.
+
+
+12) Strategy Updates From Guidebook Constraints
+-----------------------------------------------
+- Add mission objective switch:
+  Objective 1: maximize autonomy points (hands-free priority)
+  Objective 2: maximize berm productivity (volume/time/energy)
+  Objective 3: balanced score
+
+- Add pre-run checklist state:
+  1) MCJ autonomy callout script ready
+  2) starting-zone localization complete
+  3) first crossing set to autonomy if targeting travel/full autonomy points
+
+- Add rule-aware planner penalties:
+  - very high penalty for crater crossing and obstacle contact in obstacle zone
+  - high penalty for routes requiring wall-based assumptions
+
+- Add endgame rule-aware trigger:
+  - if time remaining is short, force "berm proximity" policy so robot is likely dumping at buzzer.

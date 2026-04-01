@@ -52,12 +52,21 @@ def main():
     parser.add_argument("--ros2", action="store_true", help="Publish a PointCloud2 topic over ROS2")
     parser.add_argument("--frame", default="zed_camera", help="Frame ID for ROS2 point cloud")
     parser.add_argument("--tracking", action="store_true", help="Enable ZED positional tracking")
+    parser.add_argument("--area-memory", action="store_true", help="Enable ZED area-memory relocalization")
+    parser.add_argument("--area-load-path", default=None, help="Path to load ZED area memory (.area)")
+    parser.add_argument("--area-save-path", default=None, help="Path to save ZED area memory (.area)")
+    parser.add_argument("--area-save-every", type=float, default=30.0, help="Seconds between area-memory saves")
     parser.add_argument("--map-width-m", type=float, default=20.0, help="Top-down map width in meters (X axis)")
     parser.add_argument("--map-height-m", type=float, default=20.0, help="Top-down map height in meters (Z axis)")
     parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
     parser.add_argument("--map-z-min", type=float, default=0.0, help="Minimum Z (forward) bound for map")
     parser.add_argument("--map-scale", type=int, default=3, help="Upscale factor for map display window")
     parser.add_argument("--map-center", action="store_true", help="Center map on Z=0 (start camera in middle)")
+    parser.add_argument(
+        "--map-follow-rover",
+        action="store_true",
+        help="Keep rover centered in occupancy map view (toggle with 'c')",
+    )
     parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
@@ -90,11 +99,28 @@ def main():
         action="store_true",
         help="Show heatmap in a separate window instead of overlaying on map",
     )
+    parser.add_argument(
+        "--complex",
+        action="store_true",
+        help="Use complex mapping (EMA plane smoothing, tilt/jump rejection, tracking-gated map). Default is simple mode.",
+    )
     parser.add_argument("--obstacle-thresh-m", type=float, default=0.05, help="Obstacle height above ground (m)")
     parser.add_argument("--hole-thresh-m", type=float, default=0.05, help="Hole depth below ground (m)")
+    parser.add_argument(
+        "--max-above-ground-m",
+        type=float,
+        default=1.22,
+        help="Ignore points above this height over floor plane (m). Set <=0 to disable.",
+    )
     parser.add_argument("--disable-holes", action="store_true", help="Disable hole detection (testing)")
     parser.add_argument("--path-avoid-occ-min", type=float, default=3.0, help="Min obstacle count for path blocking")
     parser.add_argument("--path-avoid-occ-ratio", type=float, default=1.5, help="Min occupied/free ratio for blocking")
+    parser.add_argument(
+        "--path-avoid-occ-advantage",
+        type=float,
+        default=2.0,
+        help="Min (occupied - free) evidence margin for path blocking",
+    )
     parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
@@ -113,6 +139,48 @@ def main():
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
+    parser.add_argument(
+        "--backup-close-dist-m",
+        type=float,
+        default=0.45,
+        help="If obstacle points are this close in front of camera, command reverse (m). Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--backup-lane-half-width-m",
+        type=float,
+        default=0.35,
+        help="Half-width of forward safety lane for close-obstacle backup detection (m).",
+    )
+    parser.add_argument(
+        "--backup-min-obstacle-points",
+        type=int,
+        default=30,
+        help="Minimum close obstacle points in safety lane before backup triggers.",
+    )
+    parser.add_argument(
+        "--backup-critical-dist-m",
+        type=float,
+        default=0.30,
+        help="Critical forward distance (m). If enough obstacle points are inside this, backup triggers immediately.",
+    )
+    parser.add_argument(
+        "--backup-critical-min-points",
+        type=int,
+        default=6,
+        help="Minimum critical-distance obstacle points required for immediate backup trigger.",
+    )
+    parser.add_argument(
+        "--backup-speed",
+        type=float,
+        default=0.35,
+        help="Reverse command magnitude when close-obstacle backup triggers (0-1).",
+    )
+    parser.add_argument(
+        "--backup-hold-sec",
+        type=float,
+        default=0.40,
+        help="How long to continue backup once triggered (seconds).",
+    )
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
@@ -160,12 +228,65 @@ def main():
     )
     parser.add_argument("--floor-update-sec", type=float, default=0.5, help="Seconds between floor-plane updates")
     parser.add_argument("--floor-min-normal-y", type=float, default=0.5, help="Reject floor planes with |normal.y| below this")
+    parser.add_argument(
+        "--plane-ema-alpha",
+        type=float,
+        default=0.25,
+        help="Smoothing factor for accepted floor-plane updates (0-1, higher=faster response)",
+    )
+    parser.add_argument(
+        "--plane-max-tilt-delta-deg",
+        type=float,
+        default=8.0,
+        help="Reject floor-plane updates that tilt more than this from prior plane (deg)",
+    )
+    parser.add_argument(
+        "--plane-max-height-jump-m",
+        type=float,
+        default=0.08,
+        help="Reject floor-plane updates with abrupt height offset jump (m)",
+    )
+    parser.add_argument(
+        "--plane-force-accept-rejects",
+        type=int,
+        default=20,
+        help="Force-accept next valid floor plane after this many consecutive jump rejections (0 disables)",
+    )
+    parser.add_argument(
+        "--sample-stride",
+        type=int,
+        default=8,
+        help="Point-cloud downsample stride (higher = fewer points, lower CPU/noise)",
+    )
+    parser.add_argument(
+        "--min-range-z-m",
+        type=float,
+        default=0.25,
+        help="Ignore points closer than this forward distance (m) to reduce near-field depth noise",
+    )
+    parser.add_argument(
+        "--max-range-z-m",
+        type=float,
+        default=6.0,
+        help="Ignore points beyond this forward distance (m). Set <=0 to disable.",
+    )
     parser.add_argument("--stream-ip", default=None, help="UDP target IP for GStreamer stream")
     parser.add_argument("--stream-port", type=int, default=5600, help="UDP port for GStreamer stream")
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
+    parser.add_argument(
+        "--overlay-red-only",
+        action="store_true",
+        help="Show only red (obstacle) overlay on camera view, hide green ground coloring",
+    )
+    parser.add_argument("--human-detect", action="store_true", help="Enable ZED SDK human/person detection")
+    parser.add_argument("--human-od-confidence", type=int, default=40, help="ZED OD confidence threshold (1-99)")
+    parser.add_argument("--human-od-every", type=int, default=1, help="Run ZED OD every N frames")
+    parser.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP (m)")
+    parser.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW (m)")
+    parser.add_argument("--human-min-conf", type=float, default=0.40, help="Min person confidence for hazard state")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -188,12 +309,30 @@ def main():
     tracking_reset = sl.Transform()
     tracking_enabled = False
     pose_warned = False
+    tracking_pose_ok = False
+    tracking_prev_ok = False
+    tracking_loss_warned = False
     pose = None
     if args.tracking:
-        tracking_enabled, pose = zed_utils.enable_tracking(zed, sl)
+        tracking_enabled, pose = zed_utils.enable_tracking(
+            zed,
+            sl,
+            area_memory=args.area_memory,
+            area_load_path=args.area_load_path,
+        )
+        tracking_pose_ok = not tracking_enabled
+        tracking_prev_ok = tracking_pose_ok
+    else:
+        tracking_pose_ok = True
+        tracking_prev_ok = True
+    last_valid_R_world_cam = np.eye(3, dtype=np.float32)
+    last_valid_t_world_cam = np.zeros(3, dtype=np.float32)
+    map_origin_set = False
+    map_origin_t = np.zeros(3, dtype=np.float32)
     spatial_enabled = False
     spatial_mesh = None
     last_spatial_save = time.time()
+    last_area_save = time.time()
     if args.spatial_mapping:
         spatial_enabled, spatial_mesh = zed_utils.enable_spatial_mapping(
             zed,
@@ -215,8 +354,53 @@ def main():
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
         print("  sudo apt install -y python3-opencv")
+    elif args.no_gui:
+        print("GUI disabled (--no-gui): map/camera windows will not open.")
+    else:
+        print("GUI enabled: opening camera/map windows.")
 
     print("Running. Press Ctrl+C to exit.")
+    mapping_mode = "complex" if args.complex else "simple"
+    print(f"Mapping mode: {mapping_mode}")
+
+    # Human detection via ZED SDK built-in object detection
+    human_detect_available = False
+    human_objects = None
+    human_od_runtime = None
+    human_last_frame = -999999
+    human_hazard_state = "CLEAR"
+    human_nearest_m = -1.0
+    human_clear_hold = 12
+    human_clear_countdown = 0
+    if args.human_detect:
+        if hasattr(sl, "ObjectDetectionParameters"):
+            try:
+                od_params = sl.ObjectDetectionParameters()
+                if hasattr(od_params, "enable_tracking"):
+                    od_params.enable_tracking = False
+                model_enum = getattr(sl, "OBJECT_DETECTION_MODEL", None)
+                if model_enum is not None and hasattr(od_params, "detection_model"):
+                    for mn in ["MULTI_CLASS_BOX_MEDIUM", "MULTI_CLASS_BOX_FAST", "MULTI_CLASS_BOX"]:
+                        if hasattr(model_enum, mn):
+                            od_params.detection_model = getattr(model_enum, mn)
+                            break
+                err = zed.enable_object_detection(od_params)
+                if err == sl.ERROR_CODE.SUCCESS:
+                    human_objects = sl.Objects()
+                    human_od_runtime = sl.ObjectDetectionRuntimeParameters()
+                    if hasattr(human_od_runtime, "detection_confidence_threshold"):
+                        human_od_runtime.detection_confidence_threshold = int(
+                            max(1, min(99, args.human_od_confidence))
+                        )
+                    human_detect_available = True
+                    print("Human detection enabled (ZED SDK object detection).")
+                else:
+                    print(f"Failed to enable ZED object detection: {err}")
+            except Exception as exc:
+                print(f"ZED object detection init error: {exc}")
+        else:
+            print("ZED SDK ObjectDetectionParameters not available; human detection disabled.")
+
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
     map_z_min = args.map_z_min
@@ -281,6 +465,8 @@ def main():
     nt_ready_high = False
     nt_ready_clear_time = 0.0
     last_drive_debug_time = 0.0
+    last_backup_log_time = 0.0
+    backup_hold_until = 0.0
     nt_connected_cached = False
     status_cmd_enabled = False
     status_cmd_fwd = 0.0
@@ -291,20 +477,55 @@ def main():
     last_path_plan_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
+    plane_reject_count = 0
+    no_points_count = 0
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
     has_plane = False
+    follow_rover_map = bool(args.map_follow_rover)
+    map_view_shift_r = 0
+    map_view_shift_c = 0
+    frame_idx = 0
+    human_person_map_points = []  # list of (row, col) for map markers
+
+    def apply_map_view(frame, focus_cell):
+        # Returns (frame_for_display, row_shift, col_shift) where:
+        # display_row = source_row + row_shift, display_col = source_col + col_shift
+        if frame is None:
+            return frame, 0, 0
+        if (not follow_rover_map) or (focus_cell is None):
+            return frame, 0, 0
+
+        h, w = frame.shape[:2]
+        fr, fc = int(focus_cell[0]), int(focus_cell[1])
+        shift_r = int((h // 2) - fr)
+        shift_c = int((w // 2) - fc)
+        out = np.zeros_like(frame)
+
+        src_r0 = max(0, -shift_r)
+        src_r1 = min(h, h - shift_r)
+        src_c0 = max(0, -shift_c)
+        src_c1 = min(w, w - shift_c)
+
+        if src_r0 < src_r1 and src_c0 < src_c1:
+            dst_r0 = src_r0 + shift_r
+            dst_r1 = src_r1 + shift_r
+            dst_c0 = src_c0 + shift_c
+            dst_c1 = src_c1 + shift_c
+            out[dst_r0:dst_r1, dst_c0:dst_c1] = frame[src_r0:src_r1, src_c0:src_c1]
+
+        return out, shift_r, shift_c
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
-        nonlocal emergency_stop, last_path_plan_time
+        nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c
         if event != cv2.EVENT_LBUTTONDOWN:
             if event == cv2.EVENT_RBUTTONDOWN:
                 emergency_stop = True
                 print("EMERGENCY STOP")
             return
         scale = max(1, int(args.map_scale))
-        row = int(y / scale)
-        col = int(x / scale)
+        row = int(y / scale) - int(map_view_shift_r)
+        col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
             return
         goal_cell = (row, col)
@@ -410,7 +631,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 300
+        panel_h = 330
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -445,6 +666,9 @@ def main():
         elif emergency_stop:
             mode_label = "STOPPED"
             mode_color = (0, 80, 255)
+        elif tracking_enabled and not tracking_pose_ok:
+            mode_label = "TRACK LOST"
+            mode_color = (0, 140, 255)
         elif manual_mode:
             mode_label = "MANUAL"
             mode_color = (0, 220, 255)
@@ -459,59 +683,99 @@ def main():
         put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
         put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
+        if tracking_enabled:
+            track_txt = "OK" if tracking_pose_ok else "LOST"
+            if args.area_memory:
+                area_txt = "LOCKED" if tracking_pose_ok else "SEARCH"
+            else:
+                area_txt = "OFF"
+        else:
+            track_txt = "OFF"
+            area_txt = "OFF"
+        track_color = (170, 255, 170) if tracking_pose_ok else (0, 140, 255)
+        put_line(
+            f"Tracking: {track_txt} | AreaMem: {area_txt} | Follow: {'ON' if follow_rover_map else 'OFF'} (c)",
+            140,
+            track_color,
+            0.52,
+        )
 
         if goal_cell is None:
-            put_line("Goal cell: none", 148, (190, 190, 190))
-            put_line("Goal world: none", 172, (190, 190, 190))
+            put_line("Goal cell: none", 168, (190, 190, 190))
+            put_line("Goal world: none", 192, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 148, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 168, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 172, (190, 190, 190))
+                put_line("Goal world: unavailable", 192, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 172, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 192, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 196, (190, 190, 190))
+            put_line("Active target: none", 216, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    196,
+                    216,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    196,
+                    216,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 220, (190, 190, 190))
+            put_line("Robot cell: unavailable", 240, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 220, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 240, (180, 255, 220))
 
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            246,
+            266,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 270)
-        draw_axis("Turn", status_cmd_turn, 292)
+        draw_axis("Forward", status_cmd_fwd, 290)
+        draw_axis("Turn", status_cmd_turn, 312)
         return panel
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+            frame_idx += 1
             # Update camera pose (world frame) if tracking is enabled.
             if tracking_enabled:
-                R_world_cam, t_world_cam, pose_warned = zed_utils.get_world_transform(
+                R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
+                if tracking_pose_ok:
+                    last_valid_R_world_cam = R_world_cam
+                    last_valid_t_world_cam = t_world_cam
+                    tracking_loss_warned = False
+                    if not args.complex and not map_origin_set:
+                        map_origin_t = np.array(t_world_cam, dtype=np.float32)
+                        map_origin_set = True
+                        print(
+                            "Map origin anchored at "
+                            f"x={map_origin_t[0]:+.2f}, y={map_origin_t[1]:+.2f}, z={map_origin_t[2]:+.2f}"
+                        )
+                else:
+                    # Hold last known pose and pause map integration until tracking recovers.
+                    R_world_cam = last_valid_R_world_cam
+                    t_world_cam = last_valid_t_world_cam
+                    if not tracking_loss_warned:
+                        print("Tracking lost: holding last pose and pausing map integration.")
+                        tracking_loss_warned = True
+                if tracking_pose_ok and not tracking_prev_ok:
+                    print("Tracking recovered: relocalized/locked.")
+                tracking_prev_ok = tracking_pose_ok
             else:
                 R_world_cam = np.eye(3, dtype=np.float32)
                 t_world_cam = np.zeros(3, dtype=np.float32)
+                tracking_pose_ok = True
+                tracking_prev_ok = True
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -524,11 +788,61 @@ def main():
                 last_plane_update_time = now
                 if status == sl.ERROR_CODE.SUCCESS:
                     a0, b0, c0, d0 = segmentation.plane_params(ground_plane)
-                    a0, b0, c0, d0 = segmentation.normalize_plane(a0, b0, c0, d0)
+                    a0, b0, c0, d0 = segmentation.canonical_plane(a0, b0, c0, d0)
                     if abs(float(b0)) >= float(args.floor_min_normal_y):
-                        a, b, c, d = a0, b0, c0, d0
-                        has_plane = True
-                        plane_fail_count = 0
+                        if args.complex:
+                            # Complex mode: EMA smoothing + tilt/jump rejection
+                            accept_plane = True
+                            if has_plane:
+                                prev_n = np.array([a, b, c], dtype=np.float32)
+                                new_n = np.array([a0, b0, c0], dtype=np.float32)
+                                dot = float(np.clip(np.dot(prev_n, new_n), -1.0, 1.0))
+                                tilt_deg = float(np.degrees(np.arccos(dot)))
+                                d_jump = abs(float(d0) - float(d))
+                                if (
+                                    tilt_deg > float(args.plane_max_tilt_delta_deg)
+                                    or d_jump > float(args.plane_max_height_jump_m)
+                                ):
+                                    accept_plane = False
+                                    plane_reject_count += 1
+                                    if plane_reject_count % 10 == 1:
+                                        print(
+                                            "Rejected floor plane jump: "
+                                            f"tilt_delta={tilt_deg:.2f}deg d_jump={d_jump:.3f}m"
+                                        )
+                                    if (
+                                        int(args.plane_force_accept_rejects) > 0
+                                        and plane_reject_count >= int(args.plane_force_accept_rejects)
+                                    ):
+                                        print(
+                                            "Too many plane rejections; force-accepting new plane "
+                                            "to recover live mapping."
+                                        )
+                                        accept_plane = True
+                            if accept_plane:
+                                alpha = max(0.0, min(1.0, float(args.plane_ema_alpha)))
+                                if not has_plane or alpha >= 1.0:
+                                    a, b, c, d = a0, b0, c0, d0
+                                else:
+                                    blend_n = (1.0 - alpha) * np.array([a, b, c], dtype=np.float32) + (
+                                        alpha * np.array([a0, b0, c0], dtype=np.float32)
+                                    )
+                                    n_norm = float(np.linalg.norm(blend_n))
+                                    if n_norm <= 1e-6:
+                                        blend_n = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                                        n_norm = 1.0
+                                    blend_n /= n_norm
+                                    a, b, c = float(blend_n[0]), float(blend_n[1]), float(blend_n[2])
+                                    d = float((1.0 - alpha) * float(d) + alpha * float(d0))
+                                has_plane = True
+                                plane_fail_count = 0
+                                plane_reject_count = 0
+                        else:
+                            # Simple mode: accept plane directly, no smoothing
+                            a, b, c, d = a0, b0, c0, d0
+                            has_plane = True
+                            plane_fail_count = 0
+                            plane_reject_count = 0
                     else:
                         plane_fail_count += 1
                         if plane_fail_count % 10 == 1:
@@ -547,26 +861,104 @@ def main():
             if cloud is None:
                 continue
             # Downsample for speed
-            stride = 8
+            stride = max(1, int(args.sample_stride))
             xyz = cloud[::stride, ::stride, :3].reshape(-1, 3)
             # Filter invalid points
             mask = np.isfinite(xyz).all(axis=1)
+            if float(args.min_range_z_m) > 0.0:
+                mask &= xyz[:, 2] >= float(args.min_range_z_m)
+            if float(args.max_range_z_m) > 0.0:
+                mask &= xyz[:, 2] <= float(args.max_range_z_m)
             xyz = xyz[mask]
+
             if xyz.size == 0:
-                continue
-
-            # Distance to plane (signed)
-            dist, ground_mask, obstacle_mask = segmentation.classify_points(
-                xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
-            )
-            if args.disable_holes:
-                hole_mask = np.zeros(dist.shape, dtype=bool)
+                no_points_count += 1
+                if no_points_count % 30 == 1:
+                    print(
+                        "No valid depth points after filtering; "
+                        "consider lowering --min-range-z-m or disabling range limits."
+                    )
+                dist = np.empty((0,), dtype=np.float32)
+                ground_mask = np.zeros((0,), dtype=bool)
+                obstacle_mask = np.zeros((0,), dtype=bool)
+                hole_mask = np.zeros((0,), dtype=bool)
+                ground_pct = 0.0
+                obstacle_pct = 0.0
+                hole_pct = 0.0
             else:
-                hole_mask = dist < -args.hole_thresh_m
-            ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
+                no_points_count = 0
+                # Distance to plane (signed)
+                dist, ground_mask, obstacle_mask = segmentation.classify_points(
+                    xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
+                )
+                # Use an explicit signed band for ground classification:
+                #   - above lower bound (hole threshold)
+                #   - below upper bound (obstacle threshold)
+                # This avoids "unknown gaps" between hole and ground and keeps sky/ceiling
+                # from being marked ground when max-above filtering is active.
+                ground_mask = (dist >= -float(args.hole_thresh_m)) & (dist <= float(args.obstacle_thresh_m))
+                obstacle_mask = dist > float(args.obstacle_thresh_m)
+                if args.max_above_ground_m > 0.0:
+                    keep_mask = dist <= float(args.max_above_ground_m)
+                    if np.any(keep_mask):
+                        xyz = xyz[keep_mask]
+                        dist = dist[keep_mask]
+                        ground_mask = ground_mask[keep_mask]
+                        obstacle_mask = obstacle_mask[keep_mask]
+                    else:
+                        xyz = np.empty((0, 3), dtype=np.float32)
+                        dist = np.empty((0,), dtype=np.float32)
+                        ground_mask = np.zeros((0,), dtype=bool)
+                        obstacle_mask = np.zeros((0,), dtype=bool)
+                if args.disable_holes:
+                    hole_mask = np.zeros(dist.shape, dtype=bool)
+                else:
+                    hole_mask = dist < -args.hole_thresh_m
+                if xyz.shape[0] > 0:
+                    ground_pct = 100.0 * np.count_nonzero(ground_mask) / xyz.shape[0]
+                    obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
+                    hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
+                else:
+                    ground_pct = 0.0
+                    obstacle_pct = 0.0
+                    hole_pct = 0.0
 
-            obstacle_pct = 100.0 * np.count_nonzero(obstacle_mask) / xyz.shape[0]
-            hole_pct = 100.0 * np.count_nonzero(hole_mask) / xyz.shape[0]
+            close_obstacle_detected = False
+            close_obstacle_min_z = None
+            if (
+                xyz.shape[0] > 0
+                and float(args.backup_close_dist_m) > 0.0
+                and (int(args.backup_min_obstacle_points) > 0 or int(args.backup_critical_min_points) > 0)
+            ):
+                lane_half = max(0.05, float(args.backup_lane_half_width_m))
+                in_lane = (
+                    obstacle_mask
+                    & (xyz[:, 2] > 0.0)
+                    & (np.abs(xyz[:, 0]) <= lane_half)
+                )
+                close_mask = in_lane & (xyz[:, 2] <= float(args.backup_close_dist_m))
+                close_count = int(np.count_nonzero(close_mask))
+                critical_count = 0
+                critical_mask = None
+                if float(args.backup_critical_dist_m) > 0.0:
+                    critical_mask = in_lane & (xyz[:, 2] <= float(args.backup_critical_dist_m))
+                    critical_count = int(np.count_nonzero(critical_mask))
+                critical_trigger = (
+                    float(args.backup_critical_dist_m) > 0.0
+                    and int(args.backup_critical_min_points) > 0
+                    and critical_count >= int(args.backup_critical_min_points)
+                )
+                close_trigger = (
+                    int(args.backup_min_obstacle_points) > 0
+                    and close_count >= int(args.backup_min_obstacle_points)
+                )
+                if critical_trigger or close_trigger:
+                    close_obstacle_detected = True
+                    trigger_mask = close_mask
+                    if critical_trigger and critical_mask is not None and np.any(critical_mask):
+                        trigger_mask = critical_mask
+                    if np.any(trigger_mask):
+                        close_obstacle_min_z = float(np.min(xyz[trigger_mask, 2]))
 
             print(
                 f"Ground {ground_pct:5.1f}% | Obstacles {obstacle_pct:5.1f}% "
@@ -574,22 +966,34 @@ def main():
             )
 
             # Publish point cloud to ROS2 (optional)
-            ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
+            if xyz.shape[0] > 0:
+                ros2_utils.publish_pointcloud(node, pc_pub, pc_fields, xyz, args.frame)
 
             # Build a simple 2D top-down occupancy map (XZ) from ground/obstacle points.
             if HAS_CV2:
                 map_vis = None
                 heatmap_vis = None
                 cam_row_col = None
+                if args.complex:
+                    map_integration_ok = (not tracking_enabled) or tracking_pose_ok
+                else:
+                    # Simple mode: always integrate map
+                    map_integration_ok = True
+                # Compute map-local translation for simple mode
+                if not args.complex and map_origin_set:
+                    t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
+                else:
+                    t_map = np.array(t_world_cam, dtype=np.float32)
                 if xyz.size > 0:
-                    # Transform to world frame if tracking is enabled.
-                    xyz_world = (R_world_cam @ xyz.T).T + t_world_cam
-                    x = xyz_world[:, 0]
-                    z = xyz_world[:, 2]
-                    occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
+                    if map_integration_ok:
+                        # Transform to world frame if tracking is enabled.
+                        xyz_world = (R_world_cam @ xyz.T).T + t_map
+                        x = xyz_world[:, 0]
+                        z = xyz_world[:, 2]
+                        occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
                     map_vis = occ_map.render()
                     # Draw camera position marker (blue square).
-                    cam_row_col = occ_map.world_to_grid(float(t_world_cam[0]), float(t_world_cam[2]))
+                    cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
                     if cam_row_col is not None:
                         r0, c0 = cam_row_col
                         half = max(1, int(args.map_camera_size) // 2)
@@ -598,15 +1002,54 @@ def main():
                         c1 = max(0, c0 - half)
                         c2 = min(occ_map.grid_w, c0 + half + 1)
                         map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
-                        # Draw heading triangle (blue) if tracking is enabled.
-                        if tracking_enabled and HAS_CV2:
-                            # Camera forward axis in world frame (Z in camera frame).
+                        heading_ang = None
+                        if tracking_enabled:
                             forward = R_world_cam[:, 2]
                             fx, fz = float(forward[0]), float(forward[2])
-                            # Match visualization heading with drive-control heading convention.
-                            ang = np.arctan2(fz, fx)
+                            heading_ang = np.arctan2(fz, fx)
                             if args.drive_heading_flip:
-                                ang += np.pi
+                                heading_ang += np.pi
+                        # Draw rover footprint (orange outline), scaled by rover size.
+                        rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
+                        if heading_ang is None:
+                            rr = int(round(rover_half_cells))
+                            box_pts = np.array(
+                                [
+                                    [c0 - rr, r0 - rr],
+                                    [c0 + rr, r0 - rr],
+                                    [c0 + rr, r0 + rr],
+                                    [c0 - rr, r0 + rr],
+                                ],
+                                dtype=np.int32,
+                            )
+                        else:
+                            center = np.array([float(r0), float(c0)], dtype=np.float32)
+                            fwd_v = np.array(
+                                [-np.sin(heading_ang), np.cos(heading_ang)],
+                                dtype=np.float32,
+                            )
+                            right_v = np.array(
+                                [np.cos(heading_ang), np.sin(heading_ang)],
+                                dtype=np.float32,
+                            )
+                            p1 = center + fwd_v * rover_half_cells + right_v * rover_half_cells
+                            p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
+                            p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
+                            p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
+                            box_pts = np.array(
+                                [
+                                    [int(round(p1[1])), int(round(p1[0]))],
+                                    [int(round(p2[1])), int(round(p2[0]))],
+                                    [int(round(p3[1])), int(round(p3[0]))],
+                                    [int(round(p4[1])), int(round(p4[0]))],
+                                ],
+                                dtype=np.int32,
+                            )
+                        cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
+                        # Draw heading triangle (blue) if tracking is enabled.
+                        if tracking_enabled and HAS_CV2:
+                            # Match visualization heading with drive-control heading convention.
+                            ang = heading_ang
                             size = max(3, int(args.map_camera_size) * 2)
                             tip_r = int(r0 - np.sin(ang) * size)
                             tip_c = int(c0 + np.cos(ang) * size)
@@ -621,6 +1064,17 @@ def main():
                                 dtype=np.int32,
                             )
                             cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+                    if (not map_integration_ok) and HAS_CV2:
+                        cv2.putText(
+                            map_vis,
+                            "TRACKING LOST - MAP PAUSED",
+                            (8, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 140, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
 
                     # Compute/update path to goal (avoid red obstacles only).
                     if goal_cell is not None and cam_row_col is not None:
@@ -635,6 +1089,7 @@ def main():
                             obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
+                                min_occ_advantage=args.path_avoid_occ_advantage,
                             )
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
@@ -699,6 +1154,11 @@ def main():
                                 cv2.LINE_AA,
                             )
 
+                    # Optional display-only map recentering around rover.
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
+
                     # Drive output to RoboRIO (optional).
                     if sd is not None:
                         now = time.time()
@@ -735,8 +1195,26 @@ def main():
                             last_drive_send = now
                             status_target_cell = None
                             status_target_world = None
+                            if close_obstacle_detected:
+                                backup_hold_until = max(
+                                    backup_hold_until,
+                                    now + max(0.05, float(args.backup_hold_sec)),
+                                )
                             if emergency_stop:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif now < backup_hold_until:
+                                if (now - last_backup_log_time) >= 0.5:
+                                    if close_obstacle_min_z is not None:
+                                        print(f"Close obstacle {close_obstacle_min_z:.2f}m ahead: backing up.")
+                                    else:
+                                        print("Close obstacle ahead: backing up.")
+                                    last_backup_log_time = now
+                                send_nt_command(
+                                    True,
+                                    -max(0.0, min(1.0, float(args.backup_speed))),
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif manual_mode:
                                 send_nt_command(
                                     True,
@@ -744,6 +1222,9 @@ def main():
                                     manual_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif tracking_enabled and (not tracking_pose_ok):
+                                # Keep robot safe while localization is uncertain.
+                                send_nt_command(False, 0.0, 0.0, 0.1)
                             elif cam_row_col is None:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             else:
@@ -769,8 +1250,8 @@ def main():
                                 else:
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
-                                # Current pose in world.
-                                cx, cz = float(t_world_cam[0]), float(t_world_cam[2])
+                                # Current pose in map coordinates.
+                                cx, cz = float(t_map[0]), float(t_map[2])
                                 dx = tx - cx
                                 dz = tz - cz
 
@@ -816,6 +1297,16 @@ def main():
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
                         last_save = time.time()
+                    # Periodically save ZED area memory for startup relocalization.
+                    if (
+                        tracking_enabled
+                        and args.area_save_path
+                        and args.area_save_every > 0
+                        and tracking_pose_ok
+                        and (time.time() - last_area_save) >= args.area_save_every
+                    ):
+                        if zed_utils.save_area_memory(zed, sl, args.area_save_path):
+                            last_area_save = time.time()
                     # Periodically update and save spatial map (mesh) if enabled.
                     if spatial_enabled and args.spatial_save_path and args.spatial_save_every > 0:
                         if (time.time() - last_spatial_save) >= args.spatial_save_every:
@@ -829,7 +1320,7 @@ def main():
                     if mesh_viewer is not None:
                         mesh_viewer.poll()
                 else:
-                    map_vis = np.zeros((occ_map.grid_h, occ_map.grid_w, 3), dtype=np.uint8)
+                    map_vis = occ_map.render()
                     if args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
@@ -842,6 +1333,9 @@ def main():
                                 heatmap_vis,
                                 alpha=args.heatmap_alpha,
                             )
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
 
             # Live visualization (optional)
             if HAS_CV2:
@@ -869,8 +1363,20 @@ def main():
                     if np.any(valid):
                         dist_full[valid] = (dist_num[valid] / denom).astype(np.float32)
 
-                    ground = (np.abs(dist_full) < 0.10) & valid
-                    obstacle = (dist_full > 0.10) & valid
+                    vis_thresh = float(args.obstacle_thresh_m)
+                    obstacle = (dist_full > vis_thresh) & valid
+                    if args.max_above_ground_m > 0.0:
+                        max_above = float(args.max_above_ground_m)
+                        obstacle = obstacle & (dist_full <= max_above)
+                    else:
+                        max_above = None
+                    ground = (
+                        valid
+                        & (dist_full >= -float(args.hole_thresh_m))
+                        & (dist_full <= vis_thresh)
+                    )
+                    if max_above is not None:
+                        ground = ground & (dist_full <= max_above)
 
                     # Resize masks to full resolution
                     h, w, _ = img.shape
@@ -879,15 +1385,112 @@ def main():
                     obstacle_full = cv2.resize(obstacle.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
 
                     overlay = img.copy()
-                    # Green for ground
-                    overlay[ground_full == 1] = (0, 200, 0)
+                    # Green for ground (skip if red-only mode)
+                    if not args.overlay_red_only:
+                        overlay[ground_full == 1] = (0, 200, 0)
                     # Red for obstacles/walls
                     overlay[obstacle_full == 1] = (0, 0, 255)
                     # Blend
                     vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+
+                    # Human detection overlay
+                    human_person_map_points = []
+                    if human_detect_available and human_objects is not None and human_od_runtime is not None:
+                        if (frame_idx - human_last_frame) >= max(1, args.human_od_every):
+                            human_last_frame = frame_idx
+                            try:
+                                od_err = zed.retrieve_objects(human_objects, human_od_runtime)
+                                if od_err == sl.ERROR_CODE.SUCCESS:
+                                    obj_list = getattr(human_objects, "object_list", [])
+                                    nearest_m = None
+                                    for obj in obj_list:
+                                        bb = getattr(obj, "bounding_box_2d", None)
+                                        if bb is None:
+                                            continue
+                                        raw_label = getattr(obj, "sublabel", "") or getattr(obj, "label", "")
+                                        label = str(raw_label).strip().lower()
+                                        conf = float(getattr(obj, "confidence", 0.0)) / 100.0
+                                        pts = np.array(bb, dtype=np.float32).reshape(-1, 2)
+                                        if pts.shape[0] == 0:
+                                            continue
+                                        x1 = int(np.floor(np.min(pts[:, 0])))
+                                        y1 = int(np.floor(np.min(pts[:, 1])))
+                                        x2 = int(np.ceil(np.max(pts[:, 0])))
+                                        y2 = int(np.ceil(np.max(pts[:, 1])))
+                                        if x2 <= x1 or y2 <= y1:
+                                            continue
+                                        is_person = label in {"person", "people", "human", "pedestrian"}
+                                        # Draw box on camera view
+                                        box_color = (0, 255, 120) if is_person else (0, 200, 255)
+                                        cv2.rectangle(vis, (x1, y1), (x2, y2), box_color, 2)
+                                        cv2.putText(
+                                            vis,
+                                            f"{label} {conf:.0%}",
+                                            (x1, max(16, y1 - 6)),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.52,
+                                            box_color,
+                                            1,
+                                            cv2.LINE_AA,
+                                        )
+                                        # Get 3D position from point cloud center of box
+                                        cx_px = max(0, min(w - 1, (x1 + x2) // 2))
+                                        cy_px = max(0, min(h - 1, (y1 + y2) // 2))
+                                        p3 = cloud[cy_px, cx_px, :3]
+                                        if np.isfinite(p3).all():
+                                            pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_map
+                                            rc = occ_map.world_to_grid(float(pw[0]), float(pw[2]))
+                                            if rc is not None:
+                                                human_person_map_points.append((rc[0], rc[1], is_person))
+                                            if is_person and conf >= float(args.human_min_conf):
+                                                dist = float(np.linalg.norm(p3))
+                                                if nearest_m is None or dist < nearest_m:
+                                                    nearest_m = dist
+                                    # Update hazard state
+                                    if nearest_m is not None:
+                                        human_nearest_m = nearest_m
+                                        if nearest_m <= float(args.human_stop_m):
+                                            human_hazard_state = "STOP"
+                                        elif nearest_m <= float(args.human_slow_m):
+                                            human_hazard_state = "SLOW"
+                                        else:
+                                            human_hazard_state = "CLEAR"
+                                        human_clear_countdown = human_clear_hold
+                                    else:
+                                        if human_clear_countdown > 0:
+                                            human_clear_countdown -= 1
+                                        else:
+                                            human_hazard_state = "CLEAR"
+                                            human_nearest_m = -1.0
+                            except Exception as exc:
+                                if frame_idx % 60 == 1:
+                                    print(f"Human detect error: {exc}")
+
+                    # Show hazard state on camera
+                    if human_detect_available and human_hazard_state != "CLEAR":
+                        hz_color = (0, 220, 255) if human_hazard_state == "SLOW" else (0, 0, 255)
+                        dist_txt = f"{human_nearest_m:.1f}m" if human_nearest_m > 0 else "--"
+                        cv2.putText(
+                            vis,
+                            f"HUMAN: {human_hazard_state} ({dist_txt})",
+                            (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            hz_color,
+                            2,
+                            cv2.LINE_AA,
+                        )
+
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
+                        # Draw detected persons on the map
+                        for pr, pc_col, is_p in human_person_map_points:
+                            if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
+                                color = (0, 0, 255) if is_p else (0, 200, 255)
+                                cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
+                                if is_p:
+                                    cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
                         if args.map_scale > 1:
                             map_vis = cv2.resize(
                                 map_vis,
@@ -921,6 +1524,10 @@ def main():
                         print("Manual drive mode: ON (auto paused)")
                     else:
                         print("Manual drive mode: OFF (auto resumed)")
+                if key == ord("c"):
+                    follow_rover_map = not follow_rover_map
+                    state = "ON" if follow_rover_map else "OFF"
+                    print(f"Map follow mode: {state}")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0
@@ -950,8 +1557,15 @@ def main():
         else:
             time.sleep(0.01)
 
+    if human_detect_available:
+        try:
+            zed.disable_object_detection()
+        except Exception:
+            pass
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
+    if tracking_enabled and args.area_save_path:
+        zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
     ros2_utils.shutdown_ros2(node)
