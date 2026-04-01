@@ -70,6 +70,44 @@ def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
             print("Positional tracking enabled.")
         return True, pose
 
+    # If area-memory was requested, retry once without area-memory because
+    # stale/incompatible area files can prevent tracking from enabling.
+    if area_enabled:
+        print(
+            f"Tracking failed with area-memory settings ({track_err}); retrying with area-memory disabled."
+        )
+        retry_err = None
+        retry_params = None
+        try:
+            retry_params = sl.PositionalTrackingParameters()
+            if hasattr(retry_params, "enable_area_memory"):
+                retry_params.enable_area_memory = False
+            if hasattr(retry_params, "area_file_path"):
+                retry_params.area_file_path = ""
+            elif hasattr(retry_params, "set_area_file_path"):
+                retry_params.set_area_file_path("")
+        except Exception:
+            retry_params = None
+
+        if retry_params is not None:
+            try:
+                retry_err = enable_fn(retry_params)
+            except TypeError:
+                retry_err = None
+            except Exception:
+                retry_err = None
+
+        if retry_err is None:
+            try:
+                retry_err = enable_fn()
+            except Exception as exc:
+                print(f"Tracking retry without area-memory failed: {exc}")
+                retry_err = None
+
+        if retry_err == sl.ERROR_CODE.SUCCESS:
+            print("Positional tracking enabled (area-memory disabled fallback).")
+            return True, pose
+
     print(f"Failed to enable positional tracking: {track_err}")
     return False, pose
 
