@@ -276,6 +276,11 @@ def main():
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
+    parser.add_argument(
+        "--overlay-red-only",
+        action="store_true",
+        help="Show only red (obstacle) overlay on camera view, hide green ground coloring",
+    )
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -1332,8 +1337,9 @@ def main():
                     obstacle_full = cv2.resize(obstacle.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
 
                     overlay = img.copy()
-                    # Green for ground
-                    overlay[ground_full == 1] = (0, 200, 0)
+                    # Green for ground (skip if red-only mode)
+                    if not args.overlay_red_only:
+                        overlay[ground_full == 1] = (0, 200, 0)
                     # Red for obstacles/walls
                     overlay[obstacle_full == 1] = (0, 0, 255)
                     # Blend

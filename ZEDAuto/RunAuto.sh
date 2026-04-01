@@ -118,6 +118,7 @@ if [[ -n "${STREAM_IP:-}" ]]; then
   cmd+=(--stream-view "${STREAM_VIEW:-both}")
 fi
 if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
+if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"
