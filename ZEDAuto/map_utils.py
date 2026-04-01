@@ -179,6 +179,33 @@ class OccupancyMap:
         map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
         map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
         map_vis[:, :, 0] = (hole_vis * 255.0).astype(np.uint8)
+
+        # Add a light-green "clearance halo" near strong free-space evidence.
+        # This makes near-empty fringe cells easier to read and tones down weak,
+        # likely-spurious red speckle without hiding strong obstacles.
+        confirmed_free = self.free_counts >= self.free_confirm_hits
+        if np.any(confirmed_free):
+            near_confirmed_free = inflate_mask(confirmed_free, radius_cells=1)
+            evidence = self.free_counts + self.occ_counts + self.hole_counts
+
+            # Unknown cells neighboring confirmed free-space.
+            halo_unknown = near_confirmed_free & (evidence < 1.0)
+            if np.any(halo_unknown):
+                map_vis[halo_unknown, 1] = np.maximum(map_vis[halo_unknown, 1], 120)
+                map_vis[halo_unknown, 2] = np.minimum(map_vis[halo_unknown, 2], 30)
+                map_vis[halo_unknown, 0] = np.minimum(map_vis[halo_unknown, 0], 30)
+
+            # Weak occupied evidence near free-space: tint toward green.
+            weak_occ_near_free = (
+                near_confirmed_free
+                & (self.occ_counts > 0.0)
+                & (self.occ_counts < 1.5)
+                & (self.occ_counts <= (self.free_counts * 1.1))
+            )
+            if np.any(weak_occ_near_free):
+                map_vis[weak_occ_near_free, 1] = np.maximum(map_vis[weak_occ_near_free, 1], 100)
+                map_vis[weak_occ_near_free, 2] = (map_vis[weak_occ_near_free, 2] * 0.45).astype(np.uint8)
+                map_vis[weak_occ_near_free, 0] = np.minimum(map_vis[weak_occ_near_free, 0], 40)
         return map_vis
 
     def world_to_grid(self, x, z):
@@ -211,7 +238,7 @@ class OccupancyMap:
         return evidence >= float(min_evidence)
 
 
-def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
+def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8, traversal_cost_map=None):
     import heapq
     import math
 
@@ -227,6 +254,12 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
         return None
     if gr < 0 or gr >= h or gc < 0 or gc >= w:
         return None
+
+    extra_cost = None
+    if traversal_cost_map is not None:
+        if traversal_cost_map.shape != obstacle_mask.shape:
+            return None
+        extra_cost = traversal_cost_map
 
     connectivity = int(connectivity)
     if connectivity not in (4, 8):
@@ -274,7 +307,8 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
             if dr != 0 and dc != 0 and connectivity == 8:
                 if obstacle_mask[r, nc] or obstacle_mask[nr, c]:
                     continue
-            ng = g + step_cost
+            add_cost = 0.0 if extra_cost is None else float(extra_cost[nr, nc])
+            ng = g + step_cost + max(0.0, add_cost)
             if (nr, nc) not in cost or ng < cost[(nr, nc)]:
                 cost[(nr, nc)] = ng
                 came_from[(nr, nc)] = (r, c)

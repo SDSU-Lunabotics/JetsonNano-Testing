@@ -483,6 +483,8 @@ def main():
     a, b, c, d = 0.0, 1.0, 0.0, 0.0
     has_plane = False
     follow_rover_map = bool(args.map_follow_rover)
+    map_red_only_view = False
+    map_scale_live = max(1, int(args.map_scale))
     map_view_shift_r = 0
     map_view_shift_c = 0
     frame_idx = 0
@@ -518,13 +520,13 @@ def main():
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
-        nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c
+        nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
         if event != cv2.EVENT_LBUTTONDOWN:
             if event == cv2.EVENT_RBUTTONDOWN:
                 emergency_stop = True
                 print("EMERGENCY STOP")
             return
-        scale = max(1, int(args.map_scale))
+        scale = max(1, int(map_scale_live))
         row = int(y / scale) - int(map_view_shift_r)
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
@@ -1098,14 +1100,33 @@ def main():
                             radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
+
+                            # Build a soft safety-cost field so A* prefers corridor centers:
+                            # farther from obstacles = lower cost (safer and usually smoother/faster).
+                            path_cost = np.zeros(obs.shape, dtype=np.float32)
+                            if np.any(obs):
+                                near1 = map_utils.inflate_mask(obs, 1)
+                                near2 = map_utils.inflate_mask(obs, 2)
+                                near3 = map_utils.inflate_mask(obs, 3)
+                                path_cost[near3] += 0.20
+                                path_cost[near2] += 0.35
+                                path_cost[near1] += 0.55
+                            # Prefer cleaner lanes when obstacle evidence is weak/ambiguous.
+                            path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
+
                             clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
                             if clear_cells > 0:
                                 obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
+                                keep_cost = map_utils.clear_mask_circle(
+                                    np.ones(obs.shape, dtype=bool), cam_row_col, clear_cells
+                                )
+                                path_cost[~keep_cost] = 0.0
                             path_cells = map_utils.astar_path(
                                 cam_row_col,
                                 goal_cell,
                                 obs,
                                 connectivity=args.path_connectivity,
+                                traversal_cost_map=path_cost,
                             )
                             if path_cells:
                                 last_path_cells = path_cells
@@ -1492,10 +1513,14 @@ def main():
                                 cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
                                 if is_p:
                                     cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
-                        if args.map_scale > 1:
+                        if map_red_only_view:
+                            # Red-only map mode for easier obstacle inspection.
+                            map_vis[:, :, 0] = 0
+                            map_vis[:, :, 1] = 0
+                        if map_scale_live > 1:
                             map_vis = cv2.resize(
                                 map_vis,
-                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                (occ_map.grid_w * map_scale_live, occ_map.grid_h * map_scale_live),
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
@@ -1504,10 +1529,10 @@ def main():
                             map_window_ready = True
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_show = heatmap_vis
-                        if args.map_scale > 1:
+                        if map_scale_live > 1:
                             heatmap_show = cv2.resize(
                                 heatmap_show,
-                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                (occ_map.grid_w * map_scale_live, occ_map.grid_h * map_scale_live),
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
@@ -1529,6 +1554,16 @@ def main():
                     follow_rover_map = not follow_rover_map
                     state = "ON" if follow_rover_map else "OFF"
                     print(f"Map follow mode: {state}")
+                if key == ord("v"):
+                    map_red_only_view = not map_red_only_view
+                    state = "ON" if map_red_only_view else "OFF"
+                    print(f"Map red-only mode: {state}")
+                if key == ord("o"):
+                    map_scale_live = min(12, map_scale_live + 1)
+                    print(f"Map zoom: x{map_scale_live}")
+                if key == ord("p"):
+                    map_scale_live = max(1, map_scale_live - 1)
+                    print(f"Map zoom: x{map_scale_live}")
                 if key == ord(" "):
                     emergency_stop = True
                     manual_fwd = 0.0
