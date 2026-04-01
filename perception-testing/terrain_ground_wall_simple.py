@@ -178,15 +178,15 @@ def main() -> None:
                 else:
                     hole_mask = np.zeros(dist.shape, dtype=bool)
 
-                if (not tracking_enabled) or tracking_pose_ok:
-                    xyz_world = (R @ xyz.T).T + t
-                    occ_map.update(
-                        x=xyz_world[:, 0],
-                        z=xyz_world[:, 2],
-                        ground_mask=ground_mask,
-                        obstacle_mask=obstacle_mask,
-                        hole_mask=hole_mask,
-                    )
+                # Keep map integration alive using the best available pose (current or held last-valid).
+                xyz_world = (R @ xyz.T).T + t
+                occ_map.update(
+                    x=xyz_world[:, 0],
+                    z=xyz_world[:, 2],
+                    ground_mask=ground_mask,
+                    obstacle_mask=obstacle_mask,
+                    hole_mask=hole_mask,
+                )
 
                 if now - last_print >= 1.0:
                     n = max(1, xyz.shape[0])
