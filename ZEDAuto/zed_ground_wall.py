@@ -37,6 +37,7 @@ import heatmap_utils
 import zed_utils
 import viewer_utils
 import stream_utils
+import auto_mining
 
 try:
     from networktables import NetworkTables
@@ -432,6 +433,23 @@ def main():
         except Exception as exc:
             print(f"Failed to load map ({args.map_save_path}): {exc}")
 
+    # --- Mining automation subsystem ---
+    _mining_cfg = {
+        "dig_duration":          float(os.getenv("MINING_DIG_DURATION",           "5.0")),
+        "dig_speed":             float(os.getenv("MINING_DIG_SPEED",              "0.20")),
+        "backup_duration":       float(os.getenv("MINING_BACKUP_DURATION",        "2.0")),
+        "backup_speed":          float(os.getenv("MINING_BACKUP_SPEED",           "0.35")),
+        "deposit_duration":      float(os.getenv("MINING_DEPOSIT_DURATION",       "5.0")),
+        "deposit_backup_speed":  float(os.getenv("MINING_DEPOSIT_BACKUP_SPEED",   "0.35")),
+        "deposit_approach_dist": float(os.getenv("MINING_DEPOSIT_APPROACH_DIST",  "1.0")),
+        "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
+        "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
+        "rover_size_m":          float(args.rover_size_m),
+        "zones_path":            os.getenv("MINING_ZONES_PATH",
+                                           os.path.join(SCRIPT_DIR, "mining_zones.json")),
+    }
+    mining = auto_mining.MiningAutomation(_mining_cfg, occ_map)
+
     sd = None
     if args.drive:
         if not HAS_NT:
@@ -530,6 +548,8 @@ def main():
         row = int(y / scale) - int(map_view_shift_r)
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
+            return
+        if mining.consume_click(row, col, occ_map):
             return
         goal_cell = (row, col)
         path_cells = None
@@ -997,6 +1017,14 @@ def main():
                     map_vis = occ_map.render()
                     # Draw camera position marker (blue square).
                     cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
+                    # Mining tick: may override goal_cell or supply a direct drive command.
+                    _mine_goal, _mine_drive, _mine_status = mining.tick(
+                        cam_row_col, occ_map, time.time()
+                    )
+                    if _mine_goal is not None and _mine_goal != goal_cell:
+                        goal_cell = _mine_goal
+                        path_cells = None
+                        last_path_plan_time = 0.0
                     if cam_row_col is not None:
                         r0, c0 = cam_row_col
                         half = max(1, int(args.map_camera_size) // 2)
@@ -1150,6 +1178,10 @@ def main():
                         if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
                             cv2.circle(map_vis, (gc, gr), 2, (0, 255, 255), -1)
 
+                    # Mining zone / dig-point overlay (drawn before apply_map_view so
+                    # it scrolls correctly with the follow-rover map view).
+                    mining.render_overlay(map_vis, occ_map)
+
                     if args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
@@ -1249,6 +1281,15 @@ def main():
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif cam_row_col is None:
                                 send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif _mine_drive is not None:
+                                # Mining automation has direct drive control
+                                # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
+                                send_nt_command(
+                                    True,
+                                    _mine_drive[0],
+                                    _mine_drive[1],
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             else:
                                 # Pick a waypoint a few steps ahead.
                                 if draw_path is not None and len(draw_path) > 0:
@@ -1538,6 +1579,8 @@ def main():
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
                 key = cv2.waitKey(1) & 0xFF
+                # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
+                mining.handle_key(key)
                 if key == ord("q"):
                     break
                 if key == ord("m"):
