@@ -90,6 +90,8 @@ class CameraService:
             return False
 
         normalized = error.lower()
+        # ZED/OpenCV errors can appear with underscores or enum-like tokens.
+        normalized = normalized.replace("_", " ")
         markers = (
             "busy",
             "device in use",
@@ -97,6 +99,7 @@ class CameraService:
             "camera stream failed to start",
             "stream failed to start",
             "already opened",
+            "camera stream failed to",
         )
         return any(marker in normalized for marker in markers)
 
