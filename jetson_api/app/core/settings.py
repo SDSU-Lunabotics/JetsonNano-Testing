@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     camera_backend: str = "auto"
     camera_device_index: int = 0
     camera_status_ttl_ms: int = 2000
+    camera_snapshot_cache_ms: int = 200
+    camera_stream_interval_ms: int = 120
     network_status_ttl_ms: int = 5000
     throughput_test_enabled: bool = True
     throughput_test_port: int = 5201
