@@ -1,5 +1,10 @@
-from fastapi import APIRouter, Response
+import time
+from typing import Iterator
 
+from fastapi import APIRouter, Query, Response
+from fastapi.responses import StreamingResponse
+
+from app.core.settings import settings
 from app.schemas.camera import CameraModeRequest, CameraModeResponse
 from app.services.camera_service import camera_service
 
@@ -17,6 +22,29 @@ _ONE_PX_PNG = (
 def get_snapshot() -> Response:
     png = camera_service.get_snapshot_bytes() or _ONE_PX_PNG
     return Response(content=png, media_type="image/png")
+
+
+def _mjpeg_stream(frame_interval_ms: int) -> Iterator[bytes]:
+    sleep_s = max(frame_interval_ms, 1) / 1000.0
+    boundary = b"--frame\r\nContent-Type: image/png\r\n\r\n"
+    last_frame = _ONE_PX_PNG
+
+    while True:
+        frame = camera_service.get_snapshot_bytes() or last_frame
+        if frame:
+            last_frame = frame
+        yield boundary + last_frame + b"\r\n"
+        time.sleep(sleep_s)
+
+
+@router.get("/stream")
+def get_stream(
+    frame_interval_ms: int = Query(default=settings.camera_stream_interval_ms, ge=50, le=2000),
+) -> StreamingResponse:
+    return StreamingResponse(
+        _mjpeg_stream(frame_interval_ms),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @router.post("/mode", response_model=CameraModeResponse)

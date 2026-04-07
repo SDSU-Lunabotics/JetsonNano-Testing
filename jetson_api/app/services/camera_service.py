@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional, Tuple
 
@@ -35,6 +36,9 @@ class CameraService:
         self._last_error: Optional[str] = None
         self._last_status_check_ms = 0
         self._recent_activity_grace_ms = max(settings.camera_status_ttl_ms * 5, 10000)
+        self._capture_lock = threading.Lock()
+        self._last_snapshot_png: bytes = b""
+        self._last_snapshot_ms: int = 0
 
     def get_mode(self) -> Tuple[CameraMode, Optional[int]]:
         return self._mode, self._snapshot_interval_ms
@@ -181,29 +185,37 @@ class CameraService:
         if not force and (now - self._last_status_check_ms) < settings.camera_status_ttl_ms:
             return
 
+        # If recent frames are still flowing, avoid expensive/open() probes.
+        if self._has_recent_activity() and self._backend is not None:
+            self._connected = True
+            self._streaming = True
+            self._last_error = None
+            return
+
         self._last_status_check_ms = now
         backend = settings.camera_backend.lower()
 
-        if backend in ("auto", "zed") and self._probe_zed():
-            return
-        if backend in ("auto", "zed") and self._error_implies_camera_in_use(self._last_error):
-            self._mark_in_use("zed", self._last_error)
-            return
+        with self._capture_lock:
+            if backend in ("auto", "zed") and self._probe_zed():
+                return
+            if backend in ("auto", "zed") and self._error_implies_camera_in_use(self._last_error):
+                self._mark_in_use("zed", self._last_error)
+                return
 
-        if backend in ("auto", "opencv") and self._probe_opencv():
-            return
-        if backend in ("auto", "opencv") and self._error_implies_camera_in_use(self._last_error):
-            self._mark_in_use("opencv", self._last_error)
-            return
+            if backend in ("auto", "opencv") and self._probe_opencv():
+                return
+            if backend in ("auto", "opencv") and self._error_implies_camera_in_use(self._last_error):
+                self._mark_in_use("opencv", self._last_error)
+                return
 
-        if backend not in ("auto", "zed", "opencv"):
-            self._mark_disconnected(f"Unsupported camera backend '{settings.camera_backend}'")
-            return
+            if backend not in ("auto", "zed", "opencv"):
+                self._mark_disconnected(f"Unsupported camera backend '{settings.camera_backend}'")
+                return
 
-        if self._preserve_recent_connection(self._last_error):
-            return
+            if self._preserve_recent_connection(self._last_error):
+                return
 
-        self._mark_disconnected(self._last_error)
+            self._mark_disconnected(self._last_error)
 
     def get_status(self) -> CameraStatus:
         self.refresh_status()
@@ -283,21 +295,48 @@ class CameraService:
     def get_snapshot_bytes(self) -> bytes:
         backend = settings.camera_backend.lower()
         last_error: Optional[str] = None
+        now = _now_ms()
 
-        if backend in ("auto", "zed"):
-            try:
-                return self._snapshot_zed()
-            except Exception as exc:
-                last_error = str(exc)
+        if (
+            self._last_snapshot_png
+            and (now - self._last_snapshot_ms) < settings.camera_snapshot_cache_ms
+        ):
+            return self._last_snapshot_png
 
-        if backend in ("auto", "opencv"):
-            try:
-                return self._snapshot_opencv()
-            except Exception as exc:
-                last_error = str(exc)
+        with self._capture_lock:
+            now = _now_ms()
+            if (
+                self._last_snapshot_png
+                and (now - self._last_snapshot_ms) < settings.camera_snapshot_cache_ms
+            ):
+                return self._last_snapshot_png
 
-        self._mark_disconnected(last_error or "No supported camera backend is available")
-        return b""
+            if backend in ("auto", "zed"):
+                try:
+                    png = self._snapshot_zed()
+                    self._last_snapshot_png = png
+                    self._last_snapshot_ms = _now_ms()
+                    return png
+                except Exception as exc:
+                    last_error = str(exc)
+                    if self._error_implies_camera_in_use(last_error):
+                        self._mark_in_use("zed", last_error)
+                        return self._last_snapshot_png
+
+            if backend in ("auto", "opencv"):
+                try:
+                    png = self._snapshot_opencv()
+                    self._last_snapshot_png = png
+                    self._last_snapshot_ms = _now_ms()
+                    return png
+                except Exception as exc:
+                    last_error = str(exc)
+                    if self._error_implies_camera_in_use(last_error):
+                        self._mark_in_use("opencv", last_error)
+                        return self._last_snapshot_png
+
+            self._mark_disconnected(last_error or "No supported camera backend is available")
+            return self._last_snapshot_png
 
 
 camera_service = CameraService()
