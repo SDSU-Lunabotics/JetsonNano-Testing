@@ -10,6 +10,7 @@ from app.services.wireless_service import wireless_service
 from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.camera_service import camera_service
 from app.services.lidar_service import lidar_service
+from app.services.nt_service import nt_service
 
 
 class TelemetryService:
@@ -102,8 +103,19 @@ class TelemetryService:
         self._jetson_last_seen_ms = now
 
         bridge_status = roborio_bridge_service.get_status()
+        bridge_connected = bool(bridge_status.get("connected", False))
 
-        if bool(bridge_status.get("connected", False)):
+        # Fallback: if the local RoboRIO HTTP bridge is unavailable, use direct
+        # NT connectivity so status still reflects live RoboRIO link health.
+        if not bridge_connected:
+            try:
+                bridge_connected = nt_service.is_connected()
+            except Exception:
+                bridge_connected = False
+            if bridge_connected:
+                bridge_status["connected"] = True
+
+        if bridge_connected:
             self._roborio_last_seen_ms = now
 
         rover = RoverStatus(

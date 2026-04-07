@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     jetson_ip: str = "10.0.8.100"
     roborio_ip: str = "10.0.9.2"
+    roborio_bridge_url: str = "http://127.0.0.1:8001"
     camera_host: str = "10.0.8.102" # Update with actual IPs
     lidar_host: str = "10.0.8.103" # Update with actual IPs
     lidar_backend: str = "unitree"
