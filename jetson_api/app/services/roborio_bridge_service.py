@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import requests
 from typing import Any, Dict
+from app.core.settings import settings
 
 
 class RoboRIOBridgeService:
     def __init__(self) -> None:
-        self._base_url = "http://127.0.0.1:8001"
+        self._base_url = settings.roborio_bridge_url
 
     def _get(self, path: str) -> Dict[str, Any]:
         r = requests.get(f"{self._base_url}{path}", timeout=2)
@@ -21,13 +22,15 @@ class RoboRIOBridgeService:
     def get_status(self) -> Dict[str, Any]:
         try:
             return self._get("/status")
-        except requests.RequestException:
+        except requests.RequestException as exc:
             return {
                 "status": "error",
                 "timestamp_ms": 0,
                 "connected": False,
                 "values": {},
                 "warnings": [],
+                "error": str(exc),
+                "bridge_url": self._base_url,
             }
 
     def is_connected(self) -> bool:
