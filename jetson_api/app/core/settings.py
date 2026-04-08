@@ -26,9 +26,12 @@ class Settings(BaseSettings):
     lidar_visualization_command: str = "cd ./lidar && python3 lidar_visualization.py"
     camera_backend: str = "auto"
     camera_device_index: int = 0
+    camera_capture_fps: int = 20
+    camera_jpeg_quality: int = 80
     camera_status_ttl_ms: int = 2000
     camera_snapshot_cache_ms: int = 200
     camera_stream_interval_ms: int = 120
+    camera_worker_retry_ms: int = 1000
     network_status_ttl_ms: int = 5000
     throughput_test_enabled: bool = True
     throughput_test_port: int = 5201

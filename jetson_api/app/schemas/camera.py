@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 CameraMode = Literal["manual", "snapshot"]
 CameraBackend = Literal["auto", "zed", "opencv"]
+CameraStreamEvent = Literal["status", "mode_changed", "error"]
 
 
 class CameraModeRequest(BaseModel):
@@ -27,3 +28,9 @@ class CameraStatus(BaseModel):
     snapshot_interval_ms: Optional[int] = None
     last_frame_ms: Optional[int] = None
     error: Optional[str] = None
+
+
+class CameraWsMessage(BaseModel):
+    type: CameraStreamEvent
+    timestamp_ms: int
+    camera: CameraStatus
