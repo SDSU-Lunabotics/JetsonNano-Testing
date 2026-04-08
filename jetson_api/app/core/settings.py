@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     lidar_visualization_command: str = "cd ./lidar && python3 lidar_visualization.py"
     camera_backend: str = "auto"
     camera_device_index: int = 0
-    camera_capture_fps: int = 20
-    camera_jpeg_quality: int = 80
+    camera_capture_fps: int = 15
+    camera_jpeg_quality: int = 65
     camera_status_ttl_ms: int = 2000
     camera_snapshot_cache_ms: int = 200
     camera_stream_interval_ms: int = 120
