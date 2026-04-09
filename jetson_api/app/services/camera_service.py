@@ -110,6 +110,7 @@ class CameraService:
             self._streaming = False
             self._backend = None
             self._last_error = error
+            self._last_frame_ms = None
             self._frame_condition.notify_all()
 
     def _mark_connected(self, backend: CameraBackend) -> None:
@@ -173,7 +174,7 @@ class CameraService:
         with self._state_lock:
             return (
                 self._last_frame_ms is not None
-                and (_now_ms() - self._last_frame_ms) < self._recent_activity_grace_ms
+                and (_now_ms() - self._last_frame_ms) < max(settings.camera_status_ttl_ms, 1000)
             )
 
     def _probe_zed(self) -> bool:
