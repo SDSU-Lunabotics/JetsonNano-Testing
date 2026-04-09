@@ -61,6 +61,7 @@ class LidarService:
         self._recv_timestamps_s: Deque[float] = deque()
         self._last_launch_attempt_ms: Optional[int] = None
         self._last_launch_kind: Optional[str] = None
+        self._last_launch_detail: Optional[str] = None
 
     def start(self) -> None:
         backend = settings.lidar_backend.lower()
@@ -146,6 +147,7 @@ class LidarService:
             backend_state = self._backend_state
             last_error = self._last_error
             last_launch_kind = self._last_launch_kind
+            last_launch_detail = self._last_launch_detail
             faults = self._status_faults(now)
         connected = last_seen_ms is not None and (now - last_seen_ms) < settings.lidar_status_ttl_ms
 
@@ -164,6 +166,7 @@ class LidarService:
             backend_state=backend_state,
             last_error=last_error,
             last_launch_kind=last_launch_kind,
+            last_launch_detail=last_launch_detail,
             faults=faults,
         )
 
@@ -316,6 +319,7 @@ class LidarService:
                     (now - self._last_seen_ms) < settings.lidar_status_ttl_ms
                 )
                 bind_failed = self._last_error is not None and "failed to bind" in self._last_error.lower()
+                launch_failed = self._last_launch_kind is not None and self._last_launch_kind.endswith(":failed")
                 should_restart = self._last_seen_ms is not None and not has_recent_points
                 can_launch = (
                     settings.lidar_autostart and
@@ -333,17 +337,23 @@ class LidarService:
             if has_recent_points and command_ready:
                 with self._lock:
                     self._last_launch_kind = None
+                    self._last_launch_detail = None
                 self._mark_online()
             else:
                 if can_launch:
                     launch_kind = "restart_lidar" if should_restart else "start_lidar"
                     self._launch_lidar_script(launch_kind, now)
-                self._set_runtime_error(
-                    self._unitree_status_message(
-                        has_recent_points=has_recent_points,
-                        command_ready=command_ready,
+                with self._lock:
+                    current_launch_failed = (
+                        self._last_launch_kind is not None and self._last_launch_kind.endswith(":failed")
                     )
-                )
+                if not current_launch_failed and not launch_failed:
+                    self._set_runtime_error(
+                        self._unitree_status_message(
+                            has_recent_points=has_recent_points,
+                            command_ready=command_ready,
+                        )
+                    )
 
             self._stop_event.wait(interval_s)
 
@@ -375,10 +385,12 @@ class LidarService:
         script_name = f"{name}.sh"
         script_path = Path(__file__).resolve().parents[2] / "scripts" / script_name
         if not script_path.exists():
-            self._set_runtime_error(f"LiDAR script not found: {script_path}")
+            detail = f"LiDAR script not found: {script_path}"
+            self._set_runtime_error(detail)
             with self._lock:
                 self._last_launch_attempt_ms = attempted_ms
                 self._last_launch_kind = f"{name}:missing"
+                self._last_launch_detail = detail
             return
 
         try:
@@ -390,10 +402,12 @@ class LidarService:
                 check=False,
             )
         except Exception as exc:
-            self._set_runtime_error(f"Failed to run {name}: {exc}")
+            detail = f"Failed to run {name}: {exc}"
+            self._set_runtime_error(detail)
             with self._lock:
                 self._last_launch_attempt_ms = attempted_ms
                 self._last_launch_kind = f"{name}:failed"
+                self._last_launch_detail = detail
             return
 
         combined_output = "\n".join(
@@ -401,15 +415,18 @@ class LidarService:
         )
         if result.returncode != 0:
             detail = combined_output or f"{name} exited with code {result.returncode}"
-            self._set_runtime_error(f"{name} failed: {detail}")
+            message = f"{name} failed: {detail}"
+            self._set_runtime_error(message)
             with self._lock:
                 self._last_launch_attempt_ms = attempted_ms
                 self._last_launch_kind = f"{name}:failed"
+                self._last_launch_detail = message
             return
 
         with self._lock:
             self._last_launch_attempt_ms = attempted_ms
             self._last_launch_kind = name
+            self._last_launch_detail = combined_output or None
 
 
 lidar_service = LidarService()

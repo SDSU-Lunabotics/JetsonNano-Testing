@@ -4,7 +4,8 @@ set -e
 echo "[SCRIPT] start_lidar started at $(date)"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIDAR_DIR="${ROOT_DIR}/lidar"
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
+LIDAR_DIR="${LIDAR_DIR:-${REPO_ROOT}/lidar}"
 DEFAULT_BRIDGE_COMMAND="cd '${LIDAR_DIR}' && sudo ./lidar_bridge"
 BRIDGE_BIN="${LIDAR_DIR}/lidar_bridge"
 
