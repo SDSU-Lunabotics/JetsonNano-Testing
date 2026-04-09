@@ -1,0 +1,16 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# macOS
+.DS_Store
+
+# Generated model training / run outputs
+runs/
+DataTraining/runs/
+
+# Exclude heavy generated ROS workspace outputs in nested repos
+OtherREPOS/**/build/
+OtherREPOS/**/install/
+OtherREPOS/**/log/

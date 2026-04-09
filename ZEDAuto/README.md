@@ -6,6 +6,7 @@ Ground/wall segmentation, occupancy mapping, and optional RoboRIO drive output f
 - `zed_ground_wall.py`: Main application.
 - `RunAuto.sh`: One-command launcher that loads defaults from `zed_ground_wall.env`.
 - `zed_ground_wall.env`: Default configuration for mapping, drive, heatmap, and optional streaming.
+- `ResetMap.sh`: Delete persisted occupancy map and start fresh next run.
 
 ## Quick Start
 1. Open a terminal in the repo root:
@@ -29,6 +30,7 @@ Pass any `zed_ground_wall.py` flags directly to the launcher:
 ./ZEDAuto/RunAuto.sh --no-gui
 ./ZEDAuto/RunAuto.sh --drive-debug
 ./ZEDAuto/RunAuto.sh --stream-ip 192.168.1.100 --stream-port 5600 --stream-view both
+./ZEDAuto/RunZoneDatasheet.sh
 ```
 
 Show all runtime options:
@@ -60,6 +62,7 @@ Settings used in this legacy command:
 - `--tracking`: Enable ZED positional tracking.
 - `--map-center`: Center occupancy map around start position.
 - `--map-scale 3`: Display map at 3x scale.
+- `--map-follow-rover`: Keep rover centered in map view (display-only; toggle with `c`).
 - `--free-decay 1.0`: Keep free-space evidence from fading.
 - `--occ-decay 0.98`: Slowly decay obstacle evidence.
 - `--hole-decay 0.98`: Slowly decay hole evidence.
@@ -90,6 +93,7 @@ Additional settings that can be used (with defaults):
 - `--heatmap-window`: Show heatmap in a separate window instead of overlaying on map.
 - `--obstacle-thresh-m 0.05`: Obstacle height above ground (m).
 - `--hole-thresh-m 0.05`: Hole depth below ground (m).
+- `--max-above-ground-m 1.22`: Ignore points above this height over floor plane (m).
 - `--disable-holes`: Disable hole detection (testing).
 - `--path-avoid-occ-min 3.0`: Min obstacle count for path blocking.
 - `--path-avoid-occ-ratio 1.5`: Min occupied/free ratio for blocking.
@@ -113,6 +117,9 @@ Additional settings that can be used (with defaults):
 - `--drive-ready-pulse-sec 0.10`: How long CommandReady stays high per command pulse.
 - `--nt-health-debug`: Print NetworkTables session health plus incoming robot-published `Jetson/*` drive keys.
 - `--nt-health-period-sec 1.0`: Seconds between NT health debug prints.
+- `--nt-enable-heartbeat-sec 0.10`: Re-publish automation state keys while driving.
+- `--nt-command-ack-timeout-sec 0.30`: Clear stale `CommandReady` if robot does not consume it.
+- `--nt-forward-scale 1.0`, `--nt-turn-scale 1.0`: Values written to `Jetson/Speed` and `Jetson/TurnSpeed`.
 - `--floor-update-sec 0.5`: Seconds between floor-plane updates.
 - `--floor-min-normal-y 0.5`: Reject floor planes with |normal.y| below this.
 - `--stream-ip`: UDP target IP for GStreamer stream.
@@ -140,14 +147,50 @@ Then run the same single command:
 ./ZEDAuto/RunAuto.sh
 ```
 
+## Crash Recovery Map Resume
+- Map persistence is now controlled in `ZEDAuto/zed_ground_wall.env`:
+  - `MAP_SAVE_PATH` (default `./ZEDAuto/zed_map.npz`)
+  - `MAP_SAVE_EVERY` (seconds, default `5.0`)
+  - `MAP_LOAD` (`1` to restore on startup)
+- With `MAP_LOAD=1`, the rover resumes from the last saved map after reboot/crash.
+- For localization resume from previously seen areas, enable ZED area memory:
+  - `AREA_MEMORY_ENABLE=1`
+  - `AREA_LOAD_PATH=./ZEDAuto/zed_area_memory.area`
+  - `AREA_SAVE_PATH=./ZEDAuto/zed_area_memory.area`
+  - `AREA_SAVE_EVERY=30.0`
+- This helps restart from a different nearby spot; exact same start point is no longer required when relocalization succeeds.
+
+To reset and start from an empty map:
+
+```bash
+./ZEDAuto/ResetMap.sh
+```
+
 ## Runtime Controls
 - Left click on the occupancy map: Set goal cell.
 - Right click on the occupancy map: Emergency stop.
 - `m`: Toggle manual drive mode.
+- `c`: Toggle map follow mode (rover-centered view on/off).
 - `w`, `a`, `s`, `d`: Manual drive (hold-to-move behavior).
 - `x`: Zero manual drive command.
 - `space`: Emergency stop.
 - `q`: Quit.
+- `ZED Drive Status` window: Live mode (`STOPPED`, `MANUAL`, `AUTO`, `IDLE`), goal/target location, NT connection state, and live forward/turn command bars.
+- If tracking is lost, mode shows `TRACK LOST`; map integration is paused and auto-drive commands are paused until tracking recovers.
+
+## Zone Datasheet Logger
+Use this standalone logger to auto-sample random obstacle/hole map cells and write world XYZ rows for LiDAR comparison:
+
+```bash
+./ZEDAuto/RunZoneDatasheet.sh
+```
+
+Config file:
+- `ZEDAuto/zone_datasheet.env`
+  - set `ENABLE_ZONE_DATASHEET=1` to run
+
+Output CSV:
+- `ZEDAuto/zone_datasheet.csv` (default)
 
 ## Optional Stream Receiver Example
 If streaming is enabled (`--stream-ip ...`), a receiver can use:

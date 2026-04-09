@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 
@@ -15,13 +16,26 @@ def open_zed_camera(sl):
     return zed
 
 
-def enable_tracking(zed, sl):
+def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
     pose = sl.Pose()
     try:
         tracking_params = sl.PositionalTrackingParameters()
+        area_enabled = bool(area_memory or area_load_path)
+        if hasattr(tracking_params, "enable_area_memory"):
+            tracking_params.enable_area_memory = area_enabled
+        if area_load_path and os.path.exists(area_load_path):
+            if hasattr(tracking_params, "area_file_path"):
+                tracking_params.area_file_path = area_load_path
+            elif hasattr(tracking_params, "set_area_file_path"):
+                tracking_params.set_area_file_path(area_load_path)
         track_err = zed.enable_positional_tracking(tracking_params)
         if track_err == sl.ERROR_CODE.SUCCESS:
-            print("Positional tracking enabled.")
+            if area_load_path and os.path.exists(area_load_path):
+                print(f"Positional tracking enabled (area memory load: {area_load_path}).")
+            elif area_enabled:
+                print("Positional tracking enabled (area memory on).")
+            else:
+                print("Positional tracking enabled.")
             return True, pose
         print(f"Failed to enable positional tracking: {track_err}")
     except Exception as exc:
@@ -29,12 +43,14 @@ def enable_tracking(zed, sl):
     return False, pose
 
 
-def get_world_transform(zed, sl, pose, pose_warned):
+def get_world_transform_with_status(zed, sl, pose, pose_warned):
     R_world_cam = None
     t_world_cam = None
+    tracking_ok = False
     try:
         pose_state = zed.get_position(pose, sl.REFERENCE_FRAME.WORLD)
         if pose_state == sl.POSITIONAL_TRACKING_STATE.OK:
+            tracking_ok = True
             if hasattr(pose, "get_rotation_matrix"):
                 rot = pose.get_rotation_matrix()
                 if hasattr(rot, "r"):
@@ -69,6 +85,14 @@ def get_world_transform(zed, sl, pose, pose_warned):
     if R_world_cam is None or t_world_cam is None:
         R_world_cam = np.eye(3, dtype=np.float32)
         t_world_cam = np.zeros(3, dtype=np.float32)
+    return R_world_cam, t_world_cam, pose_warned, tracking_ok
+
+
+def get_world_transform(zed, sl, pose, pose_warned):
+    # Backward-compatible helper for older callers.
+    R_world_cam, t_world_cam, pose_warned, _tracking_ok = get_world_transform_with_status(
+        zed, sl, pose, pose_warned
+    )
     return R_world_cam, t_world_cam, pose_warned
 
 
@@ -173,3 +197,20 @@ def disable_spatial_mapping(zed):
         zed.disable_spatial_mapping()
     except Exception:
         pass
+
+
+def save_area_memory(zed, sl, path):
+    if not path:
+        return False
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if hasattr(zed, "save_area_map"):
+            err = zed.save_area_map(path)
+            if err == sl.ERROR_CODE.SUCCESS:
+                print(f"Saved area memory: {path}")
+                return True
+            print(f"save_area_map failed: {err}")
+            return False
+    except Exception as exc:
+        print(f"Failed to save area memory: {exc}")
+    return False

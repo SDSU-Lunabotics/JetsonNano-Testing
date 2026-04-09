@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 
@@ -55,17 +56,36 @@ class OccupancyMap:
         }
 
     def load(self, path):
-        data = np.load(path)
+        data = np.load(path, allow_pickle=True)
         loaded_free = data["free_counts"].astype(np.float32)
         loaded_occ = data["occ_counts"].astype(np.float32)
         loaded_hole = data["hole_counts"].astype(np.float32) if "hole_counts" in data else None
-        meta = data["meta"].item()
         if (
-            meta.get("map_res_m") == self.map_res_m
-            and meta.get("map_width_m") == self.map_width_m
-            and meta.get("map_height_m") == self.map_height_m
-            and meta.get("map_z_min") == self.map_z_min
+            "map_res_m" in data
+            and "map_width_m" in data
+            and "map_height_m" in data
+            and "map_z_min" in data
         ):
+            meta = {
+                "map_res_m": float(data["map_res_m"]),
+                "map_width_m": float(data["map_width_m"]),
+                "map_height_m": float(data["map_height_m"]),
+                "map_z_min": float(data["map_z_min"]),
+            }
+        elif "meta" in data:
+            meta_val = data["meta"]
+            if hasattr(meta_val, "item"):
+                meta_val = meta_val.item()
+            meta = meta_val if isinstance(meta_val, dict) else {}
+        else:
+            meta = {}
+        same_meta = (
+            np.isclose(float(meta.get("map_res_m", np.nan)), float(self.map_res_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_width_m", np.nan)), float(self.map_width_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_height_m", np.nan)), float(self.map_height_m), atol=1e-6)
+            and np.isclose(float(meta.get("map_z_min", np.nan)), float(self.map_z_min), atol=1e-6)
+        )
+        if same_meta:
             if loaded_free.shape == self.free_counts.shape and loaded_occ.shape == self.occ_counts.shape:
                 self.free_counts[:] = loaded_free
                 self.occ_counts[:] = loaded_occ
@@ -76,11 +96,18 @@ class OccupancyMap:
         return False, "Map settings differ; starting with empty map."
 
     def save(self, path):
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
         np.savez_compressed(
             path,
             free_counts=self.free_counts,
             occ_counts=self.occ_counts,
             hole_counts=self.hole_counts,
+            map_res_m=np.float32(self.map_res_m),
+            map_width_m=np.float32(self.map_width_m),
+            map_height_m=np.float32(self.map_height_m),
+            map_z_min=np.float32(self.map_z_min),
             meta=self.meta(),
         )
 
@@ -111,23 +138,28 @@ class OccupancyMap:
         self.occ_counts *= self.occ_decay
         self.hole_counts *= self.hole_decay
 
+        def _unique_cells(rr, cc):
+            if rr.size == 0:
+                return rr, cc
+            flat = np.ravel_multi_index((rr, cc), (self.grid_h, self.grid_w))
+            uniq = np.unique(flat)
+            ur, uc = np.unravel_index(uniq, (self.grid_h, self.grid_w))
+            return ur, uc
+
         if np.any(gmask):
-            np.add.at(self.free_counts, (row[gmask], col[gmask]), 1.0)
+            g_r, g_c = _unique_cells(row[gmask], col[gmask])
+            self.free_counts[g_r, g_c] += 1.0
         if np.any(omask):
-            occ_r = row[omask]
-            occ_c = col[omask]
-            np.add.at(self.occ_counts, (occ_r, occ_c), 1.0)
+            occ_r, occ_c = _unique_cells(row[omask], col[omask])
+            self.occ_counts[occ_r, occ_c] += 1.0
             # New obstacle evidence should degrade prior free-space confidence.
             if self.free_downgrade_factor < 1.0:
-                uniq_occ = np.unique(np.stack((occ_r, occ_c), axis=1), axis=0)
-                self.free_counts[uniq_occ[:, 0], uniq_occ[:, 1]] *= self.free_downgrade_factor
+                self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
         if hmask is not None and np.any(hmask):
-            hole_r = row[hmask]
-            hole_c = col[hmask]
-            np.add.at(self.hole_counts, (hole_r, hole_c), 1.0)
-            if self.free_downgrade_factor < 1.0:
-                uniq_hole = np.unique(np.stack((hole_r, hole_c), axis=1), axis=0)
-                self.free_counts[uniq_hole[:, 0], uniq_hole[:, 1]] *= self.free_downgrade_factor
+            hole_r, hole_c = _unique_cells(row[hmask], col[hmask])
+            self.hole_counts[hole_r, hole_c] += 1.0
+            # Keep holes informational (blue) without making them non-traversable by
+            # degrading free-space confidence. Obstacle evidence still controls blocking.
 
     def render(self):
         # Visualize: green = free, red = occupied, blue = holes, black = unknown.
@@ -165,13 +197,14 @@ class OccupancyMap:
         z = self.z_min + (self.grid_h - 1 - row + 0.5) * self.map_res_m
         return x, z
 
-    def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5):
+    def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5, min_occ_advantage=0.0):
         # Mark as obstacle only if we have enough occupied evidence
         # and it significantly outweighs free evidence.
         occ = self.occ_counts
         free = self.free_counts
         ratio_ok = occ >= (free * float(min_occ_ratio))
-        return (occ >= float(min_occ_count)) & ratio_ok
+        adv_ok = (occ - free) >= float(min_occ_advantage)
+        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok
 
     def known_mask(self, min_evidence=1.0):
         evidence = self.free_counts + self.occ_counts + self.hole_counts
