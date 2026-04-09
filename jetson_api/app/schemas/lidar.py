@@ -32,7 +32,18 @@ class LidarMapInfoResponse(BaseModel):
     origin: MapOrigin
 
 
+class LidarPoint(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
 class LidarPreviewMessage(BaseModel):
     type: Literal["lidar_preview"]
     seq: int
     timestamp_ms: int
+    frame_id: Optional[str] = None
+    point_count: int = Field(ge=0)
+    points_per_sec: Optional[float] = Field(default=None, ge=0)
+    truncated: bool = False
+    points: List[LidarPoint] = Field(default_factory=list)
