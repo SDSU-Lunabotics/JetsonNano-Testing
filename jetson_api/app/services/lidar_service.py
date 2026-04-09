@@ -3,9 +3,11 @@ from __future__ import annotations
 import math
 import socket
 import struct
+import subprocess
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Deque, List, Optional, Tuple
 
 from app.core.settings import settings
@@ -18,8 +20,6 @@ from app.schemas.lidar import (
     LidarMapInfoResponse,
     MapOrigin,
 )
-from app.schemas.scripts import ScriptRunRequest
-from app.services.script_service import script_service
 
 
 def _now_ms() -> int:
@@ -372,10 +372,36 @@ class LidarService:
         )
 
     def _launch_lidar_script(self, name: str, attempted_ms: int) -> None:
+        script_name = f"{name}.sh"
+        script_path = Path(__file__).resolve().parents[2] / "scripts" / script_name
+        if not script_path.exists():
+            self._set_runtime_error(f"LiDAR script not found: {script_path}")
+            with self._lock:
+                self._last_launch_attempt_ms = attempted_ms
+                self._last_launch_kind = f"{name}:missing"
+            return
+
         try:
-            script_service.run(ScriptRunRequest(name=name))
+            result = subprocess.run(
+                [str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
         except Exception as exc:
             self._set_runtime_error(f"Failed to run {name}: {exc}")
+            with self._lock:
+                self._last_launch_attempt_ms = attempted_ms
+                self._last_launch_kind = f"{name}:failed"
+            return
+
+        combined_output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr) if part and part.strip()
+        )
+        if result.returncode != 0:
+            detail = combined_output or f"{name} exited with code {result.returncode}"
+            self._set_runtime_error(f"{name} failed: {detail}")
             with self._lock:
                 self._last_launch_attempt_ms = attempted_ms
                 self._last_launch_kind = f"{name}:failed"
