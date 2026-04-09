@@ -143,6 +143,9 @@ class LidarService:
             mode = self._mode
             points_per_sec = self._points_per_sec
             frame_id = self._frame_id
+            backend_state = self._backend_state
+            last_error = self._last_error
+            last_launch_kind = self._last_launch_kind
             faults = self._status_faults(now)
         connected = last_seen_ms is not None and (now - last_seen_ms) < settings.lidar_status_ttl_ms
 
@@ -158,6 +161,9 @@ class LidarService:
             mode=mode,
             points_per_sec=points_per_sec,
             frame_id=frame_id,
+            backend_state=backend_state,
+            last_error=last_error,
+            last_launch_kind=last_launch_kind,
             faults=faults,
         )
 
