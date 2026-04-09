@@ -116,6 +116,7 @@ def socket_receiver():
     while True:
         conn, addr = server.accept()
         print(f"[TCP] Bridge connected from {addr}")
+        # check debug
         buf    = b''
         t_last = time.time()
         n_recv = n_obs = 0
@@ -177,7 +178,7 @@ def compute_worker():
     while True:
         t_start = time.time()
         now = time.time()
-
+        #DEBUG
         # 1. Snapshot goal
         with GOAL_LOCK:
             goal = GOAL_M.copy()
