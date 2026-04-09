@@ -15,6 +15,9 @@ class LidarStatusResponse(BaseModel):
     mode: Optional[LidarMode] = None
     points_per_sec: Optional[float] = None
     frame_id: Optional[str] = None
+    backend_state: Optional[str] = None
+    last_error: Optional[str] = None
+    last_launch_kind: Optional[str] = None
     faults: Optional[List[Fault]] = None
 
 
