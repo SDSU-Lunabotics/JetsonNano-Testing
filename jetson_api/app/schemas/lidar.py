@@ -18,6 +18,7 @@ class LidarStatusResponse(BaseModel):
     backend_state: Optional[str] = None
     last_error: Optional[str] = None
     last_launch_kind: Optional[str] = None
+    last_launch_detail: Optional[str] = None
     faults: Optional[List[Fault]] = None
 
 
