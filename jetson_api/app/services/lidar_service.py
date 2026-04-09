@@ -1,23 +1,32 @@
 from __future__ import annotations
 
+import math
 import socket
+import struct
 import threading
 import time
-from typing import List, Optional
+from collections import deque
+from typing import Deque, List, Optional, Tuple
 
 from app.core.settings import settings
 from app.schemas.common import Fault, Heartbeat
 from app.schemas.lidar import (
+    LidarPoint,
     LidarPreviewMessage,
     LidarMode,
     LidarStatusResponse,
     LidarMapInfoResponse,
     MapOrigin,
 )
+from app.schemas.scripts import ScriptRunRequest
+from app.services.script_service import script_service
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+POINT_BYTES = 12
 
 
 class LidarService:
@@ -28,7 +37,8 @@ class LidarService:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._receiver_thread: Optional[threading.Thread] = None
         self._last_seen_ms: Optional[int] = None
         self._map_info = LidarMapInfoResponse(
             timestamp_ms=_now_ms(),
@@ -45,6 +55,12 @@ class LidarService:
         self._map_png: bytes = b""
         self._backend_state = "idle"
         self._last_error: Optional[str] = None
+        self._latest_points: List[Tuple[float, float, float]] = []
+        self._latest_point_count: int = 0
+        self._latest_truncated: bool = False
+        self._recv_timestamps_s: Deque[float] = deque()
+        self._last_launch_attempt_ms: Optional[int] = None
+        self._last_launch_kind: Optional[str] = None
 
     def start(self) -> None:
         backend = settings.lidar_backend.lower()
@@ -54,23 +70,32 @@ class LidarService:
                 self._last_error = "LiDAR backend disabled by configuration"
             return
 
-        if self._thread and self._thread.is_alive():
+        receiver_alive = self._receiver_thread and self._receiver_thread.is_alive()
+        monitor_alive = self._monitor_thread and self._monitor_thread.is_alive()
+        if receiver_alive or monitor_alive:
             return
 
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_backend,
-            name="lidar-service",
+        self._receiver_thread = threading.Thread(
+            target=self._run_receiver,
+            name="lidar-receiver",
             daemon=True,
         )
-        self._thread.start()
+        self._receiver_thread.start()
+        self._monitor_thread = threading.Thread(
+            target=self._run_backend_monitor,
+            name="lidar-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout=2.0)
-        self._thread = None
+        for thread in (self._receiver_thread, self._monitor_thread):
+            if thread and thread.is_alive():
+                thread.join(timeout=2.0)
+        self._receiver_thread = None
+        self._monitor_thread = None
 
     def _set_runtime_error(self, message: Optional[str]) -> None:
         with self._lock:
@@ -153,10 +178,21 @@ class LidarService:
             return self._map_png
 
     def get_preview_message(self, seq: int) -> LidarPreviewMessage:
+        with self._lock:
+            points = [LidarPoint(x=x, y=y, z=z) for x, y, z in self._latest_points]
+            frame_id = self._frame_id
+            points_per_sec = self._points_per_sec
+            point_count = self._latest_point_count
+            truncated = self._latest_truncated
         return LidarPreviewMessage(
             type="lidar_preview",
             seq=seq,
             timestamp_ms=_now_ms(),
+            frame_id=frame_id,
+            point_count=point_count,
+            points_per_sec=points_per_sec,
+            truncated=truncated,
+            points=points,
         )
 
     def _mark_online(self) -> None:
@@ -164,31 +200,141 @@ class LidarService:
             self._last_seen_ms = _now_ms()
             self._mode = settings.lidar_mode if settings.lidar_mode in {"2d", "3d"} else "3d"
             self._frame_id = settings.lidar_frame_id
-            self._points_per_sec = None
             self._last_error = None
             self._backend_state = "running"
 
-    def _run_backend(self) -> None:
+    def _run_backend_monitor(self) -> None:
         backend = settings.lidar_backend.lower()
         if backend in {"auto", "unitree"}:
             self._run_unitree_backend()
             return
         self._set_runtime_error(f"Unsupported LiDAR backend '{settings.lidar_backend}'")
 
+    def _run_receiver(self) -> None:
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        timeout_s = max(settings.lidar_socket_timeout_ms, 100) / 1000.0
+        server.settimeout(timeout_s)
+        try:
+            server.bind((settings.lidar_tcp_host, settings.lidar_data_port))
+            server.listen(1)
+        except OSError as exc:
+            self._set_runtime_error(
+                f"LiDAR receiver failed to bind on "
+                f"{settings.lidar_tcp_host}:{settings.lidar_data_port}: {exc}"
+            )
+            server.close()
+            return
+
+        while not self._stop_event.is_set():
+            try:
+                conn, _ = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            with conn:
+                conn.settimeout(timeout_s)
+                self._receive_points(conn)
+
+        server.close()
+
+    def _receive_points(self, conn: socket.socket) -> None:
+        buffer = b""
+        batch: List[Tuple[float, float, float]] = []
+        batch_started_ms = _now_ms()
+        max_points = max(settings.lidar_preview_max_points, 1)
+
+        while not self._stop_event.is_set():
+            try:
+                chunk = conn.recv(65536)
+            except socket.timeout:
+                if batch:
+                    self._publish_batch(batch, batch_started_ms, max_points)
+                    batch = []
+                    batch_started_ms = _now_ms()
+                continue
+            except OSError:
+                break
+
+            if not chunk:
+                break
+
+            now_ms = _now_ms()
+            buffer += chunk
+            while len(buffer) >= POINT_BYTES:
+                x, y, z = struct.unpack_from("<fff", buffer)
+                buffer = buffer[POINT_BYTES:]
+                if not all(math.isfinite(v) for v in (x, y, z)):
+                    continue
+                batch.append((float(x), float(y), float(z)))
+
+            if batch:
+                self._publish_batch(batch, now_ms, max_points)
+                batch = []
+                batch_started_ms = now_ms
+
+    def _publish_batch(
+        self,
+        batch: List[Tuple[float, float, float]],
+        timestamp_ms: int,
+        max_points: int,
+    ) -> None:
+        timestamp_s = timestamp_ms / 1000.0
+        with self._lock:
+            self._last_seen_ms = timestamp_ms
+            self._mode = settings.lidar_mode if settings.lidar_mode in {"2d", "3d"} else "3d"
+            self._frame_id = settings.lidar_frame_id
+            self._backend_state = "running"
+            self._last_error = None
+            self._latest_point_count = len(batch)
+            self._latest_truncated = len(batch) > max_points
+            self._latest_points = list(batch[:max_points])
+            self._recv_timestamps_s.append(timestamp_s)
+            cutoff = timestamp_s - 1.0
+            while self._recv_timestamps_s and self._recv_timestamps_s[0] < cutoff:
+                self._recv_timestamps_s.popleft()
+            self._points_per_sec = float(len(self._recv_timestamps_s))
+
     def _run_unitree_backend(self) -> None:
-        self._set_runtime_error("Waiting for Unitree LiDAR bridge and visualization service")
+        self._set_runtime_error("Waiting for Unitree LiDAR bridge")
         interval_s = max(settings.lidar_monitor_interval_ms, 100) / 1000.0
 
         while not self._stop_event.is_set():
-            data_ready = self._port_open(settings.lidar_tcp_host, settings.lidar_data_port)
             command_ready = self._port_open(settings.lidar_tcp_host, settings.lidar_command_port)
+            now = _now_ms()
+            with self._lock:
+                has_recent_points = (
+                    self._last_seen_ms is not None and
+                    (now - self._last_seen_ms) < settings.lidar_status_ttl_ms
+                )
+                bind_failed = self._last_error is not None and "failed to bind" in self._last_error.lower()
+                should_restart = self._last_seen_ms is not None and not has_recent_points
+                can_launch = (
+                    settings.lidar_autostart and
+                    not bind_failed and
+                    (
+                        self._last_launch_attempt_ms is None or
+                        (now - self._last_launch_attempt_ms) >= settings.lidar_autostart_cooldown_ms
+                    )
+                )
 
-            if data_ready and command_ready:
+            if bind_failed:
+                self._stop_event.wait(interval_s)
+                continue
+
+            if has_recent_points and command_ready:
+                with self._lock:
+                    self._last_launch_kind = None
                 self._mark_online()
             else:
+                if can_launch:
+                    launch_kind = "restart_lidar" if should_restart else "start_lidar"
+                    self._launch_lidar_script(launch_kind, now)
                 self._set_runtime_error(
                     self._unitree_status_message(
-                        data_ready=data_ready,
+                        has_recent_points=has_recent_points,
                         command_ready=command_ready,
                     )
                 )
@@ -202,22 +348,36 @@ class LidarService:
         except OSError:
             return False
 
-    def _unitree_status_message(self, *, data_ready: bool, command_ready: bool) -> str:
-        if not data_ready and not command_ready:
+    def _unitree_status_message(self, *, has_recent_points: bool, command_ready: bool) -> str:
+        if not has_recent_points and not command_ready:
             return (
-                f"Unitree LiDAR pipeline offline. Expected visualization on "
+                f"Unitree LiDAR pipeline offline. Expected point batches on "
                 f"{settings.lidar_tcp_host}:{settings.lidar_data_port} and bridge command server on "
                 f"{settings.lidar_tcp_host}:{settings.lidar_command_port}"
             )
-        if not data_ready:
+        if not has_recent_points:
             return (
-                f"LiDAR visualization service is not listening on "
+                f"LiDAR point stream is not active on "
                 f"{settings.lidar_tcp_host}:{settings.lidar_data_port}"
             )
         return (
             f"LiDAR bridge command server is not listening on "
             f"{settings.lidar_tcp_host}:{settings.lidar_command_port}"
         )
+
+    def _launch_lidar_script(self, name: str, attempted_ms: int) -> None:
+        try:
+            script_service.run(ScriptRunRequest(name=name))
+        except Exception as exc:
+            self._set_runtime_error(f"Failed to run {name}: {exc}")
+            with self._lock:
+                self._last_launch_attempt_ms = attempted_ms
+                self._last_launch_kind = f"{name}:failed"
+            return
+
+        with self._lock:
+            self._last_launch_attempt_ms = attempted_ms
+            self._last_launch_kind = name
 
 
 lidar_service = LidarService()

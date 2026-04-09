@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     lidar_frame_id: str = "unitree_l2"
     lidar_status_ttl_ms: int = 2000
     lidar_monitor_interval_ms: int = 500
+    lidar_socket_timeout_ms: int = 500
+    lidar_preview_max_points: int = 512
+    lidar_autostart: bool = True
+    lidar_autostart_cooldown_ms: int = 8000
     lidar_bridge_command: str = "cd ./lidar && sudo ./lidar_bridge"
     lidar_visualization_command: str = "cd ./lidar && python3 lidar_visualization.py"
     camera_backend: str = "auto"
