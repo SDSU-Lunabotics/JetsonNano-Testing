@@ -163,10 +163,7 @@ class CameraService:
             "busy",
             "device in use",
             "resource busy",
-            "camera stream failed to start",
-            "stream failed to start",
             "already opened",
-            "camera stream failed to",
         )
         return any(marker in normalized for marker in markers)
 
