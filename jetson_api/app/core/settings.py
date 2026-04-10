@@ -1,6 +1,8 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 class Settings(BaseSettings):
     app_name: str = "Jetson Lunabotics API"
@@ -38,6 +40,7 @@ class Settings(BaseSettings):
     camera_stream_interval_ms: int = 120
     camera_worker_retry_ms: int = 1000
     map_stream_interval_ms: int = 120
+    map_waypoint_command_file: str = str(REPO_ROOT / "ZEDAuto" / "zed_map_command.json")
     network_status_ttl_ms: int = 5000
     throughput_test_enabled: bool = True
     throughput_test_port: int = 5201

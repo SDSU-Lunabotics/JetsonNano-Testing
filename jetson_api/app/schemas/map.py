@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MapStreamStatus(BaseModel):
@@ -19,3 +19,15 @@ class MapFrameIngestResponse(BaseModel):
     ok: bool
     timestamp_ms: int
     frame_seq: int
+
+
+class MapWaypointClickRequest(BaseModel):
+    display_x: int = Field(ge=0)
+    display_y: int = Field(ge=0)
+    source: Optional[str] = None
+
+
+class MapWaypointCommandResponse(BaseModel):
+    ok: bool
+    timestamp_ms: int
+    command_seq: int

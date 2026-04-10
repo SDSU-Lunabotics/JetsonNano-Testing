@@ -10,6 +10,7 @@ import time
 import argparse
 import os
 import math
+import json
 import numpy as np
 
 try:
@@ -278,6 +279,7 @@ def main():
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--map-command-file", default=os.path.join(SCRIPT_DIR, "zed_map_command.json"), help="Path to UI-issued map waypoint command file")
     parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
@@ -546,6 +548,7 @@ def main():
     map_view_shift_c = 0
     frame_idx = 0
     human_person_map_points = []  # list of (row, col) for map markers
+    last_map_command_seq = 0
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -596,6 +599,37 @@ def main():
         last_path_plan_time = 0.0
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
+
+    def process_external_map_command():
+        nonlocal last_map_command_seq
+        try:
+            if not args.map_command_file or (not os.path.exists(args.map_command_file)):
+                return
+            with open(args.map_command_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return
+
+        seq = int(payload.get("seq", 0) or 0)
+        if seq <= last_map_command_seq:
+            return
+
+        cmd_type = str(payload.get("type", "") or "")
+        if cmd_type != "set_goal_click":
+            last_map_command_seq = seq
+            return
+
+        display_x = payload.get("display_x")
+        display_y = payload.get("display_y")
+        if display_x is None or display_y is None:
+            last_map_command_seq = seq
+            return
+
+        on_map_click(cv2.EVENT_LBUTTONDOWN, int(display_x), int(display_y), 0, None)
+        source = payload.get("source")
+        if source:
+            print(f"Processed external waypoint from {source} (x={display_x}, y={display_y})")
+        last_map_command_seq = seq
 
     def send_nt_command(enabled, fwd, turn, duration):
         nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
@@ -1563,6 +1597,7 @@ def main():
                         )
                     if map_publisher is not None:
                         map_publisher.push_frame(display_map_vis)
+                    process_external_map_command()
 
                 # Always show the map (even if the image frame is missing)
                 if not args.no_gui:
