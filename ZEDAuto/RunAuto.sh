@@ -117,6 +117,9 @@ if [[ -n "${STREAM_IP:-}" ]]; then
   cmd+=(--stream-port "${STREAM_PORT:-5600}")
   cmd+=(--stream-view "${STREAM_VIEW:-both}")
 fi
+if [[ -n "${MAP_COMMAND_FILE:-}" ]]; then
+  cmd+=(--map-command-file "${MAP_COMMAND_FILE}")
+fi
 if [[ -n "${CAMERA_HEARTBEAT_URL:-}" ]]; then
   cmd+=(--camera-heartbeat-url "${CAMERA_HEARTBEAT_URL}")
   cmd+=(--camera-heartbeat-interval-ms "${CAMERA_HEARTBEAT_INTERVAL_MS:-1000}")

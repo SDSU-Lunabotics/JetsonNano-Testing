@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import time
 from typing import Iterator, Optional
 
@@ -5,7 +7,12 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
-from app.schemas.map import MapFrameIngestResponse, MapStreamStatus
+from app.schemas.map import (
+    MapFrameIngestResponse,
+    MapStreamStatus,
+    MapWaypointClickRequest,
+    MapWaypointCommandResponse,
+)
 from app.services.map_service import map_service
 
 router = APIRouter(prefix="/map", tags=["map"])
@@ -19,6 +26,14 @@ _ONE_PX_JPEG = (
     b"\xff\xc4\x00\x14\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     b"\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9"
 )
+
+
+def _write_waypoint_command(command: dict) -> None:
+    target = Path(settings.map_waypoint_command_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(f"{target.suffix}.tmp")
+    tmp.write_text(json.dumps(command), encoding="utf-8")
+    tmp.replace(target)
 
 
 @router.get("/status", response_model=MapStreamStatus)
@@ -75,4 +90,24 @@ async def post_map_frame(
         ok=True,
         timestamp_ms=int(time.time() * 1000),
         frame_seq=frame_seq,
+    )
+
+
+@router.post("/waypoint", response_model=MapWaypointCommandResponse)
+def post_waypoint(req: MapWaypointClickRequest) -> MapWaypointCommandResponse:
+    command_seq = int(time.time() * 1000)
+    _write_waypoint_command(
+        {
+            "seq": command_seq,
+            "type": "set_goal_click",
+            "display_x": int(req.display_x),
+            "display_y": int(req.display_y),
+            "source": req.source,
+            "timestamp_ms": command_seq,
+        }
+    )
+    return MapWaypointCommandResponse(
+        ok=True,
+        timestamp_ms=command_seq,
+        command_seq=command_seq,
     )
