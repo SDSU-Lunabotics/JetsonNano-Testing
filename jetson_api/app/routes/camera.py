@@ -1,14 +1,15 @@
 import asyncio
 import time
-from typing import Iterator
+from typing import Iterator, Optional
 
-from fastapi import APIRouter, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.camera import (
     CameraHeartbeatRequest,
     CameraHeartbeatResponse,
+    CameraFrameIngestResponse,
     CameraModeRequest,
     CameraModeResponse,
     CameraWsMessage,
@@ -120,4 +121,24 @@ def post_camera_heartbeat(req: CameraHeartbeatRequest) -> CameraHeartbeatRespons
     return CameraHeartbeatResponse(
         ok=True,
         timestamp_ms=int(time.time() * 1000),
+    )
+
+
+@router.post("/frame", response_model=CameraFrameIngestResponse)
+async def post_camera_frame(
+    request: Request,
+    source: str = Query(default="zed_ground_wall"),
+    timestamp_ms: Optional[int] = Query(default=None, ge=0),
+) -> CameraFrameIngestResponse:
+    payload = await request.body()
+    frame_seq = camera_service.ingest_external_frame(
+        payload,
+        backend="zed",
+        source=source,
+        source_timestamp_ms=timestamp_ms,
+    )
+    return CameraFrameIngestResponse(
+        ok=True,
+        timestamp_ms=int(time.time() * 1000),
+        frame_seq=frame_seq,
     )
