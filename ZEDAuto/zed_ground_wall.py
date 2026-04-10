@@ -367,6 +367,9 @@ def main():
         print("  sudo apt install -y python3-opencv")
     elif args.no_gui:
         print("GUI disabled (--no-gui): map/camera windows will not open.")
+    elif not os.environ.get("DISPLAY"):
+        args.no_gui = True
+        print("GUI auto-disabled: DISPLAY is not set, running headless.")
     else:
         print("GUI enabled: opening camera/map windows.")
 
