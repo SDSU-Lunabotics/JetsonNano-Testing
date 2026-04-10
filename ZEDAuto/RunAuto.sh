@@ -117,6 +117,12 @@ if [[ -n "${STREAM_IP:-}" ]]; then
   cmd+=(--stream-port "${STREAM_PORT:-5600}")
   cmd+=(--stream-view "${STREAM_VIEW:-both}")
 fi
+if [[ -n "${CAMERA_HEARTBEAT_URL:-}" ]]; then
+  cmd+=(--camera-heartbeat-url "${CAMERA_HEARTBEAT_URL}")
+  cmd+=(--camera-heartbeat-interval-ms "${CAMERA_HEARTBEAT_INTERVAL_MS:-1000}")
+  cmd+=(--camera-heartbeat-timeout-ms "${CAMERA_HEARTBEAT_TIMEOUT_MS:-250}")
+  cmd+=(--camera-heartbeat-source "${CAMERA_HEARTBEAT_SOURCE:-zed_ground_wall}")
+fi
 if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
   cmd+=(--map-publish-url "${MAP_PUBLISH_URL}")
   cmd+=(--map-publish-interval-ms "${MAP_PUBLISH_INTERVAL_MS:-120}")

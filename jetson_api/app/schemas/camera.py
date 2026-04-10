@@ -20,6 +20,18 @@ class CameraModeResponse(BaseModel):
     timestamp_ms: int
 
 
+class CameraHeartbeatRequest(BaseModel):
+    backend: CameraBackend
+    source: Optional[str] = None
+    streaming: bool = False
+    timestamp_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class CameraHeartbeatResponse(BaseModel):
+    ok: bool
+    timestamp_ms: int
+
+
 class CameraStatus(BaseModel):
     connected: bool
     backend: Optional[CameraBackend] = None
