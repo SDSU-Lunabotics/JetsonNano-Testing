@@ -37,6 +37,7 @@ import heatmap_utils
 import zed_utils
 import viewer_utils
 import stream_utils
+import map_publish_client
 
 try:
     from networktables import NetworkTables
@@ -275,6 +276,11 @@ def main():
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--map-publish-url", default=None, help="HTTP endpoint that receives JPEG occupancy map frames")
+    parser.add_argument("--map-publish-interval-ms", type=int, default=120, help="Min interval between map frame publishes")
+    parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
+    parser.add_argument("--map-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published occupancy map")
+    parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     parser.add_argument(
         "--overlay-red-only",
@@ -358,6 +364,20 @@ def main():
         print("GUI disabled (--no-gui): map/camera windows will not open.")
     else:
         print("GUI enabled: opening camera/map windows.")
+
+    map_publisher = None
+    if args.map_publish_url:
+        if not HAS_CV2:
+            print("Map publisher requested, but OpenCV is unavailable; disabling map publishing.")
+        else:
+            map_publisher = map_publish_client.HttpMapPublisher(
+                args.map_publish_url,
+                interval_ms=args.map_publish_interval_ms,
+                jpeg_quality=args.map_publish_jpeg_quality,
+                timeout_ms=args.map_publish_timeout_ms,
+                source=args.map_publish_source,
+            )
+            print(f"Map publish enabled: {args.map_publish_url}")
 
     print("Running. Press Ctrl+C to exit.")
     mapping_mode = "complex" if args.complex else "simple"
@@ -1482,34 +1502,39 @@ def main():
                         )
 
                     cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                display_map_vis = None
+                if map_vis is not None:
+                    display_map_vis = map_vis.copy()
+                    for pr, pc_col, is_p in human_person_map_points:
+                        if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
+                            color = (0, 0, 255) if is_p else (0, 200, 255)
+                            cv2.circle(display_map_vis, (pc_col, pr), 3, color, -1)
+                            if is_p:
+                                cv2.circle(display_map_vis, (pc_col, pr), 6, color, 1)
+                    if args.map_scale > 1:
+                        display_map_vis = cv2.resize(
+                            display_map_vis,
+                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    if map_publisher is not None:
+                        map_publisher.push_frame(display_map_vis)
+
                 # Always show the map (even if the image frame is missing)
-                    if map_vis is not None:
-                        # Draw detected persons on the map
-                        for pr, pc_col, is_p in human_person_map_points:
-                            if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
-                                color = (0, 0, 255) if is_p else (0, 200, 255)
-                                cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
-                                if is_p:
-                                    cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
-                        if args.map_scale > 1:
-                            map_vis = cv2.resize(
-                                map_vis,
-                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
-                                interpolation=cv2.INTER_NEAREST,
-                            )
-                        cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                    if display_map_vis is not None:
+                        cv2.imshow("ZED Occupancy Map (XZ)", display_map_vis)
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
                             map_window_ready = True
-                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
-                        heatmap_show = heatmap_vis
-                        if args.map_scale > 1:
-                            heatmap_show = cv2.resize(
-                                heatmap_show,
-                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
-                                interpolation=cv2.INTER_NEAREST,
-                            )
-                        cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
+                if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                    heatmap_show = heatmap_vis
+                    if args.map_scale > 1:
+                        heatmap_show = cv2.resize(
+                            heatmap_show,
+                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
@@ -1568,6 +1593,8 @@ def main():
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
+    if map_publisher is not None:
+        map_publisher.stop()
     ros2_utils.shutdown_ros2(node)
 
 

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     camera_snapshot_cache_ms: int = 200
     camera_stream_interval_ms: int = 120
     camera_worker_retry_ms: int = 1000
+    map_stream_interval_ms: int = 120
     network_status_ttl_ms: int = 5000
     throughput_test_enabled: bool = True
     throughput_test_port: int = 5201
