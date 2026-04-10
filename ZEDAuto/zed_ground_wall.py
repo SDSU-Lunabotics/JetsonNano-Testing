@@ -1521,7 +1521,8 @@ def main():
                             cv2.LINE_AA,
                         )
 
-                    cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                    if not args.no_gui:
+                        cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 display_map_vis = None
                 if map_vis is not None:
                     display_map_vis = map_vis.copy()
@@ -1541,66 +1542,67 @@ def main():
                         map_publisher.push_frame(display_map_vis)
 
                 # Always show the map (even if the image frame is missing)
+                if not args.no_gui:
                     if display_map_vis is not None:
                         cv2.imshow("ZED Occupancy Map (XZ)", display_map_vis)
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
                             map_window_ready = True
-                if args.heatmap and args.heatmap_window and heatmap_vis is not None:
-                    heatmap_show = heatmap_vis
-                    if args.map_scale > 1:
-                        heatmap_show = cv2.resize(
-                            heatmap_show,
-                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
-                            interpolation=cv2.INTER_NEAREST,
-                        )
-                    cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
-                cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
-                if key == ord("m"):
-                    manual_mode = not manual_mode
+                    if args.heatmap and args.heatmap_window and heatmap_vis is not None:
+                        heatmap_show = heatmap_vis
+                        if args.map_scale > 1:
+                            heatmap_show = cv2.resize(
+                                heatmap_show,
+                                (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
+                    cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
+                    if key == ord("m"):
+                        manual_mode = not manual_mode
+                        if manual_mode:
+                            # Entering manual mode pauses auto navigation but keeps the last goal.
+                            emergency_stop = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                            print("Manual drive mode: ON (auto paused)")
+                        else:
+                            print("Manual drive mode: OFF (auto resumed)")
+                    if key == ord("c"):
+                        follow_rover_map = not follow_rover_map
+                        state = "ON" if follow_rover_map else "OFF"
+                        print(f"Map follow mode: {state}")
+                    if key == ord(" "):
+                        emergency_stop = True
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                    now = time.time()
+                    if key == ord("w"):
+                        manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                        last_w_time = now
+                    if key == ord("s"):
+                        manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                        last_s_time = now
+                    if key == ord("a"):
+                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                        last_a_time = now
+                    if key == ord("d"):
+                        manual_turn = max(0.0, min(1.0, args.drive_speed))
+                        last_d_time = now
+                    if key == ord("x"):
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                    # Hold-to-move: decay to 0 if key not pressed recently.
                     if manual_mode:
-                        # Entering manual mode pauses auto navigation but keeps the last goal.
-                        emergency_stop = False
-                        manual_fwd = 0.0
-                        manual_turn = 0.0
-                        print("Manual drive mode: ON (auto paused)")
-                    else:
-                        print("Manual drive mode: OFF (auto resumed)")
-                if key == ord("c"):
-                    follow_rover_map = not follow_rover_map
-                    state = "ON" if follow_rover_map else "OFF"
-                    print(f"Map follow mode: {state}")
-                if key == ord(" "):
-                    emergency_stop = True
-                    manual_fwd = 0.0
-                    manual_turn = 0.0
-                now = time.time()
-                if key == ord("w"):
-                    manual_fwd = max(0.0, min(1.0, args.drive_speed))
-                    last_w_time = now
-                if key == ord("s"):
-                    manual_fwd = -max(0.0, min(1.0, args.drive_speed))
-                    last_s_time = now
-                if key == ord("a"):
-                    manual_turn = -max(0.0, min(1.0, args.drive_speed))
-                    last_a_time = now
-                if key == ord("d"):
-                    manual_turn = max(0.0, min(1.0, args.drive_speed))
-                    last_d_time = now
-                if key == ord("x"):
-                    manual_fwd = 0.0
-                    manual_turn = 0.0
-                # Hold-to-move: decay to 0 if key not pressed recently.
-                if manual_mode:
-                    if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
-                        manual_fwd = 0.0
-                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
-                        manual_turn = 0.0
-        else:
-            time.sleep(0.01)
+                        if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                            manual_fwd = 0.0
+                        if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
+                            manual_turn = 0.0
+                else:
+                    time.sleep(0.01)
 
     if human_detect_available:
         try:
