@@ -6,7 +6,13 @@ from fastapi import APIRouter, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
-from app.schemas.camera import CameraModeRequest, CameraModeResponse, CameraWsMessage
+from app.schemas.camera import (
+    CameraHeartbeatRequest,
+    CameraHeartbeatResponse,
+    CameraModeRequest,
+    CameraModeResponse,
+    CameraWsMessage,
+)
 from app.services.camera_service import camera_service
 
 router = APIRouter(prefix="/camera", tags=["camera"])
@@ -106,3 +112,12 @@ async def ws_camera(websocket: WebSocket) -> None:
 @router.post("/mode", response_model=CameraModeResponse)
 def set_camera_mode(req: CameraModeRequest) -> CameraModeResponse:
     return camera_service.set_mode(req)
+
+
+@router.post("/heartbeat", response_model=CameraHeartbeatResponse)
+def post_camera_heartbeat(req: CameraHeartbeatRequest) -> CameraHeartbeatResponse:
+    camera_service.update_external_status(req)
+    return CameraHeartbeatResponse(
+        ok=True,
+        timestamp_ms=int(time.time() * 1000),
+    )

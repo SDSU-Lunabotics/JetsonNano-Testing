@@ -37,6 +37,7 @@ import heatmap_utils
 import zed_utils
 import viewer_utils
 import stream_utils
+import camera_status_client
 import map_publish_client
 
 try:
@@ -276,6 +277,10 @@ def main():
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-source", default="zed_ground_wall", help="Source label attached to camera-owner heartbeats")
     parser.add_argument("--map-publish-url", default=None, help="HTTP endpoint that receives JPEG occupancy map frames")
     parser.add_argument("--map-publish-interval-ms", type=int, default=120, help="Min interval between map frame publishes")
     parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
@@ -364,6 +369,18 @@ def main():
         print("GUI disabled (--no-gui): map/camera windows will not open.")
     else:
         print("GUI enabled: opening camera/map windows.")
+
+    camera_heartbeat = None
+    if args.camera_heartbeat_url:
+        camera_heartbeat = camera_status_client.CameraStatusHeartbeat(
+            args.camera_heartbeat_url,
+            backend="zed",
+            source=args.camera_heartbeat_source,
+            interval_ms=args.camera_heartbeat_interval_ms,
+            timeout_ms=args.camera_heartbeat_timeout_ms,
+            streaming=False,
+        )
+        print(f"Camera heartbeat enabled: {args.camera_heartbeat_url}")
 
     map_publisher = None
     if args.map_publish_url:
@@ -1593,6 +1610,8 @@ def main():
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
+    if camera_heartbeat is not None:
+        camera_heartbeat.stop()
     if map_publisher is not None:
         map_publisher.stop()
     ros2_utils.shutdown_ros2(node)

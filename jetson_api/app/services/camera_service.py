@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 from app.core.settings import settings
 from app.schemas.camera import (
     CameraBackend,
+    CameraHeartbeatRequest,
     CameraMode,
     CameraModeRequest,
     CameraModeResponse,
@@ -50,6 +51,11 @@ class CameraService:
         self._latest_jpeg: bytes = b""
         self._latest_png: bytes = b""
         self._latest_png_seq = 0
+        self._external_last_seen_ms: Optional[int] = None
+        self._external_backend: Optional[CameraBackend] = None
+        self._external_streaming = False
+        self._external_source: Optional[str] = None
+        self._external_timestamp_ms: Optional[int] = None
 
     def start(self) -> None:
         with self._state_lock:
@@ -161,11 +167,42 @@ class CameraService:
         normalized = error.lower().replace("_", " ")
         markers = (
             "busy",
+            "in use",
+            "already in use",
             "device in use",
+            "device or resource busy",
             "resource busy",
             "already opened",
+            "already used",
+            "exclusive access",
         )
         return any(marker in normalized for marker in markers)
+
+    def _has_recent_external_status(self, now_ms: Optional[int] = None) -> bool:
+        with self._state_lock:
+            if self._external_last_seen_ms is None:
+                return False
+            current_ms = _now_ms() if now_ms is None else now_ms
+            return (current_ms - self._external_last_seen_ms) < self._recent_activity_grace_ms
+
+    def update_external_status(self, req: CameraHeartbeatRequest) -> None:
+        seen_ms = _now_ms()
+        with self._frame_condition:
+            self._external_last_seen_ms = seen_ms
+            self._external_backend = req.backend
+            self._external_streaming = bool(req.streaming)
+            self._external_source = req.source
+            self._external_timestamp_ms = req.timestamp_ms
+
+            # If another process owns the camera, reflect that in status immediately.
+            if self._last_frame_ms is None or (seen_ms - self._last_frame_ms) >= settings.camera_status_ttl_ms:
+                self._connected = True
+                self._backend = req.backend
+                self._streaming = False
+                self._last_frame_ms = req.timestamp_ms or seen_ms
+                source = f" by {req.source}" if req.source else ""
+                self._last_error = f"Camera is active{source}; API does not own the device"
+            self._frame_condition.notify_all()
 
     def _has_recent_activity(self) -> bool:
         with self._state_lock:
@@ -243,6 +280,19 @@ class CameraService:
                 self._connected = True
                 self._streaming = True
                 self._last_error = None
+            return
+
+        if self._has_recent_external_status(now):
+            with self._state_lock:
+                self._connected = True
+                self._backend = self._external_backend
+                self._streaming = False
+                if self._external_timestamp_ms is not None:
+                    self._last_frame_ms = self._external_timestamp_ms
+                elif self._external_last_seen_ms is not None:
+                    self._last_frame_ms = self._external_last_seen_ms
+                source = f" by {self._external_source}" if self._external_source else ""
+                self._last_error = f"Camera is active{source}; API does not own the device"
             return
 
         backend = settings.camera_backend.lower()
@@ -353,6 +403,20 @@ class CameraService:
 
     def _capture_loop(self) -> None:
         while not self._stop_event.is_set():
+            if self._has_recent_external_status():
+                with self._state_lock:
+                    self._connected = True
+                    self._backend = self._external_backend
+                    self._streaming = False
+                    if self._external_timestamp_ms is not None:
+                        self._last_frame_ms = self._external_timestamp_ms
+                    elif self._external_last_seen_ms is not None:
+                        self._last_frame_ms = self._external_last_seen_ms
+                    source = f" by {self._external_source}" if self._external_source else ""
+                    self._last_error = f"Camera is active{source}; API does not own the device"
+                time.sleep(max(settings.camera_worker_retry_ms, 100) / 1000.0)
+                continue
+
             backend = settings.camera_backend.lower()
             candidates = []
             if backend == "auto":
