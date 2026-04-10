@@ -17,6 +17,7 @@ ScriptName = Literal[
     "restart_camera",
     "capture_picture",
     "capture_video",
+    "test_call",
 ]
 
 

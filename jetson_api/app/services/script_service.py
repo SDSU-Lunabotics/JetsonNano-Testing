@@ -50,6 +50,7 @@ class ScriptService:
             "restart_camera": self._script_dir / "restart_camera.sh",
             "capture_picture": self._script_dir / "capture_picture.sh",
             "capture_video": self._script_dir / "capture_video.sh",
+            "test_call": self._script_dir / "test_call.sh",
         }
 
     def _watch_process(self, run_id: str, proc: subprocess.Popen) -> None:
