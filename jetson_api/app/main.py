@@ -14,7 +14,8 @@ app.include_router(api_router)
 
 @app.on_event("startup")
 def startup() -> None:
-    camera_service.start()
+    if settings.camera_autostart:
+        camera_service.start()
     lidar_service.start()
 
 

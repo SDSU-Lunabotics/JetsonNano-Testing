@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     lidar_autostart_cooldown_ms: int = 8000
     lidar_bridge_command: str = "cd ../lidar && sudo ./lidar_bridge"
     lidar_visualization_command: str = "cd ../lidar && python3 lidar_rover.py"
+    camera_autostart: bool = False
     camera_backend: str = "auto"
     camera_device_index: int = 0
     camera_capture_fps: int = 15
