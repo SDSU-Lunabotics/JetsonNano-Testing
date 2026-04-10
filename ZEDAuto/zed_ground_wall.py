@@ -38,6 +38,7 @@ import zed_utils
 import viewer_utils
 import stream_utils
 import camera_status_client
+import camera_publish_client
 import map_publish_client
 
 try:
@@ -281,6 +282,11 @@ def main():
     parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-source", default="zed_ground_wall", help="Source label attached to camera-owner heartbeats")
+    parser.add_argument("--camera-publish-url", default=None, help="HTTP endpoint that receives JPEG camera view frames")
+    parser.add_argument("--camera-publish-interval-ms", type=int, default=120, help="Min interval between camera frame publishes")
+    parser.add_argument("--camera-publish-jpeg-quality", type=int, default=75, help="JPEG quality for published camera frames")
+    parser.add_argument("--camera-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published camera frames")
+    parser.add_argument("--camera-publish-source", default="zed_ground_wall", help="Source label attached to published camera frames")
     parser.add_argument("--map-publish-url", default=None, help="HTTP endpoint that receives JPEG occupancy map frames")
     parser.add_argument("--map-publish-interval-ms", type=int, default=120, help="Min interval between map frame publishes")
     parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
@@ -381,9 +387,23 @@ def main():
             source=args.camera_heartbeat_source,
             interval_ms=args.camera_heartbeat_interval_ms,
             timeout_ms=args.camera_heartbeat_timeout_ms,
-            streaming=False,
+            streaming=bool(args.camera_publish_url),
         )
         print(f"Camera heartbeat enabled: {args.camera_heartbeat_url}")
+
+    camera_publisher = None
+    if args.camera_publish_url:
+        if not HAS_CV2:
+            print("Camera publisher requested, but OpenCV is unavailable; disabling camera publishing.")
+        else:
+            camera_publisher = camera_publish_client.HttpCameraPublisher(
+                args.camera_publish_url,
+                interval_ms=args.camera_publish_interval_ms,
+                jpeg_quality=args.camera_publish_jpeg_quality,
+                timeout_ms=args.camera_publish_timeout_ms,
+                source=args.camera_publish_source,
+            )
+            print(f"Camera publish enabled: {args.camera_publish_url}")
 
     map_publisher = None
     if args.map_publish_url:
@@ -1521,6 +1541,9 @@ def main():
                             cv2.LINE_AA,
                         )
 
+                    if camera_publisher is not None:
+                        camera_publisher.push_frame(vis)
+
                     if not args.no_gui:
                         cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
                 display_map_vis = None
@@ -1617,6 +1640,8 @@ def main():
         mesh_viewer.close()
     if camera_heartbeat is not None:
         camera_heartbeat.stop()
+    if camera_publisher is not None:
+        camera_publisher.stop()
     if map_publisher is not None:
         map_publisher.stop()
     ros2_utils.shutdown_ros2(node)

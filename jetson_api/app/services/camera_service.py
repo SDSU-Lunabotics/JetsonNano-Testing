@@ -4,6 +4,8 @@ import threading
 import time
 from typing import Optional, Tuple
 
+import numpy as np
+
 from app.core.settings import settings
 from app.schemas.camera import (
     CameraBackend,
@@ -57,6 +59,10 @@ class CameraService:
         self._external_source: Optional[str] = None
         self._external_timestamp_ms: Optional[int] = None
 
+    def _maybe_start_worker(self) -> None:
+        if settings.camera_autostart:
+            self.start()
+
     def start(self) -> None:
         with self._state_lock:
             if self._worker_thread is not None and self._worker_thread.is_alive():
@@ -98,7 +104,7 @@ class CameraService:
             self._mode_version += 1
             self._frame_condition.notify_all()
 
-        self.start()
+        self._maybe_start_worker()
 
         applied = CameraModeRequest(
             mode=req.mode,
@@ -198,11 +204,51 @@ class CameraService:
             if self._last_frame_ms is None or (seen_ms - self._last_frame_ms) >= settings.camera_status_ttl_ms:
                 self._connected = True
                 self._backend = req.backend
-                self._streaming = False
+                self._streaming = bool(req.streaming)
                 self._last_frame_ms = req.timestamp_ms or seen_ms
                 source = f" by {req.source}" if req.source else ""
                 self._last_error = f"Camera is active{source}; API does not own the device"
             self._frame_condition.notify_all()
+
+    def ingest_external_frame(
+        self,
+        frame_bytes: bytes,
+        *,
+        backend: CameraBackend,
+        source: Optional[str] = None,
+        source_timestamp_ms: Optional[int] = None,
+    ) -> int:
+        if not frame_bytes:
+            raise ValueError("Camera frame payload is empty")
+
+        raw_frame = None
+        try:
+            import cv2  # type: ignore
+
+            encoded = np.frombuffer(frame_bytes, dtype=np.uint8)
+            raw_frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        except Exception:
+            raw_frame = None
+
+        now = _now_ms()
+        with self._frame_condition:
+            self._latest_jpeg = frame_bytes
+            self._latest_raw_frame = None if raw_frame is None else raw_frame.copy()
+            self._latest_png = b""
+            self._latest_png_seq = 0
+            self._last_frame_ms = source_timestamp_ms or now
+            self._last_frame_seq += 1
+            self._connected = True
+            self._streaming = True
+            self._backend = backend
+            self._last_error = None
+            self._external_last_seen_ms = now
+            self._external_backend = backend
+            self._external_streaming = True
+            self._external_source = source
+            self._external_timestamp_ms = source_timestamp_ms
+            self._frame_condition.notify_all()
+            return self._last_frame_seq
 
     def _has_recent_activity(self) -> bool:
         with self._state_lock:
@@ -269,7 +315,7 @@ class CameraService:
             cap.release()
 
     def refresh_status(self, force: bool = False) -> None:
-        self.start()
+        self._maybe_start_worker()
         now = _now_ms()
         if not force and (now - self._last_status_check_ms) < settings.camera_status_ttl_ms:
             return
@@ -286,7 +332,7 @@ class CameraService:
             with self._state_lock:
                 self._connected = True
                 self._backend = self._external_backend
-                self._streaming = False
+                self._streaming = bool(self._external_streaming)
                 if self._external_timestamp_ms is not None:
                     self._last_frame_ms = self._external_timestamp_ms
                 elif self._external_last_seen_ms is not None:
@@ -325,6 +371,8 @@ class CameraService:
                 mode=self._mode,
                 snapshot_interval_ms=self._snapshot_interval_ms,
                 last_frame_ms=self._last_frame_ms,
+                source=self._external_source,
+                source_timestamp_ms=self._external_timestamp_ms,
                 error=self._last_error,
             )
 
@@ -335,7 +383,7 @@ class CameraService:
             return self._latest_raw_frame.copy(), self._last_frame_seq
 
     def get_snapshot_bytes(self) -> bytes:
-        self.start()
+        self._maybe_start_worker()
         raw_frame, frame_seq = self._get_latest_raw_frame_copy()
         if raw_frame is None:
             return b""
@@ -363,7 +411,7 @@ class CameraService:
             return self._latest_png
 
     def get_latest_jpeg_bytes(self) -> bytes:
-        self.start()
+        self._maybe_start_worker()
         with self._state_lock:
             return self._latest_jpeg
 
@@ -373,7 +421,7 @@ class CameraService:
         timeout_ms: Optional[int] = None,
         image_format: str = "jpeg",
     ) -> Tuple[int, bytes]:
-        self.start()
+        self._maybe_start_worker()
         timeout_s = None if timeout_ms is None else max(timeout_ms, 0) / 1000.0
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
 

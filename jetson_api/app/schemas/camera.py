@@ -4,7 +4,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
-CameraMode = Literal["manual", "snapshot"]
+CameraMode = Literal["manual", "snapshot", "stream"]
 CameraBackend = Literal["auto", "zed", "opencv"]
 CameraStreamEvent = Literal["status", "mode_changed", "error"]
 
@@ -32,6 +32,12 @@ class CameraHeartbeatResponse(BaseModel):
     timestamp_ms: int
 
 
+class CameraFrameIngestResponse(BaseModel):
+    ok: bool
+    timestamp_ms: int
+    frame_seq: int
+
+
 class CameraStatus(BaseModel):
     connected: bool
     backend: Optional[CameraBackend] = None
@@ -39,6 +45,8 @@ class CameraStatus(BaseModel):
     mode: CameraMode
     snapshot_interval_ms: Optional[int] = None
     last_frame_ms: Optional[int] = None
+    source: Optional[str] = None
+    source_timestamp_ms: Optional[int] = None
     error: Optional[str] = None
 
 
