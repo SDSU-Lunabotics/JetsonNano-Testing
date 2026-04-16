@@ -161,8 +161,10 @@ class OccupancyMap:
             # Keep holes informational (blue) without making them non-traversable by
             # degrading free-space confidence. Obstacle evidence still controls blocking.
 
-    def render(self):
-        # Visualize: green = free, red = occupied, blue = holes, black = unknown.
+    def render(self, whole_mode=False):
+        # Visualize: white = mapped/known ground, red = confirmed obstacle, blue = hole,
+        # black = unknown. When whole_mode is enabled, the map renders all known ground
+        # as white and highlights only well-established obstacle/hole evidence.
         free_vis = np.log1p(self.free_counts)
         occ_vis = np.log1p(self.occ_counts)
         hole_vis = np.log1p(self.hole_counts)
@@ -175,37 +177,47 @@ class OccupancyMap:
             occ_vis = occ_vis / omax
         if hmax > 0:
             hole_vis = hole_vis / hmax
-        map_vis = np.zeros((self.grid_h, self.grid_w, 3), dtype=np.uint8)
-        map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
-        map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
-        map_vis[:, :, 0] = (hole_vis * 255.0).astype(np.uint8)
 
-        # Add a light-green "clearance halo" near strong free-space evidence.
-        # This makes near-empty fringe cells easier to read and tones down weak,
-        # likely-spurious red speckle without hiding strong obstacles.
+        map_vis = np.zeros((self.grid_h, self.grid_w, 3), dtype=np.uint8)
+
+        known = self.known_mask(min_evidence=1.0)
+        if np.any(known):
+            if whole_mode:
+                map_vis[known] = (240, 240, 240)
+            else:
+                free_shade = (free_vis[known] * 160.0 + 80.0).astype(np.uint8)
+                map_vis[known, 1] = free_shade
+                map_vis[known, 0] = np.minimum(map_vis[known, 0], (free_shade // 2).astype(np.uint8))
+                map_vis[known, 2] = np.minimum(map_vis[known, 2], (free_shade // 2).astype(np.uint8))
+
+        # Show red obstacles only when we have strong evidence.
+        strong_occ = self.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
+        if np.any(strong_occ):
+            occ_intensity = (occ_vis[strong_occ] * 255.0).astype(np.uint8)
+            occ_intensity = np.maximum(occ_intensity, 120)
+            map_vis[strong_occ, 2] = occ_intensity
+            map_vis[strong_occ, 1] = np.minimum(map_vis[strong_occ, 1], 40)
+            map_vis[strong_occ, 0] = np.minimum(map_vis[strong_occ, 0], 40)
+
+        # Show holes as blue when there is hole evidence.
+        hole_cells = (self.hole_counts > 0) & ~strong_occ
+        if np.any(hole_cells):
+            hole_intensity = (hole_vis[hole_cells] * 255.0).astype(np.uint8)
+            hole_intensity = np.maximum(hole_intensity, 80)
+            map_vis[hole_cells, 0] = hole_intensity
+            map_vis[hole_cells, 1] = np.minimum(map_vis[hole_cells, 1], 140)
+            map_vis[hole_cells, 2] = np.minimum(map_vis[hole_cells, 2], 60)
+
+        # Gentle halo around confirmed free-space to improve readability.
         confirmed_free = self.free_counts >= self.free_confirm_hits
         if np.any(confirmed_free):
             near_confirmed_free = inflate_mask(confirmed_free, radius_cells=1)
             evidence = self.free_counts + self.occ_counts + self.hole_counts
 
-            # Unknown cells neighboring confirmed free-space.
             halo_unknown = near_confirmed_free & (evidence < 1.0)
             if np.any(halo_unknown):
-                map_vis[halo_unknown, 1] = np.maximum(map_vis[halo_unknown, 1], 120)
-                map_vis[halo_unknown, 2] = np.minimum(map_vis[halo_unknown, 2], 30)
-                map_vis[halo_unknown, 0] = np.minimum(map_vis[halo_unknown, 0], 30)
+                map_vis[halo_unknown] = (220, 220, 220)
 
-            # Weak occupied evidence near free-space: tint toward green.
-            weak_occ_near_free = (
-                near_confirmed_free
-                & (self.occ_counts > 0.0)
-                & (self.occ_counts < 1.5)
-                & (self.occ_counts <= (self.free_counts * 1.1))
-            )
-            if np.any(weak_occ_near_free):
-                map_vis[weak_occ_near_free, 1] = np.maximum(map_vis[weak_occ_near_free, 1], 100)
-                map_vis[weak_occ_near_free, 2] = (map_vis[weak_occ_near_free, 2] * 0.45).astype(np.uint8)
-                map_vis[weak_occ_near_free, 0] = np.minimum(map_vis[weak_occ_near_free, 0], 40)
         return map_vis
 
     def world_to_grid(self, x, z):

@@ -467,6 +467,8 @@ def main():
     map_window_ready = False
     status_window_ready = False
     status_button_rects = {}
+    disable_holes = bool(args.disable_holes)
+    whole_map_enabled = False
     emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
@@ -563,8 +565,23 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def on_status_click(event, x, y, flags, param):
+        nonlocal disable_holes, whole_map_enabled, map_scale_live
         if event != cv2.EVENT_LBUTTONDOWN:
             return
+        rect = status_button_rects.get("zoom_in")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                map_scale_live = min(12, map_scale_live + 1)
+                print(f"Map zoom: x{map_scale_live}")
+                return
+        rect = status_button_rects.get("zoom_out")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                map_scale_live = max(1, map_scale_live - 1)
+                print(f"Map zoom: x{map_scale_live}")
+                return
         button_enabled = mining.state not in (
             auto_mining.MiningState.PLAN_SWEEP,
             auto_mining.MiningState.NAVIGATE_DIG,
@@ -589,6 +606,20 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 mining.handle_key(ord("d"))
+                return
+        rect = status_button_rects.get("whole")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                whole_map_enabled = not whole_map_enabled
+                print(f"Whole-map mode {'ENABLED' if whole_map_enabled else 'DISABLED'}")
+                return
+        rect = status_button_rects.get("holes")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                disable_holes = not disable_holes
+                print(f"Hole detection {'DISABLED' if disable_holes else 'ENABLED'}")
                 return
 
     def send_nt_command(enabled, fwd, turn, duration):
@@ -805,19 +836,26 @@ def main():
         else:
             put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 310, (180, 255, 220))
 
+        put_line(f"Map zoom: x{map_scale_live}", 334, (220, 240, 255))
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            334,
+            358,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 358)
-        draw_axis("Turn", status_cmd_turn, 380)
+        draw_axis("Forward", status_cmd_fwd, 382)
+        draw_axis("Turn", status_cmd_turn, 404)
 
         button_h = 42
-        button_w = 180
-        button_y0 = panel_h - 20 - button_h
-        excav_rect = (16, button_y0, 16 + button_w, button_y0 + button_h)
-        deposit_rect = (panel_w - 16 - button_w, button_y0, panel_w - 16, button_y0 + button_h)
+        button_w = 160
+        gap = 20
+        bottom_y = panel_h - 20 - button_h
+        top_y = bottom_y - button_h - 10
+        excav_rect = (16, top_y, 16 + button_w, top_y + button_h)
+        deposit_rect = (16 + button_w + gap, top_y, 16 + 2 * button_w + gap, top_y + button_h)
+        whole_rect = (16 + 2 * (button_w + gap), top_y, 16 + 3 * button_w + 2 * gap, top_y + button_h)
+        holes_rect = (16, bottom_y, 16 + button_w, bottom_y + button_h)
+        zoom_in_rect = (16 + button_w + gap, bottom_y, 16 + 2 * button_w + gap, bottom_y + button_h)
+        zoom_out_rect = (16 + 2 * (button_w + gap), bottom_y, 16 + 3 * button_w + 2 * gap, bottom_y + button_h)
         button_enabled = mining.state not in (
             auto_mining.MiningState.PLAN_SWEEP,
             auto_mining.MiningState.NAVIGATE_DIG,
@@ -831,8 +869,22 @@ def main():
         )
         draw_button(excav_rect, "Draw Excav Zone", button_enabled)
         draw_button(deposit_rect, "Draw Deposit Zone", button_enabled)
+        draw_button(whole_rect, "Whole Map", button_enabled)
+        draw_button(holes_rect, "Disable Holes", button_enabled)
+        draw_button(zoom_in_rect, "+ Zoom", True)
+        draw_button(zoom_out_rect, "- Zoom", True)
         status_button_rects["excav"] = excav_rect
         status_button_rects["deposit"] = deposit_rect
+        status_button_rects["whole"] = whole_rect
+        status_button_rects["holes"] = holes_rect
+        status_button_rects["zoom_in"] = zoom_in_rect
+        status_button_rects["zoom_out"] = zoom_out_rect
+        put_line(
+            f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
+            button_y0 - button_h - 30,
+            (200, 240, 255),
+            0.48,
+        )
         return panel
 
     while True:
@@ -1003,7 +1055,7 @@ def main():
                         dist = np.empty((0,), dtype=np.float32)
                         ground_mask = np.zeros((0,), dtype=bool)
                         obstacle_mask = np.zeros((0,), dtype=bool)
-                if args.disable_holes:
+                if disable_holes:
                     hole_mask = np.zeros(dist.shape, dtype=bool)
                 else:
                     hole_mask = dist < -args.hole_thresh_m
@@ -1084,7 +1136,7 @@ def main():
                         x = xyz_world[:, 0]
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
-                    map_vis = occ_map.render()
+                    map_vis = occ_map.render(whole_mode=whole_map_enabled)
                     # Draw camera position marker (blue square).
                     cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
                     # Mining tick: may override goal_cell or supply a direct drive command.
@@ -1453,7 +1505,7 @@ def main():
                     if mesh_viewer is not None:
                         mesh_viewer.poll()
                 else:
-                    map_vis = occ_map.render()
+                    map_vis = occ_map.render(whole_mode=whole_map_enabled)
                     if args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
