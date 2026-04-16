@@ -547,7 +547,8 @@ def main():
     map_size_input_focused = False
     paint_safe_mode = False       # when True, map clicks paint cells as permanently safe
     erase_safe_mode = False      # when True, map clicks erase painted cells
-    paint_brush_radius = 2       # radius in cells for paint/erase brush
+    paint_obstacle_mode = False  # when True, map clicks paint cells as obstacles
+    paint_brush_radius = 2       # radius in cells for all brush tools (1–15)
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -592,25 +593,36 @@ def main():
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
             return
+        # Helper — compute brush bounding box.
+        def _brush(r, c):
+            return (
+                max(0, r - paint_brush_radius),
+                min(occ_map.grid_h - 1, r + paint_brush_radius),
+                max(0, c - paint_brush_radius),
+                min(occ_map.grid_w - 1, c + paint_brush_radius),
+            )
         # Paint safe mode — brush marks cells permanently free (cyan).
         if paint_safe_mode:
-            r0 = max(0, row - paint_brush_radius)
-            r1 = min(occ_map.grid_h - 1, row + paint_brush_radius)
-            c0 = max(0, col - paint_brush_radius)
-            c1 = min(occ_map.grid_w - 1, col + paint_brush_radius)
+            r0, r1, c0, c1 = _brush(row, col)
             occ_map.painted_free[r0:r1+1, c0:c1+1] = True
-            # Clear any existing obstacle/hole counts in painted area so it
-            # shows as safe immediately without waiting for decay.
+            # Clear any existing obstacle/hole counts so it shows safe immediately.
             occ_map.occ_counts[r0:r1+1, c0:c1+1] = 0.0
             occ_map.hole_counts[r0:r1+1, c0:c1+1] = 0.0
             return
-        # Erase safe mode — brush removes painted cells.
+        # Erase safe mode — brush removes painted-free cells.
         if erase_safe_mode:
-            r0 = max(0, row - paint_brush_radius)
-            r1 = min(occ_map.grid_h - 1, row + paint_brush_radius)
-            c0 = max(0, col - paint_brush_radius)
-            c1 = min(occ_map.grid_w - 1, col + paint_brush_radius)
+            r0, r1, c0, c1 = _brush(row, col)
             occ_map.painted_free[r0:r1+1, c0:c1+1] = False
+            return
+        # Paint obstacle mode — brush forces cells to be obstacles.
+        if paint_obstacle_mode:
+            r0, r1, c0, c1 = _brush(row, col)
+            # Stamp strong obstacle evidence; also clear painted-free so it
+            # doesn't silently override the obstacle.
+            occ_map.painted_free[r0:r1+1, c0:c1+1] = False
+            occ_map.occ_counts[r0:r1+1, c0:c1+1] = 20.0
+            occ_map.free_counts[r0:r1+1, c0:c1+1] = 0.0
+            occ_map.hole_counts[r0:r1+1, c0:c1+1] = 0.0
             return
         # Normal click — only on LBUTTONDOWN (not drag).
         if event != cv2.EVENT_LBUTTONDOWN:
@@ -628,8 +640,19 @@ def main():
 
     def on_status_click(event, x, y, flags, param):
         nonlocal disable_holes, whole_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
-        nonlocal paint_safe_mode, erase_safe_mode
-        if event != cv2.EVENT_LBUTTONDOWN:
+        nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
+        is_drag = event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON)
+        if event != cv2.EVENT_LBUTTONDOWN and not is_drag:
+            return
+        # Brush size slider supports drag.
+        rect = status_button_rects.get("brush_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = (x - x0) / max(1, x1 - x0)
+                paint_brush_radius = max(1, min(15, int(round(1 + frac * 14))))
+                return
+        if is_drag:
             return
         # Check if the map size input field was clicked
         rect = status_button_rects.get("map_size_input")
@@ -701,6 +724,7 @@ def main():
                 paint_safe_mode = not paint_safe_mode
                 if paint_safe_mode:
                     erase_safe_mode = False
+                    paint_obstacle_mode = False
                 print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
                 return
         rect = status_button_rects.get("erase_safe")
@@ -710,7 +734,18 @@ def main():
                 erase_safe_mode = not erase_safe_mode
                 if erase_safe_mode:
                     paint_safe_mode = False
+                    paint_obstacle_mode = False
                 print(f"Erase Safe mode {'ON — click/drag map to remove painted cells' if erase_safe_mode else 'OFF'}")
+                return
+        rect = status_button_rects.get("paint_obstacle")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                paint_obstacle_mode = not paint_obstacle_mode
+                if paint_obstacle_mode:
+                    paint_safe_mode = False
+                    erase_safe_mode = False
+                print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
                 return
         rect = status_button_rects.get("clear_paint")
         if rect is not None:
@@ -718,6 +753,20 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 occ_map.painted_free[:] = False
                 print("Cleared all painted-safe cells")
+                return
+        rect = status_button_rects.get("brush_minus")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                paint_brush_radius = max(1, paint_brush_radius - 1)
+                print(f"Brush radius: {paint_brush_radius} cells")
+                return
+        rect = status_button_rects.get("brush_plus")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                paint_brush_radius = min(15, paint_brush_radius + 1)
+                print(f"Brush radius: {paint_brush_radius} cells")
                 return
 
     def send_nt_command(enabled, fwd, turn, duration):
@@ -814,7 +863,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 680
+        panel_h = 780
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -979,17 +1028,36 @@ def main():
         button_w = 160
         gap = 20
         bottom_y = panel_h - 20 - button_h
-        top_y = bottom_y - button_h - 10
-        mid_y = top_y - button_h - 10
-        excav_rect = (16, top_y, 16 + button_w, top_y + button_h)
-        deposit_rect = (16 + button_w + gap, top_y, 16 + 2 * button_w + gap, top_y + button_h)
-        whole_rect = (16 + 2 * (button_w + gap), top_y, 16 + 3 * button_w + 2 * gap, top_y + button_h)
-        holes_rect = (16, bottom_y, 16 + button_w, bottom_y + button_h)
-        zoom_in_rect = (16 + button_w + gap, bottom_y, 16 + 2 * button_w + gap, bottom_y + button_h)
-        zoom_out_rect = (16 + 2 * (button_w + gap), bottom_y, 16 + 3 * button_w + 2 * gap, bottom_y + button_h)
-        paint_rect = (16, mid_y, 16 + button_w, mid_y + button_h)
-        erase_rect = (16 + button_w + gap, mid_y, 16 + 2 * button_w + gap, mid_y + button_h)
-        clear_paint_rect = (16 + 2 * (button_w + gap), mid_y, 16 + 3 * button_w + 2 * gap, mid_y + button_h)
+        top_y    = bottom_y - button_h - 10
+        mid_y    = top_y    - button_h - 10
+        upper_y  = mid_y    - button_h - 10
+        slider_y = upper_y  - 44
+
+        # ---- Row 1 (bottom): zoom + holes ----
+        excav_rect    = (16, top_y, 16 + button_w, top_y + button_h)
+        deposit_rect  = (16 + button_w + gap, top_y, 16 + 2*button_w + gap, top_y + button_h)
+        whole_rect    = (16 + 2*(button_w+gap), top_y, 16 + 3*button_w + 2*gap, top_y + button_h)
+        holes_rect    = (16, bottom_y, 16 + button_w, bottom_y + button_h)
+        zoom_in_rect  = (16 + button_w + gap, bottom_y, 16 + 2*button_w + gap, bottom_y + button_h)
+        zoom_out_rect = (16 + 2*(button_w+gap), bottom_y, 16 + 3*button_w + 2*gap, bottom_y + button_h)
+
+        # ---- Row 2: Paint Safe | Erase Safe | Clear All ----
+        paint_rect       = (16, mid_y, 16 + button_w, mid_y + button_h)
+        erase_rect       = (16 + button_w + gap, mid_y, 16 + 2*button_w + gap, mid_y + button_h)
+        clear_paint_rect = (16 + 2*(button_w+gap), mid_y, 16 + 3*button_w + 2*gap, mid_y + button_h)
+
+        # ---- Row 3: Paint Obstacle (full-width) ----
+        obstacle_rect = (16, upper_y, 16 + button_w, upper_y + button_h)
+
+        # ---- Row 4: Brush size slider ----
+        btn_sm = 36
+        brush_minus_rect  = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
+        brush_plus_rect   = (16 + btn_sm + 8 + (panel_w - 16 - 16 - 2*btn_sm - 16), slider_y + 4,
+                             panel_w - 16, slider_y + 4 + btn_sm)
+        slider_x0 = 16 + btn_sm + 8
+        slider_x1 = panel_w - 16 - btn_sm - 8
+        brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
+
         button_enabled = mining.state not in (
             auto_mining.MiningState.PLAN_SWEEP,
             auto_mining.MiningState.NAVIGATE_DIG,
@@ -1007,54 +1075,74 @@ def main():
         draw_button(holes_rect, "Disable Holes", button_enabled)
         draw_button(zoom_in_rect, "+ Zoom", True)
         draw_button(zoom_out_rect, "- Zoom", True)
-        # Paint safe button — highlighted when active
-        paint_label = "Paint Safe: ON" if paint_safe_mode else "Paint Safe"
-        paint_fill = (0, 180, 80) if paint_safe_mode else (70, 130, 220)
-        paint_border = (80, 255, 140) if paint_safe_mode else (200, 200, 200)
-        x0, y0, x1, y1 = paint_rect
-        cv2.rectangle(panel, (x0, y0), (x1, y1), paint_fill, -1)
-        cv2.rectangle(panel, (x0, y0), (x1, y1), paint_border, 2 if paint_safe_mode else 1)
-        tsz, _ = cv2.getTextSize(paint_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        cv2.putText(panel, paint_label, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-        # Erase safe button — highlighted when active
-        erase_label = "Erase: ON" if erase_safe_mode else "Erase Safe"
-        erase_fill = (0, 80, 200) if erase_safe_mode else (70, 130, 220)
-        erase_border = (80, 140, 255) if erase_safe_mode else (200, 200, 200)
-        x0, y0, x1, y1 = erase_rect
-        cv2.rectangle(panel, (x0, y0), (x1, y1), erase_fill, -1)
-        cv2.rectangle(panel, (x0, y0), (x1, y1), erase_border, 2 if erase_safe_mode else 1)
-        tsz, _ = cv2.getTextSize(erase_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-        cv2.putText(panel, erase_label, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+        def _active_button(rect, label, active, active_color, active_border):
+            x0, y0, x1, y1 = rect
+            fill   = active_color  if active else (70, 130, 220)
+            border = active_border if active else (200, 200, 200)
+            cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
+            cv2.rectangle(panel, (x0, y0), (x1, y1), border, 2 if active else 1)
+            tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
+            cv2.putText(panel, label,
+                        (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+
+        _active_button(paint_rect,    "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
+                       paint_safe_mode, (0, 180, 80), (80, 255, 140))
+        _active_button(erase_rect,    "Erase: ON" if erase_safe_mode else "Erase Safe",
+                       erase_safe_mode, (0, 80, 200), (80, 140, 255))
         draw_button(clear_paint_rect, "Clear All", True)
-        status_button_rects["excav"] = excav_rect
-        status_button_rects["deposit"] = deposit_rect
-        status_button_rects["whole"] = whole_rect
-        status_button_rects["holes"] = holes_rect
-        status_button_rects["zoom_in"] = zoom_in_rect
-        status_button_rects["zoom_out"] = zoom_out_rect
-        status_button_rects["paint_safe"] = paint_rect
-        status_button_rects["erase_safe"] = erase_rect
-        status_button_rects["clear_paint"] = clear_paint_rect
+        _active_button(obstacle_rect, "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
+                       paint_obstacle_mode, (0, 0, 200), (80, 80, 255))
+
+        # Brush size slider
+        cv2.rectangle(panel, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (60, 60, 60), -1)
+        cv2.rectangle(panel, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (120, 120, 120), 1)
+        frac = (paint_brush_radius - 1) / 14.0
+        knob_x = int(slider_x0 + frac * (slider_x1 - slider_x0))
+        cv2.circle(panel, (knob_x, slider_y + 22), 11, (100, 200, 255), -1)
+        cv2.circle(panel, (knob_x, slider_y + 22), 11, (200, 240, 255), 1)
+        put_line(f"Brush: {paint_brush_radius}", slider_y + 28, (220, 240, 255), 0.46)
+        # - / + buttons
+        for rect, lbl in ((brush_minus_rect, "-"), (brush_plus_rect, "+")):
+            x0, y0, x1, y1 = rect
+            cv2.rectangle(panel, (x0, y0), (x1, y1), (70, 130, 220), -1)
+            cv2.rectangle(panel, (x0, y0), (x1, y1), (200, 200, 200), 1)
+            tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.putText(panel, lbl, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        status_button_rects["excav"]         = excav_rect
+        status_button_rects["deposit"]       = deposit_rect
+        status_button_rects["whole"]         = whole_rect
+        status_button_rects["holes"]         = holes_rect
+        status_button_rects["zoom_in"]       = zoom_in_rect
+        status_button_rects["zoom_out"]      = zoom_out_rect
+        status_button_rects["paint_safe"]    = paint_rect
+        status_button_rects["erase_safe"]    = erase_rect
+        status_button_rects["clear_paint"]   = clear_paint_rect
+        status_button_rects["paint_obstacle"]= obstacle_rect
+        status_button_rects["brush_minus"]   = brush_minus_rect
+        status_button_rects["brush_plus"]    = brush_plus_rect
+        status_button_rects["brush_slider"]  = brush_slider_rect
+
         put_line(
             f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
-            top_y - 8,
-            (200, 240, 255),
-            0.48,
+            top_y - 8, (200, 240, 255), 0.48,
         )
         if paint_safe_mode:
-            mode_hint = "PAINTING — click/drag map to lock cells SAFE (cyan)"
+            mode_hint = "PAINTING SAFE — drag map to lock cells (cyan)"
         elif erase_safe_mode:
-            mode_hint = "ERASING — click/drag map to remove painted cells"
+            mode_hint = "ERASING SAFE — drag map to remove painted cells"
+        elif paint_obstacle_mode:
+            mode_hint = "PAINTING OBSTACLE — drag map to force obstacle cells (red)"
         else:
-            mode_hint = "Paint Safe / Erase Safe: brush tools for the map"
-        put_line(
-            mode_hint,
-            mid_y - 8,
-            (100, 255, 160) if paint_safe_mode else ((80, 140, 255) if erase_safe_mode else (170, 200, 230)),
-            0.44,
-        )
+            mode_hint = "Brush tools: Paint Safe / Erase / Paint Obstacle"
+        hint_color = (100, 255, 160) if paint_safe_mode else (
+            (80, 140, 255) if erase_safe_mode else (
+            (80, 80, 255) if paint_obstacle_mode else (170, 200, 230)))
+        put_line(mode_hint, upper_y - 8, hint_color, 0.44)
+        put_line("Brush size:", slider_y - 10, (170, 200, 230), 0.44)
 
         return panel
 
