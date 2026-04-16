@@ -465,6 +465,8 @@ def main():
     last_start = None
     last_goal = None
     map_window_ready = False
+    status_window_ready = False
+    status_button_rects = {}
     emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
@@ -560,6 +562,35 @@ def main():
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
 
+    def on_status_click(event, x, y, flags, param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        button_enabled = mining.state not in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        ) and mining.state not in (
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+        )
+        if not button_enabled:
+            return
+        rect = status_button_rects.get("excav")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                mining.handle_key(ord("e"))
+                return
+        rect = status_button_rects.get("deposit")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                mining.handle_key(ord("d"))
+                return
+
     def send_nt_command(enabled, fwd, turn, duration):
         nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
         nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
@@ -654,7 +685,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 330
+        panel_h = 390
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -682,6 +713,18 @@ def main():
             vx = int(cx + value * half)
             color = (0, 220, 0) if abs(value) <= 0.05 else ((0, 220, 255) if value > 0 else (255, 180, 0))
             cv2.rectangle(panel, (min(cx, vx), y - 7), (max(cx, vx), y + 7), color, -1)
+
+        def draw_button(rect, label, enabled):
+            x0, y0, x1, y1 = rect
+            fill = (70, 130, 220) if enabled else (50, 50, 50)
+            border = (200, 200, 200) if enabled else (120, 120, 120)
+            cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
+            cv2.rectangle(panel, (x0, y0), (x1, y1), border, 1)
+            text_color = (255, 255, 255) if enabled else (180, 180, 180)
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            text_x = x0 + (x1 - x0 - text_size[0]) // 2
+            text_y = y0 + (y1 - y0 + text_size[1]) // 2
+            cv2.putText(panel, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, text_color, 1, cv2.LINE_AA)
 
         if not args.drive:
             mode_label = "DRIVE OFF"
@@ -723,46 +766,73 @@ def main():
             0.52,
         )
 
+        excav_set = bool(mining.excav_corners_rc)
+        deposit_set = bool(mining.deposit_corners_rc)
+        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 168, (170, 255, 170) if excav_set else (190, 190, 190))
+        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 192, (170, 255, 170) if deposit_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", 216, (210, 210, 210), 0.48)
+
         if goal_cell is None:
-            put_line("Goal cell: none", 168, (190, 190, 190))
-            put_line("Goal world: none", 192, (190, 190, 190))
+            put_line("Goal cell: none", 238, (190, 190, 190))
+            put_line("Goal world: none", 262, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 168, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 238, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 192, (190, 190, 190))
+                put_line("Goal world: unavailable", 262, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 192, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 262, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 216, (190, 190, 190))
+            put_line("Active target: none", 286, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    216,
+                    286,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    216,
+                    286,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 240, (190, 190, 190))
+            put_line("Robot cell: unavailable", 310, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 240, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 310, (180, 255, 220))
 
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            266,
+            334,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 290)
-        draw_axis("Turn", status_cmd_turn, 312)
+        draw_axis("Forward", status_cmd_fwd, 358)
+        draw_axis("Turn", status_cmd_turn, 380)
+
+        button_h = 42
+        button_w = 180
+        button_y0 = panel_h - 20 - button_h
+        excav_rect = (16, button_y0, 16 + button_w, button_y0 + button_h)
+        deposit_rect = (panel_w - 16 - button_w, button_y0, panel_w - 16, button_y0 + button_h)
+        button_enabled = mining.state not in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        ) and mining.state not in (
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+        )
+        draw_button(excav_rect, "Draw Excav Zone", button_enabled)
+        draw_button(deposit_rect, "Draw Deposit Zone", button_enabled)
+        status_button_rects["excav"] = excav_rect
+        status_button_rects["deposit"] = deposit_rect
         return panel
 
     while True:
@@ -1577,7 +1647,11 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
-                cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
+                status_panel = render_status_panel(cam_row_col)
+                cv2.imshow("ZED Drive Status", status_panel)
+                if not status_window_ready:
+                    cv2.setMouseCallback("ZED Drive Status", on_status_click)
+                    status_window_ready = True
                 key = cv2.waitKey(1) & 0xFF
                 # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
                 mining.handle_key(key)
