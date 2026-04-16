@@ -545,6 +545,9 @@ def main():
     human_person_map_points = []  # list of (row, col) for map markers
     map_size_input_text = ""      # user-typed map size string e.g. "6x8" (feet)
     map_size_input_focused = False
+    paint_safe_mode = False       # when True, map clicks paint cells as permanently safe
+    erase_safe_mode = False      # when True, map clicks erase painted cells
+    paint_brush_radius = 2       # radius in cells for paint/erase brush
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -577,15 +580,40 @@ def main():
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
-        if event != cv2.EVENT_LBUTTONDOWN:
-            if event == cv2.EVENT_RBUTTONDOWN:
-                emergency_stop = True
-                print("EMERGENCY STOP")
+        if event == cv2.EVENT_RBUTTONDOWN:
+            emergency_stop = True
+            print("EMERGENCY STOP")
+            return
+        is_left_down = event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_MOUSEMOVE) and (flags & cv2.EVENT_FLAG_LBUTTON)
+        if not is_left_down and event != cv2.EVENT_LBUTTONDOWN:
             return
         scale = max(1, int(map_scale_live))
         row = int(y / scale) - int(map_view_shift_r)
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
+            return
+        # Paint safe mode — brush marks cells permanently free (cyan).
+        if paint_safe_mode:
+            r0 = max(0, row - paint_brush_radius)
+            r1 = min(occ_map.grid_h - 1, row + paint_brush_radius)
+            c0 = max(0, col - paint_brush_radius)
+            c1 = min(occ_map.grid_w - 1, col + paint_brush_radius)
+            occ_map.painted_free[r0:r1+1, c0:c1+1] = True
+            # Clear any existing obstacle/hole counts in painted area so it
+            # shows as safe immediately without waiting for decay.
+            occ_map.occ_counts[r0:r1+1, c0:c1+1] = 0.0
+            occ_map.hole_counts[r0:r1+1, c0:c1+1] = 0.0
+            return
+        # Erase safe mode — brush removes painted cells.
+        if erase_safe_mode:
+            r0 = max(0, row - paint_brush_radius)
+            r1 = min(occ_map.grid_h - 1, row + paint_brush_radius)
+            c0 = max(0, col - paint_brush_radius)
+            c1 = min(occ_map.grid_w - 1, col + paint_brush_radius)
+            occ_map.painted_free[r0:r1+1, c0:c1+1] = False
+            return
+        # Normal click — only on LBUTTONDOWN (not drag).
+        if event != cv2.EVENT_LBUTTONDOWN:
             return
         if mining.consume_click(row, col, occ_map):
             return
@@ -600,6 +628,7 @@ def main():
 
     def on_status_click(event, x, y, flags, param):
         nonlocal disable_holes, whole_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
+        nonlocal paint_safe_mode, erase_safe_mode
         if event != cv2.EVENT_LBUTTONDOWN:
             return
         # Check if the map size input field was clicked
@@ -664,6 +693,31 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 disable_holes = not disable_holes
                 print(f"Hole detection {'DISABLED' if disable_holes else 'ENABLED'}")
+                return
+        rect = status_button_rects.get("paint_safe")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                paint_safe_mode = not paint_safe_mode
+                if paint_safe_mode:
+                    erase_safe_mode = False
+                print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
+                return
+        rect = status_button_rects.get("erase_safe")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                erase_safe_mode = not erase_safe_mode
+                if erase_safe_mode:
+                    paint_safe_mode = False
+                print(f"Erase Safe mode {'ON — click/drag map to remove painted cells' if erase_safe_mode else 'OFF'}")
+                return
+        rect = status_button_rects.get("clear_paint")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                occ_map.painted_free[:] = False
+                print("Cleared all painted-safe cells")
                 return
 
     def send_nt_command(enabled, fwd, turn, duration):
@@ -760,7 +814,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 620
+        panel_h = 680
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -926,12 +980,16 @@ def main():
         gap = 20
         bottom_y = panel_h - 20 - button_h
         top_y = bottom_y - button_h - 10
+        mid_y = top_y - button_h - 10
         excav_rect = (16, top_y, 16 + button_w, top_y + button_h)
         deposit_rect = (16 + button_w + gap, top_y, 16 + 2 * button_w + gap, top_y + button_h)
         whole_rect = (16 + 2 * (button_w + gap), top_y, 16 + 3 * button_w + 2 * gap, top_y + button_h)
         holes_rect = (16, bottom_y, 16 + button_w, bottom_y + button_h)
         zoom_in_rect = (16 + button_w + gap, bottom_y, 16 + 2 * button_w + gap, bottom_y + button_h)
         zoom_out_rect = (16 + 2 * (button_w + gap), bottom_y, 16 + 3 * button_w + 2 * gap, bottom_y + button_h)
+        paint_rect = (16, mid_y, 16 + button_w, mid_y + button_h)
+        erase_rect = (16 + button_w + gap, mid_y, 16 + 2 * button_w + gap, mid_y + button_h)
+        clear_paint_rect = (16 + 2 * (button_w + gap), mid_y, 16 + 3 * button_w + 2 * gap, mid_y + button_h)
         button_enabled = mining.state not in (
             auto_mining.MiningState.PLAN_SWEEP,
             auto_mining.MiningState.NAVIGATE_DIG,
@@ -949,17 +1007,53 @@ def main():
         draw_button(holes_rect, "Disable Holes", button_enabled)
         draw_button(zoom_in_rect, "+ Zoom", True)
         draw_button(zoom_out_rect, "- Zoom", True)
+        # Paint safe button — highlighted when active
+        paint_label = "Paint Safe: ON" if paint_safe_mode else "Paint Safe"
+        paint_fill = (0, 180, 80) if paint_safe_mode else (70, 130, 220)
+        paint_border = (80, 255, 140) if paint_safe_mode else (200, 200, 200)
+        x0, y0, x1, y1 = paint_rect
+        cv2.rectangle(panel, (x0, y0), (x1, y1), paint_fill, -1)
+        cv2.rectangle(panel, (x0, y0), (x1, y1), paint_border, 2 if paint_safe_mode else 1)
+        tsz, _ = cv2.getTextSize(paint_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.putText(panel, paint_label, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        # Erase safe button — highlighted when active
+        erase_label = "Erase: ON" if erase_safe_mode else "Erase Safe"
+        erase_fill = (0, 80, 200) if erase_safe_mode else (70, 130, 220)
+        erase_border = (80, 140, 255) if erase_safe_mode else (200, 200, 200)
+        x0, y0, x1, y1 = erase_rect
+        cv2.rectangle(panel, (x0, y0), (x1, y1), erase_fill, -1)
+        cv2.rectangle(panel, (x0, y0), (x1, y1), erase_border, 2 if erase_safe_mode else 1)
+        tsz, _ = cv2.getTextSize(erase_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        cv2.putText(panel, erase_label, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        draw_button(clear_paint_rect, "Clear All", True)
         status_button_rects["excav"] = excav_rect
         status_button_rects["deposit"] = deposit_rect
         status_button_rects["whole"] = whole_rect
         status_button_rects["holes"] = holes_rect
         status_button_rects["zoom_in"] = zoom_in_rect
         status_button_rects["zoom_out"] = zoom_out_rect
+        status_button_rects["paint_safe"] = paint_rect
+        status_button_rects["erase_safe"] = erase_rect
+        status_button_rects["clear_paint"] = clear_paint_rect
         put_line(
             f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
             top_y - 8,
             (200, 240, 255),
             0.48,
+        )
+        if paint_safe_mode:
+            mode_hint = "PAINTING — click/drag map to lock cells SAFE (cyan)"
+        elif erase_safe_mode:
+            mode_hint = "ERASING — click/drag map to remove painted cells"
+        else:
+            mode_hint = "Paint Safe / Erase Safe: brush tools for the map"
+        put_line(
+            mode_hint,
+            mid_y - 8,
+            (100, 255, 160) if paint_safe_mode else ((80, 140, 255) if erase_safe_mode else (170, 200, 230)),
+            0.44,
         )
 
         return panel

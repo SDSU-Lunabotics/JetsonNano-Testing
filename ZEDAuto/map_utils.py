@@ -46,6 +46,8 @@ class OccupancyMap:
         self.free_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
         self.occ_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
         self.hole_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+        # Cells painted manually as permanently safe — sensor data cannot overwrite these.
+        self.painted_free = np.zeros((self.grid_h, self.grid_w), dtype=bool)
 
     def meta(self):
         return {
@@ -151,15 +153,20 @@ class OccupancyMap:
             self.free_counts[g_r, g_c] += 1.0
         if np.any(omask):
             occ_r, occ_c = _unique_cells(row[omask], col[omask])
-            self.occ_counts[occ_r, occ_c] += 1.0
-            # New obstacle evidence should degrade prior free-space confidence.
-            if self.free_downgrade_factor < 1.0:
-                self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
+            # Skip painted-safe cells — they cannot become obstacles.
+            not_painted = ~self.painted_free[occ_r, occ_c]
+            occ_r, occ_c = occ_r[not_painted], occ_c[not_painted]
+            if occ_r.size > 0:
+                self.occ_counts[occ_r, occ_c] += 1.0
+                if self.free_downgrade_factor < 1.0:
+                    self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
         if hmask is not None and np.any(hmask):
             hole_r, hole_c = _unique_cells(row[hmask], col[hmask])
-            self.hole_counts[hole_r, hole_c] += 1.0
-            # Keep holes informational (blue) without making them non-traversable by
-            # degrading free-space confidence. Obstacle evidence still controls blocking.
+            # Skip painted-safe cells for holes too.
+            not_painted = ~self.painted_free[hole_r, hole_c]
+            hole_r, hole_c = hole_r[not_painted], hole_c[not_painted]
+            if hole_r.size > 0:
+                self.hole_counts[hole_r, hole_c] += 1.0
 
     def render(self, whole_mode=False):
         # Visualize: white = mapped/known ground, red = confirmed obstacle, blue = hole,
@@ -218,6 +225,10 @@ class OccupancyMap:
             if np.any(halo_unknown):
                 map_vis[halo_unknown] = (220, 220, 220)
 
+        # Painted-safe cells shown as bright cyan, always on top.
+        if np.any(self.painted_free):
+            map_vis[self.painted_free] = (255, 230, 80)  # BGR: bright cyan-green
+
         return map_vis
 
     def world_to_grid(self, x, z):
@@ -239,11 +250,12 @@ class OccupancyMap:
     def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5, min_occ_advantage=0.0):
         # Mark as obstacle only if we have enough occupied evidence
         # and it significantly outweighs free evidence.
+        # Painted-safe cells are never obstacles.
         occ = self.occ_counts
         free = self.free_counts
         ratio_ok = occ >= (free * float(min_occ_ratio))
         adv_ok = (occ - free) >= float(min_occ_advantage)
-        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok
+        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok & ~self.painted_free
 
     def known_mask(self, min_evidence=1.0):
         evidence = self.free_counts + self.occ_counts + self.hole_counts
