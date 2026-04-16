@@ -913,7 +913,7 @@ def main():
         status_button_rects["zoom_out"] = zoom_out_rect
         put_line(
             f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
-            button_y0 - button_h - 30,
+            top_y - button_h - 30,
             (200, 240, 255),
             0.48,
         )
