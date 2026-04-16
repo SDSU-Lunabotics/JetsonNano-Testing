@@ -543,6 +543,8 @@ def main():
     map_view_shift_c = 0
     frame_idx = 0
     human_person_map_points = []  # list of (row, col) for map markers
+    map_size_input_text = ""      # user-typed map size string e.g. "6x8" (feet)
+    map_size_input_focused = False
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -597,9 +599,19 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def on_status_click(event, x, y, flags, param):
-        nonlocal disable_holes, whole_map_enabled, map_scale_live
+        nonlocal disable_holes, whole_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         if event != cv2.EVENT_LBUTTONDOWN:
             return
+        # Check if the map size input field was clicked
+        rect = status_button_rects.get("map_size_input")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                map_size_input_focused = True
+                map_size_input_text = ""
+                return
+            else:
+                map_size_input_focused = False
         rect = status_button_rects.get("zoom_in")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -748,7 +760,7 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 390
+        panel_h = 620
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
@@ -877,6 +889,39 @@ def main():
         draw_axis("Forward", status_cmd_fwd, 382)
         draw_axis("Turn", status_cmd_turn, 404)
 
+        # --- Map size input field (placed between axis bars and the zone buttons) ---
+        cur_w_ft = occ_map.map_width_m / 0.3048
+        cur_h_ft = occ_map.map_height_m / 0.3048
+        put_line(
+            "Map size (WxH ft) — click field, type e.g. 20x20, press Enter",
+            424,
+            (170, 200, 230),
+            0.44,
+        )
+        input_rect = (16, 434, panel_w - 16, 474)
+        status_button_rects["map_size_input"] = input_rect
+        border_color = (100, 220, 255) if map_size_input_focused else (120, 120, 120)
+        cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), (40, 40, 40), -1)
+        cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), border_color, 1)
+        display_text = map_size_input_text if map_size_input_text else f"{cur_w_ft:.1f}x{cur_h_ft:.1f}"
+        cursor = "|" if map_size_input_focused else ""
+        cv2.putText(
+            panel,
+            display_text + cursor,
+            (input_rect[0] + 8, input_rect[1] + 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        put_line(
+            f"Current: {cur_w_ft:.2f} x {cur_h_ft:.2f} ft  (res: {occ_map.map_res_m:.3f} m/cell)",
+            488,
+            (200, 240, 255),
+            0.48,
+        )
+
         button_h = 42
         button_w = 160
         gap = 20
@@ -913,10 +958,11 @@ def main():
         status_button_rects["zoom_out"] = zoom_out_rect
         put_line(
             f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
-            top_y - button_h - 30,
+            top_y - 8,
             (200, 240, 255),
             0.48,
         )
+
         return panel
 
     while True:
@@ -1786,8 +1832,58 @@ def main():
                     cv2.setMouseCallback("ZED Drive Status", on_status_click)
                     status_window_ready = True
                 key = cv2.waitKey(1) & 0xFF
-                # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
-                mining.handle_key(key)
+                # If map size input field is focused, route keys to it.
+                if map_size_input_focused:
+                    if key == 13:  # Enter — apply the new map size
+                        map_size_input_focused = False
+                        raw = map_size_input_text.strip().lower().replace(" ", "")
+                        map_size_input_text = ""
+                        try:
+                            parts = raw.replace("x", "x").split("x")
+                            if len(parts) == 2:
+                                w_ft = float(parts[0])
+                                h_ft = float(parts[1])
+                            elif len(parts) == 1:
+                                w_ft = h_ft = float(parts[0])
+                            else:
+                                raise ValueError("bad format")
+                            new_w_m = round(w_ft * 0.3048, 4)
+                            new_h_m = round(h_ft * 0.3048, 4)
+                            if new_w_m <= 0 or new_h_m <= 0:
+                                raise ValueError("must be positive")
+                            occ_map = map_utils.OccupancyMap(
+                                map_res_m=occ_map.map_res_m,
+                                map_width_m=new_w_m,
+                                map_height_m=new_h_m,
+                                map_z_min=occ_map.map_z_min,
+                                decay=occ_map.map_decay,
+                                free_decay=occ_map.free_decay,
+                                occ_decay=occ_map.occ_decay,
+                                hole_decay=occ_map.hole_decay,
+                            )
+                            goal_cell = None
+                            path_cells = None
+                            last_path_cells = None
+                            last_start = None
+                            last_goal = None
+                            map_window_ready = False
+                            mining.excav_corners_rc = []
+                            mining.deposit_corners_rc = []
+                            print(f"Map resized to {w_ft:.2f} x {h_ft:.2f} ft ({new_w_m:.3f} x {new_h_m:.3f} m)")
+                        except Exception as _e:
+                            print(f"Map size parse error: {_e}. Use format like '20x20' or '6.5x10' (feet).")
+                    elif key == 8 or key == 127:  # Backspace/Delete
+                        map_size_input_text = map_size_input_text[:-1]
+                    elif key == 27:  # Escape — cancel
+                        map_size_input_focused = False
+                        map_size_input_text = ""
+                    elif key != 255:
+                        ch = chr(key)
+                        if ch in "0123456789.x ":
+                            map_size_input_text += ch
+                else:
+                    # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
+                    mining.handle_key(key)
                 if key == ord("q"):
                     break
                 if key == ord("m"):
