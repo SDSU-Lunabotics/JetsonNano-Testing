@@ -889,11 +889,10 @@ def main():
         draw_axis("Forward", status_cmd_fwd, 382)
         draw_axis("Turn", status_cmd_turn, 404)
 
-        # --- Map size input field (placed between axis bars and the zone buttons) ---
-        cur_w_ft = occ_map.map_width_m / 0.3048
-        cur_h_ft = occ_map.map_height_m / 0.3048
+        # --- Rover size input field (placed between axis bars and the zone buttons) ---
+        cur_rover_ft = args.rover_size_m / 0.3048
         put_line(
-            "Map size (WxH ft) — click field, type e.g. 20x20, press Enter",
+            "Rover size (ft, square) — click field, type e.g. 2.5, press Enter",
             424,
             (170, 200, 230),
             0.44,
@@ -903,7 +902,7 @@ def main():
         border_color = (100, 220, 255) if map_size_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), (40, 40, 40), -1)
         cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), border_color, 1)
-        display_text = map_size_input_text if map_size_input_text else f"{cur_w_ft:.1f}x{cur_h_ft:.1f}"
+        display_text = map_size_input_text if map_size_input_text else f"{cur_rover_ft:.2f}"
         cursor = "|" if map_size_input_focused else ""
         cv2.putText(
             panel,
@@ -916,7 +915,7 @@ def main():
             cv2.LINE_AA,
         )
         put_line(
-            f"Current: {cur_w_ft:.2f} x {cur_h_ft:.2f} ft  (res: {occ_map.map_res_m:.3f} m/cell)",
+            f"Current rover size: {cur_rover_ft:.2f} ft  ({args.rover_size_m:.3f} m)",
             488,
             (200, 240, 255),
             0.48,
@@ -1834,44 +1833,20 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 # If map size input field is focused, route keys to it.
                 if map_size_input_focused:
-                    if key == 13:  # Enter — apply the new map size
+                    if key == 13:  # Enter — apply the new rover size
                         map_size_input_focused = False
                         raw = map_size_input_text.strip().lower().replace(" ", "")
                         map_size_input_text = ""
                         try:
-                            parts = raw.replace("x", "x").split("x")
-                            if len(parts) == 2:
-                                w_ft = float(parts[0])
-                                h_ft = float(parts[1])
-                            elif len(parts) == 1:
-                                w_ft = h_ft = float(parts[0])
-                            else:
-                                raise ValueError("bad format")
-                            new_w_m = round(w_ft * 0.3048, 4)
-                            new_h_m = round(h_ft * 0.3048, 4)
-                            if new_w_m <= 0 or new_h_m <= 0:
+                            size_ft = float(raw)
+                            new_size_m = round(size_ft * 0.3048, 4)
+                            if new_size_m <= 0:
                                 raise ValueError("must be positive")
-                            occ_map = map_utils.OccupancyMap(
-                                map_res_m=occ_map.map_res_m,
-                                map_width_m=new_w_m,
-                                map_height_m=new_h_m,
-                                map_z_min=occ_map.map_z_min,
-                                decay=occ_map.map_decay,
-                                free_decay=occ_map.free_decay,
-                                occ_decay=occ_map.occ_decay,
-                                hole_decay=occ_map.hole_decay,
-                            )
-                            goal_cell = None
-                            path_cells = None
-                            last_path_cells = None
-                            last_start = None
-                            last_goal = None
-                            map_window_ready = False
-                            mining.excav_corners_rc = []
-                            mining.deposit_corners_rc = []
-                            print(f"Map resized to {w_ft:.2f} x {h_ft:.2f} ft ({new_w_m:.3f} x {new_h_m:.3f} m)")
+                            args.rover_size_m = new_size_m
+                            mining.cfg["rover_size_m"] = new_size_m
+                            print(f"Rover size updated to {size_ft:.2f} ft ({new_size_m:.3f} m)")
                         except Exception as _e:
-                            print(f"Map size parse error: {_e}. Use format like '20x20' or '6.5x10' (feet).")
+                            print(f"Rover size parse error: {_e}. Enter a single number in feet, e.g. '2' or '1.5'.")
                     elif key == 8 or key == 127:  # Backspace/Delete
                         map_size_input_text = map_size_input_text[:-1]
                     elif key == 27:  # Escape — cancel
@@ -1879,7 +1854,7 @@ def main():
                         map_size_input_text = ""
                     elif key != 255:
                         ch = chr(key)
-                        if ch in "0123456789.x ":
+                        if ch in "0123456789.":
                             map_size_input_text += ch
                 else:
                     # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
