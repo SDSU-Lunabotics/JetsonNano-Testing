@@ -250,9 +250,10 @@ class OccupancyMap:
         return evidence >= float(min_evidence)
 
 
-def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8, traversal_cost_map=None):
+def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8, traversal_cost_map=None, max_search_sec=None):
     import heapq
     import math
+    import time
 
     if start_rc is None or goal_rc is None:
         return None
@@ -296,8 +297,11 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8, traversal_cost_
     heapq.heappush(open_set, (heuristic(sr, sc), 0, (sr, sc)))
     came_from = {}
     cost = { (sr, sc): 0 }
+    start_time = time.time()
 
     while open_set:
+        if max_search_sec is not None and (time.time() - start_time) > float(max_search_sec):
+            return None
         _, g, current = heapq.heappop(open_set)
         if current == (gr, gc):
             # Reconstruct

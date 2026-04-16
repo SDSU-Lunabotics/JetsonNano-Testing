@@ -125,6 +125,12 @@ def main():
     )
     parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
+    parser.add_argument(
+        "--path-max-search-sec",
+        type=float,
+        default=0.075,
+        help="Maximum seconds allowed for a single A* path search",
+    )
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
     parser.add_argument("--start-clear-radius-m", type=float, default=0.35, help="Clear blocked cells near rover start/blind spot")
@@ -140,6 +146,30 @@ def main():
     parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
+    parser.add_argument(
+        "--drive-max-turn-cmd",
+        type=float,
+        default=0.60,
+        help="Maximum absolute turn command while auto-driving (0-1)",
+    )
+    parser.add_argument(
+        "--drive-slow-turn-deg",
+        type=float,
+        default=12.0,
+        help="Begin reducing forward speed above this heading error (deg)",
+    )
+    parser.add_argument(
+        "--drive-stop-turn-deg",
+        type=float,
+        default=22.0,
+        help="Stop forward motion above this heading error (deg)",
+    )
+    parser.add_argument(
+        "--drive-turn-slew-per-sec",
+        type=float,
+        default=2.5,
+        help="Max change rate of turn command (command units per second)",
+    )
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
     parser.add_argument(
         "--backup-close-dist-m",
@@ -498,6 +528,8 @@ def main():
     status_target_cell = None
     status_target_world = None
     last_path_plan_time = 0.0
+    last_auto_turn_cmd = 0.0
+    last_auto_turn_time = time.time()
     last_plane_update_time = 0.0
     plane_fail_count = 0
     plane_reject_count = 0
@@ -1246,7 +1278,11 @@ def main():
                             )
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
-                                obs = np.logical_or(obs, np.logical_not(known))
+                                unknown = np.logical_not(known)
+                                if np.any(unknown):
+                                    # Allow exploration of empty/unknown cells without
+                                    # treating them as a hard blockage.
+                                    path_cost[unknown] += 0.75
                             radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
@@ -1277,6 +1313,7 @@ def main():
                                 obs,
                                 connectivity=args.path_connectivity,
                                 traversal_cost_map=path_cost,
+                                max_search_sec=args.path_max_search_sec,
                             )
                             if path_cells:
                                 last_path_cells = path_cells
@@ -1377,8 +1414,12 @@ def main():
                                     now + max(0.05, float(args.backup_hold_sec)),
                                 )
                             if emergency_stop:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif now < backup_hold_until:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 if (now - last_backup_log_time) >= 0.5:
                                     if close_obstacle_min_z is not None:
                                         print(f"Close obstacle {close_obstacle_min_z:.2f}m ahead: backing up.")
@@ -1392,6 +1433,8 @@ def main():
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             elif manual_mode:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 send_nt_command(
                                     True,
                                     manual_fwd,
@@ -1399,11 +1442,17 @@ def main():
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             elif tracking_enabled and (not tracking_pose_ok):
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 # Keep robot safe while localization is uncertain.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif cam_row_col is None:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif _mine_drive is not None:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
                                 # Mining automation has direct drive control
                                 # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
                                 send_nt_command(
@@ -1433,6 +1482,8 @@ def main():
                                     status_target_cell = goal_cell
                                     status_target_world = (float(tx), float(tz))
                                 else:
+                                    last_auto_turn_cmd = 0.0
+                                    last_auto_turn_time = now
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
                                 # Current pose in map coordinates.
@@ -1445,6 +1496,8 @@ def main():
                                 if goal_world is not None:
                                     gx, gz = goal_world
                                     if math.hypot(gx - cx, gz - cz) <= args.drive_goal_tol_m:
+                                        last_auto_turn_cmd = 0.0
+                                        last_auto_turn_time = now
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
@@ -1462,15 +1515,43 @@ def main():
                                     err += 2 * math.pi
 
                                 tol = math.radians(max(0.0, args.drive_heading_tol_deg))
-                                if abs(err) <= tol:
-                                    turn = 0.0
-                                else:
-                                    turn = max(-1.0, min(1.0, args.drive_turn_k * err))
+                                err_abs = abs(err)
+                                max_turn_cmd = max(0.0, min(1.0, float(args.drive_max_turn_cmd)))
 
-                                # Slow/stop forward motion until heading is aligned so we do not
-                                # drive away from the target while turning.
+                                if err_abs <= tol:
+                                    turn_target = 0.0
+                                else:
+                                    turn_target = max(-max_turn_cmd, min(max_turn_cmd, args.drive_turn_k * err))
+
+                                dt_turn = max(1e-3, now - last_auto_turn_time)
+                                max_turn_step = max(0.0, float(args.drive_turn_slew_per_sec)) * dt_turn
+                                delta_turn = turn_target - last_auto_turn_cmd
+                                if delta_turn > max_turn_step:
+                                    turn = last_auto_turn_cmd + max_turn_step
+                                elif delta_turn < -max_turn_step:
+                                    turn = last_auto_turn_cmd - max_turn_step
+                                else:
+                                    turn = turn_target
+                                last_auto_turn_cmd = turn
+                                last_auto_turn_time = now
+
+                                # Reduce forward speed as heading error grows to avoid cutting sharp arcs.
+                                slow_turn_rad = math.radians(max(0.0, float(args.drive_slow_turn_deg)))
+                                stop_turn_rad = math.radians(max(0.0, float(args.drive_stop_turn_deg)))
+                                if stop_turn_rad < slow_turn_rad:
+                                    stop_turn_rad = slow_turn_rad
+
+                                if stop_turn_rad <= 1e-6:
+                                    turn_scale = 0.0 if err_abs > 0.0 else 1.0
+                                elif err_abs >= stop_turn_rad:
+                                    turn_scale = 0.0
+                                elif err_abs <= slow_turn_rad:
+                                    turn_scale = 1.0
+                                else:
+                                    turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
+
                                 align_scale = max(0.0, math.cos(err))
-                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale
+                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
 
                                 send_nt_command(
                                     True,
