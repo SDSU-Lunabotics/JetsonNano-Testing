@@ -2209,50 +2209,9 @@ def main():
                 # Hold-to-move: decay to 0 if key not pressed recently.
                 if manual_mode:
                     if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
-                    cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
-                        break
-                    if key == ord("m"):
-                        manual_mode = not manual_mode
-                        if manual_mode:
-                            # Entering manual mode pauses auto navigation but keeps the last goal.
-                            emergency_stop = False
-                            manual_fwd = 0.0
-                            manual_turn = 0.0
-                            print("Manual drive mode: ON (auto paused)")
-                        else:
-                            print("Manual drive mode: OFF (auto resumed)")
-                    if key == ord("c"):
-                        follow_rover_map = not follow_rover_map
-                        state = "ON" if follow_rover_map else "OFF"
-                        print(f"Map follow mode: {state}")
-                    if key == ord(" "):
-                        emergency_stop = True
                         manual_fwd = 0.0
+                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
                         manual_turn = 0.0
-                    now = time.time()
-                    if key == ord("w"):
-                        manual_fwd = max(0.0, min(1.0, args.drive_speed))
-                        last_w_time = now
-                    if key == ord("s"):
-                        manual_fwd = -max(0.0, min(1.0, args.drive_speed))
-                        last_s_time = now
-                    if key == ord("a"):
-                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
-                        last_a_time = now
-                    if key == ord("d"):
-                        manual_turn = max(0.0, min(1.0, args.drive_speed))
-                        last_d_time = now
-                    if key == ord("x"):
-                        manual_fwd = 0.0
-                        manual_turn = 0.0
-                    # Hold-to-move: decay to 0 if key not pressed recently.
-                    if manual_mode:
-                        if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
-                            manual_fwd = 0.0
-                        if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
-                            manual_turn = 0.0
                 else:
                     time.sleep(0.01)
 
