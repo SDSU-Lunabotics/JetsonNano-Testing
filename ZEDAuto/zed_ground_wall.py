@@ -805,20 +805,9 @@ def main():
             nt_ready_stuck_since = 0.0
             return
 
-        # Avoid stomping in-flight commands if robot has not consumed CommandReady yet.
-        remote_ready = sd.getBoolean("Jetson/CommandReady", False)
-        if remote_ready and not nt_ready_high:
-            if nt_ready_stuck_since <= 0.0:
-                nt_ready_stuck_since = now
-            if (now - nt_ready_stuck_since) >= max(0.05, float(args.nt_command_ack_timeout_sec)):
-                if args.drive_debug:
-                    print("Warning: stale CommandReady detected; clearing flag.")
-                sd.putBoolean("Jetson/CommandReady", False)
-                nt_ready_stuck_since = 0.0
-            else:
-                return
-        else:
-            nt_ready_stuck_since = 0.0
+        # Always overwrite CommandReady — do not wait for RoboRIO to acknowledge.
+        # (RoboRIO may not clear the flag in Teleop; waiting blocks all subsequent commands.)
+        nt_ready_stuck_since = 0.0
 
         nt_command_seq += 1
         sd.putNumber("Jetson/CommandForward", float(fwd))
