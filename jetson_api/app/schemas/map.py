@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -48,7 +48,7 @@ class MapUiStateResponse(BaseModel):
     mining_state: Optional[str] = None
     selected_tool: Optional[str] = None
     brush_radius: Optional[int] = None
-    controls: list[MapUiControl] = Field(default_factory=list)
+    controls: List[MapUiControl] = Field(default_factory=list)
 
 
 class MapUiCommandRequest(BaseModel):

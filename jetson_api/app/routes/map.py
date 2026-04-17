@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import time
-from typing import Iterator, Optional
+from typing import Iterator, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -41,7 +41,7 @@ _SUPPORTED_UI_COMMANDS = {
 }
 
 
-def _default_ui_controls() -> list[MapUiControl]:
+def _default_ui_controls() -> List[MapUiControl]:
     return [
         MapUiControl(id="paint_obstacle", label="Paint Obstacle", command="paint_obstacle"),
         MapUiControl(id="paint_safe", label="Paint Safe", command="paint_safe"),
@@ -71,7 +71,7 @@ def _read_ui_state() -> MapUiStateResponse:
         return MapUiStateResponse(available=False, controls=_default_ui_controls())
 
     controls_raw = payload.get("controls") or []
-    controls: list[MapUiControl] = []
+    controls: List[MapUiControl] = []
     for item in controls_raw:
         try:
             controls.append(MapUiControl(**item))
