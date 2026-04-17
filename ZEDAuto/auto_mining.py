@@ -1,0 +1,665 @@
+"""
+Mining automation subsystem for the ZED-based Lunabotics rover.
+
+Provides MiningAutomation: a state machine that coordinates excavation
+and deposit cycles using the live occupancy map.
+
+Zone setup (on the map window):
+  Press 'e', then click 4 corners  — define excavation zone (orange box)
+  Press 'd', then click 4 corners  — define deposit zone   (cyan box)
+  Press 'r'                         — start automated run
+  Press 't'                         — abort run at any time
+
+Each cycle:
+  1. Navigate to next dig strip waypoint    (A* guided, normal speed)
+  2. Slow forward creep through strip       (DIGGING — simulates bucket fill)
+  3. Short reverse backup                   (BACKUP)
+  4. Navigate to pre-deposit approach point (A* guided, normal speed)
+  5. Reverse into deposit zone              (DEPOSITING — treadmill on back)
+  6. Repeat for all strips, then DONE
+"""
+
+import os
+import json
+import math
+import enum
+
+import numpy as np
+
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+
+
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
+
+class MiningState(enum.Enum):
+    IDLE             = "IDLE"
+    DRAW_EXCAV       = "DRAW_EXCAV"
+    DRAW_DEPOSIT     = "DRAW_DEPOSIT"
+    PLAN_SWEEP       = "PLAN_SWEEP"
+    NAVIGATE_DIG     = "NAVIGATE_DIG"
+    DIGGING          = "DIGGING"
+    BACKUP           = "BACKUP"
+    NAVIGATE_DEPOSIT = "NAVIGATE_DEPOSIT"
+    DEPOSITING       = "DEPOSITING"
+    DONE             = "DONE"
+    ABORTED          = "ABORTED"
+
+
+# ---------------------------------------------------------------------------
+# Main class
+# ---------------------------------------------------------------------------
+
+class MiningAutomation:
+    """
+    Self-contained state machine for excavation + deposit automation.
+
+    Parameters
+    ----------
+    cfg : dict
+        Configuration keys (all optional, with defaults):
+          dig_duration          float  5.0   Seconds of forward creep per strip
+          dig_speed             float  0.20  Motor value during dig creep
+          backup_duration       float  2.0   Seconds to reverse after dig
+          backup_speed          float  0.35  Motor value during backup
+          deposit_duration      float  5.0   Seconds reversing into deposit zone
+          deposit_backup_speed  float  0.35  Motor value during deposit reverse
+          deposit_approach_dist float  1.0   Metres outside deposit zone to stop
+          strip_pitch_m         float  0.0   Row spacing (0 = rover_size_m * 0.8)
+          goal_tol_m            float  0.4   Goal-reached distance (m)
+          rover_size_m          float  0.305 Rover footprint (m, square)
+          zones_path            str    mining_zones.json zone persistence file
+    occ_map : OccupancyMap
+        Used for coordinate conversion and obstacle checking.
+    """
+
+    def __init__(self, cfg, occ_map):
+        self.cfg = cfg
+        self.state = MiningState.IDLE
+
+        # Zone corners stored as (row, col) grid indices
+        self.excav_corners_rc = []    # set after 4 clicks in DRAW_EXCAV
+        self.deposit_corners_rc = []  # set after 4 clicks in DRAW_DEPOSIT
+        self._click_buffer = []       # accumulates corners while drawing
+
+        # Dig sweep
+        self.dig_points_rc = []       # boustrophedon waypoints inside excav zone
+        self.dig_index = 0
+        self.visited = set()          # set of completed dig_index values
+
+        # Deposit approach waypoint (recomputed when None)
+        self._deposit_approach_rc = None
+
+        # Phase timer
+        self.phase_start = 0.0
+
+        # Zones file
+        self.zones_path = cfg.get("zones_path", os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "mining_zones.json"
+        ))
+
+        # Try to restore zones from last run
+        self.load_zones(occ_map)
+
+    # -----------------------------------------------------------------------
+    # Public API — called from zed_ground_wall.py
+    # -----------------------------------------------------------------------
+
+    def consume_click(self, row, col, occ_map):
+        """
+        Called when the user left-clicks on the map.
+        Returns True when the click is consumed (suppresses normal goal assignment).
+        """
+        if self.state not in (MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
+            return False
+
+        self._click_buffer.append((row, col))
+        n = len(self._click_buffer)
+        zone_name = "Excav" if self.state == MiningState.DRAW_EXCAV else "Deposit"
+        print(f"[Mining] {zone_name} corner {n}/4  r={row} c={col}")
+
+        if n < 4:
+            return True
+
+        # Fourth corner — finalise zone
+        corners = list(self._click_buffer)
+        self._click_buffer = []
+
+        if self.state == MiningState.DRAW_EXCAV:
+            self.excav_corners_rc = corners
+            print("[Mining] Excavation zone defined.")
+        else:
+            self.deposit_corners_rc = corners
+            self._deposit_approach_rc = None   # invalidate cached approach point
+            print("[Mining] Deposit zone defined.")
+
+        self.state = MiningState.IDLE
+
+        if self.excav_corners_rc and self.deposit_corners_rc:
+            self.save_zones(occ_map)
+            print("[Mining] Both zones set. Press 'r' to start the run.")
+        else:
+            missing = "excavation" if not self.excav_corners_rc else "deposit"
+            print(f"[Mining] Press '{('e' if not self.excav_corners_rc else 'd')}' "
+                  f"and click 4 corners to set the {missing} zone.")
+        return True
+
+    def handle_key(self, key):
+        """
+        Called for every key event. Returns True if the key was consumed.
+        Consumed keys: e, d, r, t
+        """
+        if not HAS_CV2:
+            return False
+        if key == ord("e"):
+            self._start_draw(MiningState.DRAW_EXCAV, "excavation")
+            return True
+        if key == ord("d"):
+            self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
+            return True
+        if key == ord("r"):
+            self._start_run()
+            return True
+        if key == ord("t"):
+            self._abort()
+            return True
+        return False
+
+    def tick(self, cam_rc, occ_map, now):
+        """
+        Advance the state machine by one frame.
+
+        Parameters
+        ----------
+        cam_rc : (row, col) or None   Current rover grid cell.
+        occ_map : OccupancyMap
+        now : float                   Current timestamp (time.time()).
+
+        Returns
+        -------
+        goal_rc_override : (row, col) or None
+            If not None, override goal_cell to this value before path planning.
+        drive_override : (fwd, turn) or None
+            If not None, send this command directly and skip A* steering.
+        status_str : str
+            Short label for display.
+        """
+        s = self.state
+
+        # --- Drawing modes ---
+        if s in (MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
+            zname = "EXCAV" if s == MiningState.DRAW_EXCAV else "DEPOSIT"
+            n = len(self._click_buffer)
+            return None, None, f"DRAW_{zname} ({n}/4)"
+
+        # --- Idle / terminal ---
+        if s == MiningState.IDLE:
+            return None, None, "IDLE"
+        if s == MiningState.DONE:
+            return None, (0.0, 0.0), "DONE"
+        if s == MiningState.ABORTED:
+            return None, (0.0, 0.0), "ABORTED"
+
+        # --- Plan sweep ---
+        if s == MiningState.PLAN_SWEEP:
+            self._generate_dig_points(occ_map)
+            if not self.dig_points_rc:
+                print("[Mining] No valid dig points; aborting.")
+                self.state = MiningState.ABORTED
+                return None, (0.0, 0.0), "ABORTED"
+            self.dig_index = 0
+            self.visited = set()
+            self.state = MiningState.NAVIGATE_DIG
+            total = len(self.dig_points_rc)
+            print(f"[Mining] {total} dig waypoint(s) planned. Starting navigation.")
+            return (self.dig_points_rc[0], None,
+                    f"NAV_DIG 1/{total}")
+
+        # --- Navigate to dig point ---
+        if s == MiningState.NAVIGATE_DIG:
+            if self.dig_index >= len(self.dig_points_rc):
+                self.state = MiningState.DONE
+                return None, (0.0, 0.0), "DONE"
+            target_rc = self.dig_points_rc[self.dig_index]
+            total = len(self.dig_points_rc)
+            if cam_rc is not None:
+                dist_m = self._dist_rc(cam_rc, target_rc, occ_map.map_res_m)
+                if dist_m <= float(self.cfg.get("goal_tol_m", 0.4)):
+                    print(f"[Mining] At dig point {self.dig_index + 1}/{total}. Digging.")
+                    self.state = MiningState.DIGGING
+                    self.phase_start = now
+            return (target_rc, None, f"NAV_DIG {self.dig_index + 1}/{total}")
+
+        # --- Digging: slow forward creep ---
+        if s == MiningState.DIGGING:
+            dig_speed = float(self.cfg.get("dig_speed", 0.20))
+            dig_dur   = float(self.cfg.get("dig_duration", 5.0))
+            elapsed   = now - self.phase_start
+            if elapsed >= dig_dur:
+                self.visited.add(self.dig_index)
+                print(f"[Mining] Dig complete ({self.dig_index + 1}). Backing up.")
+                self.state = MiningState.BACKUP
+                self.phase_start = now
+            pct = min(1.0, elapsed / max(0.01, dig_dur)) * 100
+            return (None, (dig_speed, 0.0), f"DIGGING {pct:.0f}%")
+
+        # --- Backup after dig ---
+        if s == MiningState.BACKUP:
+            bk_speed = float(self.cfg.get("backup_speed", 0.35))
+            bk_dur   = float(self.cfg.get("backup_duration", 2.0))
+            elapsed  = now - self.phase_start
+            if elapsed >= bk_dur:
+                print("[Mining] Backup done. Heading to deposit zone.")
+                self.state = MiningState.NAVIGATE_DEPOSIT
+                self._deposit_approach_rc = None   # recompute fresh each deposit trip
+            return (None, (-bk_speed, 0.0), f"BACKUP {elapsed:.1f}/{bk_dur:.1f}s")
+
+        # --- Navigate to deposit approach waypoint ---
+        if s == MiningState.NAVIGATE_DEPOSIT:
+            if self._deposit_approach_rc is None:
+                self._deposit_approach_rc = self._find_deposit_approach(occ_map)
+                if self._deposit_approach_rc is None:
+                    print("[Mining] Cannot compute deposit approach; aborting.")
+                    self.state = MiningState.ABORTED
+                    return None, (0.0, 0.0), "ABORTED"
+            ap_rc = self._deposit_approach_rc
+            if cam_rc is not None:
+                dist_m = self._dist_rc(cam_rc, ap_rc, occ_map.map_res_m)
+                if dist_m <= float(self.cfg.get("goal_tol_m", 0.4)):
+                    print("[Mining] At deposit approach. Reversing into zone.")
+                    self.state = MiningState.DEPOSITING
+                    self.phase_start = now
+            return (ap_rc, None, "NAV_DEPOSIT")
+
+        # --- Depositing: reverse into zone (treadmill on back) ---
+        if s == MiningState.DEPOSITING:
+            dep_speed = float(self.cfg.get("deposit_backup_speed", 0.35))
+            dep_dur   = float(self.cfg.get("deposit_duration", 5.0))
+            elapsed   = now - self.phase_start
+            if elapsed >= dep_dur:
+                next_idx = self.dig_index + 1
+                total = len(self.dig_points_rc)
+                if next_idx < total:
+                    self.dig_index = next_idx
+                    print(f"[Mining] Deposit done. Navigating to dig point "
+                          f"{next_idx + 1}/{total}.")
+                    self.state = MiningState.NAVIGATE_DIG
+                    self._deposit_approach_rc = None
+                    return (self.dig_points_rc[self.dig_index], None,
+                            f"NAV_DIG {self.dig_index + 1}/{total}")
+                else:
+                    print("[Mining] All strips done. DONE.")
+                    self.state = MiningState.DONE
+                    return None, (0.0, 0.0), "DONE"
+            pct = min(1.0, elapsed / max(0.01, dep_dur)) * 100
+            return (None, (-dep_speed, 0.0), f"DEPOSITING {pct:.0f}%")
+
+        return None, None, self.state.value
+
+    def render_overlay(self, map_vis, occ_map):
+        """
+        Draw zone boxes, dig waypoints, and status banner onto map_vis.
+        map_vis must be the raw grid frame (grid_h x grid_w) BEFORE apply_map_view
+        and BEFORE zoom-resize. Coordinates are in raw grid pixel space.
+        """
+        if not HAS_CV2 or map_vis is None:
+            return
+        h, w = map_vis.shape[:2]
+
+        def _clamp(r, c):
+            return max(0, min(h - 1, r)), max(0, min(w - 1, c))
+
+        def _draw_poly_outline(corners_rc, color):
+            if len(corners_rc) < 2:
+                return
+            pts = np.array([[c, r] for r, c in corners_rc], dtype=np.int32)
+            cv2.polylines(map_vis, [pts], True, color, 1, cv2.LINE_AA)
+
+        # -- Excavation zone (orange outline) --
+        if self.excav_corners_rc:
+            _draw_poly_outline(self.excav_corners_rc, (0, 140, 255))
+            cr, cc = self._poly_centroid(self.excav_corners_rc)
+            cr, cc = _clamp(int(cr), int(cc))
+            cv2.putText(map_vis, "EX", (max(0, cc - 6), max(8, cr + 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (0, 140, 255), 1, cv2.LINE_AA)
+
+        # -- Deposit zone (cyan/gold outline) --
+        if self.deposit_corners_rc:
+            _draw_poly_outline(self.deposit_corners_rc, (255, 220, 0))
+            cr, cc = self._poly_centroid(self.deposit_corners_rc)
+            cr, cc = _clamp(int(cr), int(cc))
+            cv2.putText(map_vis, "DEP", (max(0, cc - 9), max(8, cr + 4)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 220, 0), 1, cv2.LINE_AA)
+
+        # -- Deposit approach waypoint (magenta diamond) --
+        if self._deposit_approach_rc is not None:
+            apr, apc = self._deposit_approach_rc
+            if 0 <= apr < h and 0 <= apc < w:
+                sz = 3
+                diamond = np.array(
+                    [[apc, apr - sz], [apc + sz, apr],
+                     [apc, apr + sz], [apc - sz, apr]], dtype=np.int32
+                )
+                cv2.polylines(map_vis, [diamond], True, (255, 0, 255), 1, cv2.LINE_AA)
+
+        # -- Dig waypoints --
+        active_states = (
+            MiningState.NAVIGATE_DIG,
+            MiningState.DIGGING,
+            MiningState.BACKUP,
+        )
+        for i, (dr, dc) in enumerate(self.dig_points_rc):
+            if not (0 <= dr < h and 0 <= dc < w):
+                continue
+            if i in self.visited:
+                # White X for completed strips
+                cv2.line(map_vis, (dc - 2, dr - 2), (dc + 2, dr + 2), (210, 210, 210), 1)
+                cv2.line(map_vis, (dc + 2, dr - 2), (dc - 2, dr + 2), (210, 210, 210), 1)
+            elif i == self.dig_index and self.state in active_states:
+                # Yellow circle for active strip
+                cv2.circle(map_vis, (dc, dr), 3, (0, 255, 255), 1)
+            else:
+                # Small grey dot for pending strips
+                safe_r, safe_c = _clamp(dr, dc)
+                map_vis[safe_r, safe_c] = (110, 110, 110)
+
+        # -- Corner-click preview (in-progress drawing) --
+        if self._click_buffer:
+            col = (0, 140, 255) if self.state == MiningState.DRAW_EXCAV else (255, 220, 0)
+            for cr, cc in self._click_buffer:
+                if 0 <= cr < h and 0 <= cc < w:
+                    cv2.circle(map_vis, (cc, cr), 2, col, -1)
+
+        # -- Status banner at bottom of map --
+        s = self.state
+        label = s.value
+        if s == MiningState.NAVIGATE_DIG and self.dig_points_rc:
+            label += f" {self.dig_index + 1}/{len(self.dig_points_rc)}"
+        hint = ""
+        if s == MiningState.IDLE:
+            if not self.excav_corners_rc:
+                hint = " e=excav"
+            elif not self.deposit_corners_rc:
+                hint = " d=dep"
+            else:
+                hint = " r=run"
+        elif s in (MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
+            hint = f" ({len(self._click_buffer)}/4 clicks)"
+        cv2.putText(
+            map_vis,
+            f"MINE:{label}{hint}",
+            (4, h - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.34,
+            (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+    def save_zones(self, occ_map):
+        """Persist both zone polygons as world-space (x, z) pairs to JSON."""
+        def _rc_to_world(corners_rc):
+            out = []
+            for r, c in corners_rc:
+                w = occ_map.grid_to_world(r, c)
+                if w is not None:
+                    out.append([float(w[0]), float(w[1])])
+            return out
+
+        try:
+            data = {
+                "excav":   _rc_to_world(self.excav_corners_rc),
+                "deposit": _rc_to_world(self.deposit_corners_rc),
+            }
+            d = os.path.dirname(self.zones_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(self.zones_path, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"[Mining] Zones saved → {self.zones_path}")
+        except Exception as exc:
+            print(f"[Mining] Zone save failed: {exc}")
+
+    def load_zones(self, occ_map):
+        """Restore zone polygons from JSON if the file exists."""
+        if not os.path.exists(self.zones_path):
+            return
+
+        def _world_to_rc(pairs):
+            out = []
+            for xz in pairs:
+                rc = occ_map.world_to_grid(float(xz[0]), float(xz[1]))
+                if rc is not None:
+                    out.append(rc)
+            return out
+
+        try:
+            with open(self.zones_path) as f:
+                data = json.load(f)
+            loaded = False
+            if "excav" in data and len(data["excav"]) == 4:
+                rc = _world_to_rc(data["excav"])
+                if len(rc) == 4:
+                    self.excav_corners_rc = rc
+                    loaded = True
+            if "deposit" in data and len(data["deposit"]) == 4:
+                rc = _world_to_rc(data["deposit"])
+                if len(rc) == 4:
+                    self.deposit_corners_rc = rc
+                    loaded = True
+            if loaded:
+                print(f"[Mining] Zones loaded ← {self.zones_path}")
+        except Exception as exc:
+            print(f"[Mining] Zone load failed: {exc}")
+
+    # -----------------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------------
+
+    def _start_draw(self, draw_state, name):
+        blocked = (
+            MiningState.PLAN_SWEEP,
+            MiningState.NAVIGATE_DIG,
+            MiningState.DIGGING,
+            MiningState.BACKUP,
+            MiningState.NAVIGATE_DEPOSIT,
+            MiningState.DEPOSITING,
+        )
+        if self.state in blocked:
+            print(f"[Mining] Cannot redefine zones while running "
+                  f"(state={self.state.value}). Press 't' to abort first.")
+            return
+        self.state = draw_state
+        self._click_buffer = []
+        print(f"[Mining] Drawing {name} zone — click 4 corners on the map.")
+
+    def _start_run(self):
+        if not self.excav_corners_rc:
+            print("[Mining] Excavation zone not set. Press 'e' then click 4 corners.")
+            return
+        if not self.deposit_corners_rc:
+            print("[Mining] Deposit zone not set. Press 'd' then click 4 corners.")
+            return
+        running = (
+            MiningState.PLAN_SWEEP,
+            MiningState.NAVIGATE_DIG,
+            MiningState.DIGGING,
+            MiningState.BACKUP,
+            MiningState.NAVIGATE_DEPOSIT,
+            MiningState.DEPOSITING,
+        )
+        if self.state in running:
+            print(f"[Mining] Already running (state={self.state.value}). "
+                  "Press 't' to abort first.")
+            return
+        print("[Mining] Starting run — planning sweep...")
+        self.state = MiningState.PLAN_SWEEP
+        self.dig_index = 0
+        self.visited = set()
+        self._deposit_approach_rc = None
+
+    def _abort(self):
+        if self.state in (MiningState.IDLE, MiningState.DONE, MiningState.ABORTED,
+                          MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
+            self.state = MiningState.IDLE
+            self._click_buffer = []
+            return
+        print(f"[Mining] Aborted from {self.state.value}.")
+        self.state = MiningState.ABORTED
+
+    @staticmethod
+    def _dist_rc(a_rc, b_rc, res_m):
+        """Distance in metres between two grid cells."""
+        dr = a_rc[0] - b_rc[0]
+        dc = a_rc[1] - b_rc[1]
+        return math.hypot(dr, dc) * float(res_m)
+
+    @staticmethod
+    def _poly_centroid(corners_rc):
+        """Return (avg_row, avg_col) of a list of (row, col) corners."""
+        rs = [r for r, c in corners_rc]
+        cs = [c for r, c in corners_rc]
+        return sum(rs) / len(rs), sum(cs) / len(cs)
+
+    @staticmethod
+    def _polygon_cells(corners_rc, grid_shape):
+        """
+        Rasterise a polygon defined by corners_rc into a list of (row, col) cells.
+        Uses OpenCV's fillPoly on a temporary uint8 mask.
+        Falls back to bounding-box approach if OpenCV is unavailable.
+        """
+        if len(corners_rc) < 3:
+            return []
+        h, w = grid_shape
+        if HAS_CV2:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            pts = np.array([[c, r] for r, c in corners_rc], dtype=np.int32)
+            cv2.fillPoly(mask, [pts], 1)
+            rows, cols = np.where(mask)
+            return list(zip(rows.tolist(), cols.tolist()))
+        # Fallback: bounding-box only (less accurate but works without cv2)
+        min_r = max(0, min(r for r, c in corners_rc))
+        max_r = min(h - 1, max(r for r, c in corners_rc))
+        min_c = max(0, min(c for r, c in corners_rc))
+        max_c = min(w - 1, max(c for r, c in corners_rc))
+        cells = []
+        for r in range(min_r, max_r + 1):
+            for c in range(min_c, max_c + 1):
+                cells.append((r, c))
+        return cells
+
+    def _generate_dig_points(self, occ_map):
+        """
+        Build a serpentine (boustrophedon) list of dig-strip waypoints.
+
+        Each strip corresponds to one row of cells inside the excavation
+        polygon, subsampled at strip_pitch spacing.  Even-numbered rows
+        go left→right; odd rows go right→left (reduces repositioning turns).
+        Cells that fall inside the current obstacle mask are skipped.
+        """
+        self.dig_points_rc = []
+        if not self.excav_corners_rc:
+            return
+
+        cells = self._polygon_cells(
+            self.excav_corners_rc, (occ_map.grid_h, occ_map.grid_w)
+        )
+        if not cells:
+            print("[Mining] Excavation polygon produced no grid cells.")
+            return
+
+        rows_arr = np.array([r for r, c in cells], dtype=np.int32)
+        cols_arr = np.array([c for r, c in cells], dtype=np.int32)
+
+        # Strip pitch in grid cells
+        rover_size_m   = float(self.cfg.get("rover_size_m", 0.305))
+        strip_pitch_m  = float(self.cfg.get("strip_pitch_m", 0.0))
+        if strip_pitch_m <= 0.0:
+            strip_pitch_m = max(0.05, rover_size_m * 0.8)
+        step_cells = max(1, int(math.ceil(strip_pitch_m / occ_map.map_res_m)))
+
+        # Obstacle mask for filtering blocked waypoints
+        obs = occ_map.obstacle_mask()
+
+        # Walk unique rows in the polygon at step_cells spacing (serpentine)
+        unique_rows = sorted(set(int(v) for v in rows_arr))
+        selected_rows = unique_rows[::step_cells]
+
+        points = []
+        for i, r in enumerate(selected_rows):
+            row_mask = (rows_arr == r)
+            if not np.any(row_mask):
+                continue
+            row_cols = sorted(int(v) for v in cols_arr[row_mask])
+            if not row_cols:
+                continue
+            # Serpentine direction
+            if i % 2 == 1:
+                row_cols = row_cols[::-1]
+            # Use the centre column in this strip row
+            mid_c = row_cols[len(row_cols) // 2]
+            # Skip cells blocked by confirmed obstacles
+            if obs[r, mid_c]:
+                continue
+            points.append((r, mid_c))
+
+        self.dig_points_rc = points
+        print(f"[Mining] {len(points)} dig waypoints "
+              f"(step={step_cells} cells ≈ {strip_pitch_m:.2f} m/strip).")
+
+    def _find_deposit_approach(self, occ_map):
+        """
+        Compute an approach waypoint just outside the deposit zone on the
+        excavation side, so the rover can reverse in (treadmill on rear).
+
+        Geometry:
+          approach = deposit_centroid
+                     + normalize(excav_centroid − deposit_centroid)
+                     × approach_dist_m
+
+        Returns (row, col) or None on failure.
+        """
+        if not self.deposit_corners_rc or not self.excav_corners_rc:
+            return None
+
+        approach_dist = float(self.cfg.get("deposit_approach_dist", 1.0))
+
+        # Centroids in grid space
+        dep_r, dep_c = self._poly_centroid(self.deposit_corners_rc)
+        exc_r, exc_c = self._poly_centroid(self.excav_corners_rc)
+
+        # Convert to world (x, z)
+        dep_world = occ_map.grid_to_world(int(dep_r), int(dep_c))
+        exc_world = occ_map.grid_to_world(int(exc_r), int(exc_c))
+        if dep_world is None or exc_world is None:
+            return None
+
+        dep_x, dep_z = dep_world
+        exc_x, exc_z = exc_world
+
+        # Direction from deposit toward excavation (rover faces this way to
+        # reach the approach point, so its back points toward deposit)
+        dx = exc_x - dep_x
+        dz = exc_z - dep_z
+        length = math.hypot(dx, dz)
+        if length < 1e-6:
+            return None
+        dx /= length
+        dz /= length
+
+        # Approach point in world space
+        ap_x = dep_x + dx * approach_dist
+        ap_z = dep_z + dz * approach_dist
+
+        # Convert to grid
+        rc = occ_map.world_to_grid(ap_x, ap_z)
+        if rc is None:
+            # Clamp near the grid boundary and retry
+            ap_x = max(occ_map.x_min + occ_map.map_res_m,
+                       min(occ_map.x_max - occ_map.map_res_m, ap_x))
+            ap_z = max(occ_map.z_min + occ_map.map_res_m,
+                       min(occ_map.z_max - occ_map.map_res_m, ap_z))
+            rc = occ_map.world_to_grid(ap_x, ap_z)
+        return rc

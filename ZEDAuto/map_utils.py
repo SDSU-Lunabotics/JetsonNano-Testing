@@ -46,6 +46,8 @@ class OccupancyMap:
         self.free_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
         self.occ_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
         self.hole_counts = np.zeros((self.grid_h, self.grid_w), dtype=np.float32)
+        # Cells painted manually as permanently safe — sensor data cannot overwrite these.
+        self.painted_free = np.zeros((self.grid_h, self.grid_w), dtype=bool)
 
     def meta(self):
         return {
@@ -151,18 +153,25 @@ class OccupancyMap:
             self.free_counts[g_r, g_c] += 1.0
         if np.any(omask):
             occ_r, occ_c = _unique_cells(row[omask], col[omask])
-            self.occ_counts[occ_r, occ_c] += 1.0
-            # New obstacle evidence should degrade prior free-space confidence.
-            if self.free_downgrade_factor < 1.0:
-                self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
+            # Skip painted-safe cells — they cannot become obstacles.
+            not_painted = ~self.painted_free[occ_r, occ_c]
+            occ_r, occ_c = occ_r[not_painted], occ_c[not_painted]
+            if occ_r.size > 0:
+                self.occ_counts[occ_r, occ_c] += 1.0
+                if self.free_downgrade_factor < 1.0:
+                    self.free_counts[occ_r, occ_c] *= self.free_downgrade_factor
         if hmask is not None and np.any(hmask):
             hole_r, hole_c = _unique_cells(row[hmask], col[hmask])
-            self.hole_counts[hole_r, hole_c] += 1.0
-            # Keep holes informational (blue) without making them non-traversable by
-            # degrading free-space confidence. Obstacle evidence still controls blocking.
+            # Skip painted-safe cells for holes too.
+            not_painted = ~self.painted_free[hole_r, hole_c]
+            hole_r, hole_c = hole_r[not_painted], hole_c[not_painted]
+            if hole_r.size > 0:
+                self.hole_counts[hole_r, hole_c] += 1.0
 
-    def render(self):
-        # Visualize: green = free, red = occupied, blue = holes, black = unknown.
+    def render(self, whole_mode=False):
+        # Visualize: white = mapped/known ground, red = confirmed obstacle, blue = hole,
+        # black = unknown. When whole_mode is enabled, the map renders all known ground
+        # as white and highlights only well-established obstacle/hole evidence.
         free_vis = np.log1p(self.free_counts)
         occ_vis = np.log1p(self.occ_counts)
         hole_vis = np.log1p(self.hole_counts)
@@ -175,10 +184,51 @@ class OccupancyMap:
             occ_vis = occ_vis / omax
         if hmax > 0:
             hole_vis = hole_vis / hmax
+
         map_vis = np.zeros((self.grid_h, self.grid_w, 3), dtype=np.uint8)
-        map_vis[:, :, 1] = (free_vis * 255.0).astype(np.uint8)
-        map_vis[:, :, 2] = (occ_vis * 255.0).astype(np.uint8)
-        map_vis[:, :, 0] = (hole_vis * 255.0).astype(np.uint8)
+
+        known = self.known_mask(min_evidence=1.0)
+        if np.any(known):
+            if whole_mode:
+                map_vis[known] = (240, 240, 240)
+            else:
+                free_shade = (free_vis[known] * 160.0 + 80.0).astype(np.uint8)
+                map_vis[known, 1] = free_shade
+                map_vis[known, 0] = np.minimum(map_vis[known, 0], (free_shade // 2).astype(np.uint8))
+                map_vis[known, 2] = np.minimum(map_vis[known, 2], (free_shade // 2).astype(np.uint8))
+
+        # Show red obstacles only when we have strong evidence.
+        strong_occ = self.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
+        if np.any(strong_occ):
+            occ_intensity = (occ_vis[strong_occ] * 255.0).astype(np.uint8)
+            occ_intensity = np.maximum(occ_intensity, 120)
+            map_vis[strong_occ, 2] = occ_intensity
+            map_vis[strong_occ, 1] = np.minimum(map_vis[strong_occ, 1], 40)
+            map_vis[strong_occ, 0] = np.minimum(map_vis[strong_occ, 0], 40)
+
+        # Show holes as blue when there is hole evidence.
+        hole_cells = (self.hole_counts > 0) & ~strong_occ
+        if np.any(hole_cells):
+            hole_intensity = (hole_vis[hole_cells] * 255.0).astype(np.uint8)
+            hole_intensity = np.maximum(hole_intensity, 80)
+            map_vis[hole_cells, 0] = hole_intensity
+            map_vis[hole_cells, 1] = np.minimum(map_vis[hole_cells, 1], 140)
+            map_vis[hole_cells, 2] = np.minimum(map_vis[hole_cells, 2], 60)
+
+        # Gentle halo around confirmed free-space to improve readability.
+        confirmed_free = self.free_counts >= self.free_confirm_hits
+        if np.any(confirmed_free):
+            near_confirmed_free = inflate_mask(confirmed_free, radius_cells=1)
+            evidence = self.free_counts + self.occ_counts + self.hole_counts
+
+            halo_unknown = near_confirmed_free & (evidence < 1.0)
+            if np.any(halo_unknown):
+                map_vis[halo_unknown] = (220, 220, 220)
+
+        # Painted-safe cells shown as bright cyan, always on top.
+        if np.any(self.painted_free):
+            map_vis[self.painted_free] = (255, 230, 80)  # BGR: bright cyan-green
+
         return map_vis
 
     def world_to_grid(self, x, z):
@@ -200,20 +250,22 @@ class OccupancyMap:
     def obstacle_mask(self, min_occ_count=3.0, min_occ_ratio=1.5, min_occ_advantage=0.0):
         # Mark as obstacle only if we have enough occupied evidence
         # and it significantly outweighs free evidence.
+        # Painted-safe cells are never obstacles.
         occ = self.occ_counts
         free = self.free_counts
         ratio_ok = occ >= (free * float(min_occ_ratio))
         adv_ok = (occ - free) >= float(min_occ_advantage)
-        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok
+        return (occ >= float(min_occ_count)) & ratio_ok & adv_ok & ~self.painted_free
 
     def known_mask(self, min_evidence=1.0):
         evidence = self.free_counts + self.occ_counts + self.hole_counts
         return evidence >= float(min_evidence)
 
 
-def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
+def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8, traversal_cost_map=None, max_search_sec=None):
     import heapq
     import math
+    import time
 
     if start_rc is None or goal_rc is None:
         return None
@@ -227,6 +279,12 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
         return None
     if gr < 0 or gr >= h or gc < 0 or gc >= w:
         return None
+
+    extra_cost = None
+    if traversal_cost_map is not None:
+        if traversal_cost_map.shape != obstacle_mask.shape:
+            return None
+        extra_cost = traversal_cost_map
 
     connectivity = int(connectivity)
     if connectivity not in (4, 8):
@@ -251,8 +309,11 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
     heapq.heappush(open_set, (heuristic(sr, sc), 0, (sr, sc)))
     came_from = {}
     cost = { (sr, sc): 0 }
+    start_time = time.time()
 
     while open_set:
+        if max_search_sec is not None and (time.time() - start_time) > float(max_search_sec):
+            return None
         _, g, current = heapq.heappop(open_set)
         if current == (gr, gc):
             # Reconstruct
@@ -274,7 +335,8 @@ def astar_path(start_rc, goal_rc, obstacle_mask, connectivity=8):
             if dr != 0 and dc != 0 and connectivity == 8:
                 if obstacle_mask[r, nc] or obstacle_mask[nr, c]:
                     continue
-            ng = g + step_cost
+            add_cost = 0.0 if extra_cost is None else float(extra_cost[nr, nc])
+            ng = g + step_cost + max(0.0, add_cost)
             if (nr, nc) not in cost or ng < cost[(nr, nc)]:
                 cost[(nr, nc)] = ng
                 came_from[(nr, nc)] = (r, c)

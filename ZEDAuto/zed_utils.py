@@ -18,9 +18,21 @@ def open_zed_camera(sl):
 
 def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
     pose = sl.Pose()
+    area_enabled = bool(area_memory or area_load_path)
+    enable_fn = None
+    if hasattr(zed, "enable_positional_tracking"):
+        enable_fn = zed.enable_positional_tracking
+    elif hasattr(zed, "enable_tracking"):
+        # Older API naming fallback.
+        enable_fn = zed.enable_tracking
+
+    if enable_fn is None:
+        print("Failed to enable positional tracking: camera API missing tracking enable function")
+        return False, pose
+
+    tracking_params = None
     try:
         tracking_params = sl.PositionalTrackingParameters()
-        area_enabled = bool(area_memory or area_load_path)
         if hasattr(tracking_params, "enable_area_memory"):
             tracking_params.enable_area_memory = area_enabled
         if area_load_path and os.path.exists(area_load_path):
@@ -28,18 +40,75 @@ def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
                 tracking_params.area_file_path = area_load_path
             elif hasattr(tracking_params, "set_area_file_path"):
                 tracking_params.set_area_file_path(area_load_path)
-        track_err = zed.enable_positional_tracking(tracking_params)
-        if track_err == sl.ERROR_CODE.SUCCESS:
-            if area_load_path and os.path.exists(area_load_path):
-                print(f"Positional tracking enabled (area memory load: {area_load_path}).")
-            elif area_enabled:
-                print("Positional tracking enabled (area memory on).")
-            else:
-                print("Positional tracking enabled.")
-            return True, pose
-        print(f"Failed to enable positional tracking: {track_err}")
     except Exception as exc:
-        print(f"Failed to enable positional tracking: {exc}")
+        # Don't fail early: some bindings differ on constructor shape.
+        print(f"Tracking params unavailable; retrying with default tracking init: {exc}")
+
+    track_err = None
+    if tracking_params is not None:
+        try:
+            track_err = enable_fn(tracking_params)
+        except TypeError:
+            track_err = None
+        except Exception as exc:
+            print(f"Tracking init with parameters failed; retrying default init: {exc}")
+            track_err = None
+
+    if track_err is None:
+        try:
+            track_err = enable_fn()
+        except Exception as exc:
+            print(f"Failed to enable positional tracking: {exc}")
+            return False, pose
+
+    if track_err == sl.ERROR_CODE.SUCCESS:
+        if area_load_path and os.path.exists(area_load_path):
+            print(f"Positional tracking enabled (area memory load: {area_load_path}).")
+        elif area_enabled:
+            print("Positional tracking enabled (area memory on).")
+        else:
+            print("Positional tracking enabled.")
+        return True, pose
+
+    # If area-memory was requested, retry once without area-memory because
+    # stale/incompatible area files can prevent tracking from enabling.
+    if area_enabled:
+        print(
+            f"Tracking failed with area-memory settings ({track_err}); retrying with area-memory disabled."
+        )
+        retry_err = None
+        retry_params = None
+        try:
+            retry_params = sl.PositionalTrackingParameters()
+            if hasattr(retry_params, "enable_area_memory"):
+                retry_params.enable_area_memory = False
+            if hasattr(retry_params, "area_file_path"):
+                retry_params.area_file_path = ""
+            elif hasattr(retry_params, "set_area_file_path"):
+                retry_params.set_area_file_path("")
+        except Exception:
+            retry_params = None
+
+        if retry_params is not None:
+            try:
+                retry_err = enable_fn(retry_params)
+            except TypeError:
+                retry_err = None
+            except Exception:
+                retry_err = None
+
+        if retry_err is None:
+            try:
+                retry_err = enable_fn()
+            except Exception as exc:
+                print(f"Tracking retry without area-memory failed: {exc}")
+                retry_err = None
+
+        if retry_err == sl.ERROR_CODE.SUCCESS:
+            print("Positional tracking enabled (area-memory disabled fallback).")
+            return True, pose
+
+    print(f"Failed to enable positional tracking: {track_err}")
     return False, pose
 
 

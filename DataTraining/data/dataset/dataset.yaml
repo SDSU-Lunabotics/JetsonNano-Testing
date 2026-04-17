@@ -3,4 +3,6 @@ train: images/train
 val: images/val
 test: images/test
 names:
-  0: obstacle
+  0: rock
+  1: obstacle
+  2: pole
