@@ -3,13 +3,17 @@ from pathlib import Path
 import time
 from typing import Iterator, Optional
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.map import (
     MapFrameIngestResponse,
     MapStreamStatus,
+    MapUiCommandRequest,
+    MapUiCommandResponse,
+    MapUiControl,
+    MapUiStateResponse,
     MapWaypointClickRequest,
     MapWaypointCommandResponse,
 )
@@ -27,6 +31,26 @@ _ONE_PX_JPEG = (
     b"\x00\x00\x00\x00\x00\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xd2\xcf \xff\xd9"
 )
 
+_SUPPORTED_UI_COMMANDS = {
+    "paint_obstacle",
+    "paint_safe",
+    "erase_safe",
+    "clear_all",
+    "draw_excav_zone",
+    "draw_deposit_zone",
+}
+
+
+def _default_ui_controls() -> list[MapUiControl]:
+    return [
+        MapUiControl(id="paint_obstacle", label="Paint Obstacle", command="paint_obstacle"),
+        MapUiControl(id="paint_safe", label="Paint Safe", command="paint_safe"),
+        MapUiControl(id="erase_safe", label="Erase Safe", command="erase_safe"),
+        MapUiControl(id="clear_all", label="Clear All", command="clear_all"),
+        MapUiControl(id="draw_excav_zone", label="Draw Excav Zone", command="draw_excav_zone"),
+        MapUiControl(id="draw_deposit_zone", label="Draw Deposit Zone", command="draw_deposit_zone"),
+    ]
+
 
 def _write_waypoint_command(command: dict) -> None:
     target = Path(settings.map_waypoint_command_file)
@@ -36,9 +60,45 @@ def _write_waypoint_command(command: dict) -> None:
     tmp.replace(target)
 
 
+def _read_ui_state() -> MapUiStateResponse:
+    target = Path(settings.map_ui_state_file)
+    if not target.exists():
+        return MapUiStateResponse(available=False, controls=_default_ui_controls())
+
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return MapUiStateResponse(available=False, controls=_default_ui_controls())
+
+    controls_raw = payload.get("controls") or []
+    controls: list[MapUiControl] = []
+    for item in controls_raw:
+        try:
+            controls.append(MapUiControl(**item))
+        except Exception:
+            continue
+    if not controls:
+        controls = _default_ui_controls()
+
+    return MapUiStateResponse(
+        available=bool(payload.get("available", True)),
+        source=payload.get("source"),
+        timestamp_ms=payload.get("timestamp_ms"),
+        mining_state=payload.get("mining_state"),
+        selected_tool=payload.get("selected_tool"),
+        brush_radius=payload.get("brush_radius"),
+        controls=controls,
+    )
+
+
 @router.get("/status", response_model=MapStreamStatus)
 def get_map_status() -> MapStreamStatus:
     return map_service.get_status()
+
+
+@router.get("/ui", response_model=MapUiStateResponse)
+def get_map_ui_state() -> MapUiStateResponse:
+    return _read_ui_state()
 
 
 @router.get("/snapshot.jpg")
@@ -110,4 +170,28 @@ def post_waypoint(req: MapWaypointClickRequest) -> MapWaypointCommandResponse:
         ok=True,
         timestamp_ms=command_seq,
         command_seq=command_seq,
+    )
+
+
+@router.post("/command", response_model=MapUiCommandResponse)
+def post_map_ui_command(req: MapUiCommandRequest) -> MapUiCommandResponse:
+    command = str(req.command).strip()
+    if command not in _SUPPORTED_UI_COMMANDS:
+        raise HTTPException(status_code=400, detail=f"Unsupported map UI command: {command}")
+
+    command_seq = int(time.time() * 1000)
+    _write_waypoint_command(
+        {
+            "seq": command_seq,
+            "type": "ui_action",
+            "action": command,
+            "source": req.source,
+            "timestamp_ms": command_seq,
+        }
+    )
+    return MapUiCommandResponse(
+        ok=True,
+        timestamp_ms=command_seq,
+        command_seq=command_seq,
+        command=command,
     )

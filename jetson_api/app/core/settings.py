@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     camera_worker_retry_ms: int = 1000
     map_stream_interval_ms: int = 120
     map_waypoint_command_file: str = str(REPO_ROOT / "ZEDAuto" / "zed_map_command.json")
+    map_ui_state_file: str = str(REPO_ROOT / "ZEDAuto" / "zed_map_ui_state.json")
     network_status_ttl_ms: int = 5000
     throughput_test_enabled: bool = True
     throughput_test_port: int = 5201
