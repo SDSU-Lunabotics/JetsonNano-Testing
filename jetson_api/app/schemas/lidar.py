@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from typing import Literal, Optional, List
+from pydantic import BaseModel, Field
+
+from .common import Heartbeat, Fault
+
+
+LidarMode = Literal["2d", "3d"]
+
+
+class LidarStatusResponse(BaseModel):
+    timestamp_ms: int
+    heartbeat: Heartbeat
+    mode: Optional[LidarMode] = None
+    points_per_sec: Optional[float] = None
+    frame_id: Optional[str] = None
+    backend_state: Optional[str] = None
+    last_error: Optional[str] = None
+    last_launch_kind: Optional[str] = None
+    last_launch_detail: Optional[str] = None
+    faults: Optional[List[Fault]] = None
+
+
+class MapOrigin(BaseModel):
+    x_m: float
+    y_m: float
+
+
+class LidarMapInfoResponse(BaseModel):
+    timestamp_ms: int
+    frame_id: str
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    resolution_m_per_px: float = Field(gt=0)
+    origin: MapOrigin
+
+
+class LidarPoint(BaseModel):
+    x: float
+    y: float
+    z: float
+
+
+class LidarPreviewMessage(BaseModel):
+    type: Literal["lidar_preview"]
+    seq: int
+    timestamp_ms: int
+    frame_id: Optional[str] = None
+    point_count: int = Field(ge=0)
+    points_per_sec: Optional[float] = Field(default=None, ge=0)
+    truncated: bool = False
+    points: List[LidarPoint] = Field(default_factory=list)

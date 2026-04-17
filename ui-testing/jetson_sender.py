@@ -2,7 +2,7 @@ import json
 import sys
 import urllib.request
 
-URL = "http://127.0.0.1:8000/drive/forward"  # replace with computer IP
+URL = "http://:8000/drive/forward"  # replace with computer IP
 
 payload = {
     "action": "drive_forward",

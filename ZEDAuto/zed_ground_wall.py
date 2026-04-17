@@ -10,6 +10,7 @@ import time
 import argparse
 import os
 import math
+import json
 import numpy as np
 
 try:
@@ -38,6 +39,9 @@ import zed_utils
 import viewer_utils
 import stream_utils
 import auto_mining
+import camera_status_client
+import camera_publish_client
+import map_publish_client
 
 try:
     from networktables import NetworkTables
@@ -307,6 +311,21 @@ def main():
     parser.add_argument("--stream-fps", type=float, default=15.0, help="Stream FPS")
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
+    parser.add_argument("--map-command-file", default=os.path.join(SCRIPT_DIR, "zed_map_command.json"), help="Path to UI-issued map waypoint command file")
+    parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
+    parser.add_argument("--camera-heartbeat-source", default="zed_ground_wall", help="Source label attached to camera-owner heartbeats")
+    parser.add_argument("--camera-publish-url", default=None, help="HTTP endpoint that receives JPEG camera view frames")
+    parser.add_argument("--camera-publish-interval-ms", type=int, default=120, help="Min interval between camera frame publishes")
+    parser.add_argument("--camera-publish-jpeg-quality", type=int, default=75, help="JPEG quality for published camera frames")
+    parser.add_argument("--camera-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published camera frames")
+    parser.add_argument("--camera-publish-source", default="zed_ground_wall", help="Source label attached to published camera frames")
+    parser.add_argument("--map-publish-url", default=None, help="HTTP endpoint that receives JPEG occupancy map frames")
+    parser.add_argument("--map-publish-interval-ms", type=int, default=120, help="Min interval between map frame publishes")
+    parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
+    parser.add_argument("--map-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published occupancy map")
+    parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     parser.add_argument(
         "--overlay-red-only",
@@ -388,8 +407,51 @@ def main():
         print("  sudo apt install -y python3-opencv")
     elif args.no_gui:
         print("GUI disabled (--no-gui): map/camera windows will not open.")
+    elif not os.environ.get("DISPLAY"):
+        args.no_gui = True
+        print("GUI auto-disabled: DISPLAY is not set, running headless.")
     else:
         print("GUI enabled: opening camera/map windows.")
+
+    camera_heartbeat = None
+    if args.camera_heartbeat_url:
+        camera_heartbeat = camera_status_client.CameraStatusHeartbeat(
+            args.camera_heartbeat_url,
+            backend="zed",
+            source=args.camera_heartbeat_source,
+            interval_ms=args.camera_heartbeat_interval_ms,
+            timeout_ms=args.camera_heartbeat_timeout_ms,
+            streaming=bool(args.camera_publish_url),
+        )
+        print(f"Camera heartbeat enabled: {args.camera_heartbeat_url}")
+
+    camera_publisher = None
+    if args.camera_publish_url:
+        if not HAS_CV2:
+            print("Camera publisher requested, but OpenCV is unavailable; disabling camera publishing.")
+        else:
+            camera_publisher = camera_publish_client.HttpCameraPublisher(
+                args.camera_publish_url,
+                interval_ms=args.camera_publish_interval_ms,
+                jpeg_quality=args.camera_publish_jpeg_quality,
+                timeout_ms=args.camera_publish_timeout_ms,
+                source=args.camera_publish_source,
+            )
+            print(f"Camera publish enabled: {args.camera_publish_url}")
+
+    map_publisher = None
+    if args.map_publish_url:
+        if not HAS_CV2:
+            print("Map publisher requested, but OpenCV is unavailable; disabling map publishing.")
+        else:
+            map_publisher = map_publish_client.HttpMapPublisher(
+                args.map_publish_url,
+                interval_ms=args.map_publish_interval_ms,
+                jpeg_quality=args.map_publish_jpeg_quality,
+                timeout_ms=args.map_publish_timeout_ms,
+                source=args.map_publish_source,
+            )
+            print(f"Map publish enabled: {args.map_publish_url}")
 
     print("Running. Press Ctrl+C to exit.")
     mapping_mode = "complex" if args.complex else "simple"
@@ -549,6 +611,7 @@ def main():
     erase_safe_mode = False      # when True, map clicks erase painted cells
     paint_obstacle_mode = False  # when True, map clicks paint cells as obstacles
     paint_brush_radius = 2       # radius in cells for all brush tools (1–15)
+    last_map_command_seq = 0
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -768,6 +831,36 @@ def main():
                 paint_brush_radius = min(15, paint_brush_radius + 1)
                 print(f"Brush radius: {paint_brush_radius} cells")
                 return
+    def process_external_map_command():
+        nonlocal last_map_command_seq
+        try:
+            if not args.map_command_file or (not os.path.exists(args.map_command_file)):
+                return
+            with open(args.map_command_file, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return
+
+        seq = int(payload.get("seq", 0) or 0)
+        if seq <= last_map_command_seq:
+            return
+
+        cmd_type = str(payload.get("type", "") or "")
+        if cmd_type != "set_goal_click":
+            last_map_command_seq = seq
+            return
+
+        display_x = payload.get("display_x")
+        display_y = payload.get("display_y")
+        if display_x is None or display_y is None:
+            last_map_command_seq = seq
+            return
+
+        on_map_click(cv2.EVENT_LBUTTONDOWN, int(display_x), int(display_y), 0, None)
+        source = payload.get("source")
+        if source:
+            print(f"Processed external waypoint from {source} (x={display_x}, y={display_y})")
+        last_map_command_seq = seq
 
     def send_nt_command(enabled, fwd, turn, duration):
         nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
@@ -1974,7 +2067,30 @@ def main():
                             cv2.LINE_AA,
                         )
 
-                    cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                    if camera_publisher is not None:
+                        camera_publisher.push_frame(vis)
+
+                    if not args.no_gui:
+                        cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                display_map_vis = None
+                if map_vis is not None:
+                    display_map_vis = map_vis.copy()
+                    for pr, pc_col, is_p in human_person_map_points:
+                        if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
+                            color = (0, 0, 255) if is_p else (0, 200, 255)
+                            cv2.circle(display_map_vis, (pc_col, pr), 3, color, -1)
+                            if is_p:
+                                cv2.circle(display_map_vis, (pc_col, pr), 6, color, 1)
+                    if args.map_scale > 1:
+                        display_map_vis = cv2.resize(
+                            display_map_vis,
+                            (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    if map_publisher is not None:
+                        map_publisher.push_frame(display_map_vis)
+                    process_external_map_command()
+
                 # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
                         # Draw detected persons on the map
@@ -1995,6 +2111,9 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
+                if not args.no_gui:
+                    if display_map_vis is not None:
+                        cv2.imshow("ZED Occupancy Map (XZ)", display_map_vis)
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
                             map_window_ready = True
@@ -2090,11 +2209,52 @@ def main():
                 # Hold-to-move: decay to 0 if key not pressed recently.
                 if manual_mode:
                     if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                    cv2.imshow("ZED Drive Status", render_status_panel(cam_row_col))
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        break
+                    if key == ord("m"):
+                        manual_mode = not manual_mode
+                        if manual_mode:
+                            # Entering manual mode pauses auto navigation but keeps the last goal.
+                            emergency_stop = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                            print("Manual drive mode: ON (auto paused)")
+                        else:
+                            print("Manual drive mode: OFF (auto resumed)")
+                    if key == ord("c"):
+                        follow_rover_map = not follow_rover_map
+                        state = "ON" if follow_rover_map else "OFF"
+                        print(f"Map follow mode: {state}")
+                    if key == ord(" "):
+                        emergency_stop = True
                         manual_fwd = 0.0
-                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
                         manual_turn = 0.0
-        else:
-            time.sleep(0.01)
+                    now = time.time()
+                    if key == ord("w"):
+                        manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                        last_w_time = now
+                    if key == ord("s"):
+                        manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                        last_s_time = now
+                    if key == ord("a"):
+                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                        last_a_time = now
+                    if key == ord("d"):
+                        manual_turn = max(0.0, min(1.0, args.drive_speed))
+                        last_d_time = now
+                    if key == ord("x"):
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                    # Hold-to-move: decay to 0 if key not pressed recently.
+                    if manual_mode:
+                        if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                            manual_fwd = 0.0
+                        if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
+                            manual_turn = 0.0
+                else:
+                    time.sleep(0.01)
 
     if human_detect_available:
         try:
@@ -2107,6 +2267,12 @@ def main():
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
+    if camera_heartbeat is not None:
+        camera_heartbeat.stop()
+    if camera_publisher is not None:
+        camera_publisher.stop()
+    if map_publisher is not None:
+        map_publisher.stop()
     ros2_utils.shutdown_ros2(node)
 
 
