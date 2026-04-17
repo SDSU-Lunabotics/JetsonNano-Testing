@@ -327,6 +327,7 @@ def main():
     parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
     parser.add_argument("--map-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published occupancy map")
     parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
+    parser.add_argument("--manual-start", action="store_true", help="Start in keyboard manual drive mode")
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     parser.add_argument(
         "--overlay-red-only",
@@ -550,6 +551,9 @@ def main():
         else:
             NetworkTables.initialize(server=args.roborio_ip)
             sd = NetworkTables.getTable("SmartDashboard")
+            sd.putBoolean("Drive/UseMainRoverControls", False)
+            sd.putBoolean("Drive/MainRoverDebugMode", False)
+            sd.putBoolean("Drive/MainRoverEmergencyStop", False)
             print(f"Drive enabled: NetworkTables to {args.roborio_ip}")
 
     goal_cell = None
@@ -566,7 +570,9 @@ def main():
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
-    manual_mode = False
+    manual_mode = bool(args.manual_start)
+    if manual_mode:
+        print("Manual drive mode: ON (startup)")
     last_w_time = 0.0
     last_s_time = 0.0
     last_a_time = 0.0
