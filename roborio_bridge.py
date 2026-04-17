@@ -13,6 +13,13 @@ PORT = 8001
 ROBORIO_IP = "10.0.9.2"
 
 TORQUE_CURRENT_LIMIT_AMPS = 60.0
+HEARTBEAT_STALE_MS = 2500
+
+heartbeat_lock = threading.Lock()
+heartbeat_state = {
+    "last_value_sec": None,
+    "last_seen_ms": None,
+}
 
 
 DATA_KEYS = {
@@ -187,6 +194,63 @@ def torque_warnings(values):
             )
 
     return warnings
+
+
+def update_heartbeat_status(values):
+    raw_value = values.get("RoboRIO/HeartbeatSec")
+    now = now_ms()
+
+    try:
+        value_sec = float(raw_value)
+    except (TypeError, ValueError):
+        value_sec = None
+
+    with heartbeat_lock:
+        if value_sec is not None:
+            previous = heartbeat_state["last_value_sec"]
+            if previous is None or value_sec != previous:
+                heartbeat_state["last_value_sec"] = value_sec
+                heartbeat_state["last_seen_ms"] = now
+
+        last_seen_ms = heartbeat_state["last_seen_ms"]
+
+    age_ms = None if last_seen_ms is None else now - last_seen_ms
+
+    return {
+        "present": value_sec is not None,
+        "value_sec": value_sec,
+        "last_seen_ms": last_seen_ms,
+        "age_ms": age_ms,
+        "fresh": age_ms is not None and age_ms < HEARTBEAT_STALE_MS,
+        "stale_after_ms": HEARTBEAT_STALE_MS,
+    }
+
+
+def heartbeat_warnings(connected, heartbeat):
+    if not connected:
+        return []
+
+    if not heartbeat["present"]:
+        return [
+            {
+                "source": "roborio",
+                "key": "RoboRIO/HeartbeatSec",
+                "message": "NetworkTables is connected, but the RoboRIO heartbeat key is missing.",
+            }
+        ]
+
+    if not heartbeat["fresh"]:
+        return [
+            {
+                "source": "roborio",
+                "key": "RoboRIO/HeartbeatSec",
+                "age_ms": heartbeat["age_ms"],
+                "limit_ms": HEARTBEAT_STALE_MS,
+                "message": "RoboRIO heartbeat key is present, but it is not changing.",
+            }
+        ]
+
+    return []
 
 
 def read_dynamic_controller_values():
@@ -389,16 +453,19 @@ class Handler(BaseHTTPRequestHandler):
             }
             dynamic_controller_values = read_dynamic_controller_values()
             values.update(dynamic_controller_values)
+            connected = NetworkTables.isConnected()
+            heartbeat = update_heartbeat_status(values)
 
             self._send_json(
                 200,
                 {
                     "status": "ok",
                     "timestamp_ms": now_ms(),
-                    "connected": NetworkTables.isConnected(),
+                    "connected": connected,
+                    "heartbeat": heartbeat,
                     "values": values,
                     "controller": infer_controller_status(values),
-                    "warnings": torque_warnings(values),
+                    "warnings": torque_warnings(values) + heartbeat_warnings(connected, heartbeat),
                 },
             )
             return
