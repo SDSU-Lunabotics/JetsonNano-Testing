@@ -312,6 +312,7 @@ def main():
     parser.add_argument("--stream-bitrate-kbps", type=int, default=2500, help="Stream bitrate in kbps")
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
     parser.add_argument("--map-command-file", default=os.path.join(SCRIPT_DIR, "zed_map_command.json"), help="Path to UI-issued map waypoint command file")
+    parser.add_argument("--map-ui-state-file", default=os.path.join(SCRIPT_DIR, "zed_map_ui_state.json"), help="Path to published UI state JSON for remote map controls")
     parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
@@ -612,6 +613,119 @@ def main():
     paint_obstacle_mode = False  # when True, map clicks paint cells as obstacles
     paint_brush_radius = 2       # radius in cells for all brush tools (1–15)
     last_map_command_seq = 0
+    last_map_ui_state_write = 0.0
+
+    def _write_json_atomic(path, payload):
+        if not path:
+            return
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp_path = f"{path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            pass
+
+    def mining_buttons_enabled():
+        return mining.state not in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+        )
+
+    def set_brush_tool(tool_name):
+        nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode
+        paint_safe_mode = tool_name == "paint_safe"
+        erase_safe_mode = tool_name == "erase_safe"
+        paint_obstacle_mode = tool_name == "paint_obstacle"
+
+    def current_selected_tool():
+        if paint_safe_mode:
+            return "paint_safe"
+        if erase_safe_mode:
+            return "erase_safe"
+        if paint_obstacle_mode:
+            return "paint_obstacle"
+        if mining.state == auto_mining.MiningState.DRAW_EXCAV:
+            return "draw_excav_zone"
+        if mining.state == auto_mining.MiningState.DRAW_DEPOSIT:
+            return "draw_deposit_zone"
+        return None
+
+    def clear_manual_paint():
+        occ_map.painted_free[:] = False
+        print("Cleared all painted-safe cells")
+
+    def publish_map_ui_state(force=False):
+        nonlocal last_map_ui_state_write
+        now = time.time()
+        if (not force) and (now - last_map_ui_state_write) < 0.20:
+            return
+
+        button_enabled = mining_buttons_enabled()
+        selected_tool = current_selected_tool()
+        payload = {
+            "available": True,
+            "source": "zed_ground_wall",
+            "timestamp_ms": int(now * 1000),
+            "mining_state": mining.state.value,
+            "selected_tool": selected_tool,
+            "brush_radius": int(paint_brush_radius),
+            "controls": [
+                {
+                    "id": "paint_obstacle",
+                    "label": "Paint Obstacle",
+                    "command": "paint_obstacle",
+                    "active": bool(paint_obstacle_mode),
+                    "enabled": True,
+                },
+                {
+                    "id": "paint_safe",
+                    "label": "Paint Safe",
+                    "command": "paint_safe",
+                    "active": bool(paint_safe_mode),
+                    "enabled": True,
+                },
+                {
+                    "id": "erase_safe",
+                    "label": "Erase Safe",
+                    "command": "erase_safe",
+                    "active": bool(erase_safe_mode),
+                    "enabled": True,
+                },
+                {
+                    "id": "clear_all",
+                    "label": "Clear All",
+                    "command": "clear_all",
+                    "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "draw_excav_zone",
+                    "label": "Draw Excav Zone",
+                    "command": "draw_excav_zone",
+                    "active": mining.state == auto_mining.MiningState.DRAW_EXCAV,
+                    "enabled": bool(button_enabled),
+                },
+                {
+                    "id": "draw_deposit_zone",
+                    "label": "Draw Deposit Zone",
+                    "command": "draw_deposit_zone",
+                    "active": mining.state == auto_mining.MiningState.DRAW_DEPOSIT,
+                    "enabled": bool(button_enabled),
+                },
+            ],
+        }
+        _write_json_atomic(args.map_ui_state_file, payload)
+        last_map_ui_state_write = now
 
     def apply_map_view(frame, focus_cell):
         # Returns (frame_for_display, row_shift, col_shift) where:
@@ -741,17 +855,7 @@ def main():
                 map_scale_live = max(1, map_scale_live - 1)
                 print(f"Map zoom: x{map_scale_live}")
                 return
-        button_enabled = mining.state not in (
-            auto_mining.MiningState.PLAN_SWEEP,
-            auto_mining.MiningState.NAVIGATE_DIG,
-            auto_mining.MiningState.DIGGING,
-            auto_mining.MiningState.BACKUP,
-            auto_mining.MiningState.NAVIGATE_DEPOSIT,
-            auto_mining.MiningState.DEPOSITING,
-        ) and mining.state not in (
-            auto_mining.MiningState.DRAW_EXCAV,
-            auto_mining.MiningState.DRAW_DEPOSIT,
-        )
+        button_enabled = mining_buttons_enabled()
         if not button_enabled:
             return
         rect = status_button_rects.get("excav")
@@ -784,38 +888,31 @@ def main():
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                paint_safe_mode = not paint_safe_mode
-                if paint_safe_mode:
-                    erase_safe_mode = False
-                    paint_obstacle_mode = False
+                next_active = not paint_safe_mode
+                set_brush_tool("paint_safe" if next_active else None)
                 print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
                 return
         rect = status_button_rects.get("erase_safe")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                erase_safe_mode = not erase_safe_mode
-                if erase_safe_mode:
-                    paint_safe_mode = False
-                    paint_obstacle_mode = False
+                next_active = not erase_safe_mode
+                set_brush_tool("erase_safe" if next_active else None)
                 print(f"Erase Safe mode {'ON — click/drag map to remove painted cells' if erase_safe_mode else 'OFF'}")
                 return
         rect = status_button_rects.get("paint_obstacle")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                paint_obstacle_mode = not paint_obstacle_mode
-                if paint_obstacle_mode:
-                    paint_safe_mode = False
-                    erase_safe_mode = False
+                next_active = not paint_obstacle_mode
+                set_brush_tool("paint_obstacle" if next_active else None)
                 print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
                 return
         rect = status_button_rects.get("clear_paint")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                occ_map.painted_free[:] = False
-                print("Cleared all painted-safe cells")
+                clear_manual_paint()
                 return
         rect = status_button_rects.get("brush_minus")
         if rect is not None:
@@ -846,20 +943,43 @@ def main():
             return
 
         cmd_type = str(payload.get("type", "") or "")
-        if cmd_type != "set_goal_click":
+        if cmd_type == "set_goal_click":
+            display_x = payload.get("display_x")
+            display_y = payload.get("display_y")
+            if display_x is None or display_y is None:
+                last_map_command_seq = seq
+                return
+
+            on_map_click(cv2.EVENT_LBUTTONDOWN, int(display_x), int(display_y), 0, None)
+            source = payload.get("source")
+            if source:
+                print(f"Processed external waypoint from {source} (x={display_x}, y={display_y})")
             last_map_command_seq = seq
             return
 
-        display_x = payload.get("display_x")
-        display_y = payload.get("display_y")
-        if display_x is None or display_y is None:
+        if cmd_type != "ui_action":
             last_map_command_seq = seq
             return
 
-        on_map_click(cv2.EVENT_LBUTTONDOWN, int(display_x), int(display_y), 0, None)
-        source = payload.get("source")
-        if source:
-            print(f"Processed external waypoint from {source} (x={display_x}, y={display_y})")
+        action = str(payload.get("action", "") or "").strip()
+        if action == "paint_safe":
+            set_brush_tool(None if paint_safe_mode else "paint_safe")
+            print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
+        elif action == "erase_safe":
+            set_brush_tool(None if erase_safe_mode else "erase_safe")
+            print(f"Erase Safe mode {'ON — click/drag map to remove painted cells' if erase_safe_mode else 'OFF'}")
+        elif action == "paint_obstacle":
+            set_brush_tool(None if paint_obstacle_mode else "paint_obstacle")
+            print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
+        elif action == "clear_all":
+            clear_manual_paint()
+        elif action == "draw_excav_zone":
+            if mining_buttons_enabled():
+                mining.handle_key(ord("e"))
+        elif action == "draw_deposit_zone":
+            if mining_buttons_enabled():
+                mining.handle_key(ord("d"))
+
         last_map_command_seq = seq
 
     def send_nt_command(enabled, fwd, turn, duration):
@@ -1151,17 +1271,7 @@ def main():
         slider_x1 = panel_w - 16 - btn_sm - 8
         brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
 
-        button_enabled = mining.state not in (
-            auto_mining.MiningState.PLAN_SWEEP,
-            auto_mining.MiningState.NAVIGATE_DIG,
-            auto_mining.MiningState.DIGGING,
-            auto_mining.MiningState.BACKUP,
-            auto_mining.MiningState.NAVIGATE_DEPOSIT,
-            auto_mining.MiningState.DEPOSITING,
-        ) and mining.state not in (
-            auto_mining.MiningState.DRAW_EXCAV,
-            auto_mining.MiningState.DRAW_DEPOSIT,
-        )
+        button_enabled = mining_buttons_enabled()
         draw_button(excav_rect, "Draw Excav Zone", button_enabled)
         draw_button(deposit_rect, "Draw Deposit Zone", button_enabled)
         draw_button(whole_rect, "Whole Map", button_enabled)
@@ -1238,6 +1348,8 @@ def main():
         put_line("Brush size:", slider_y - 10, (170, 200, 230), 0.44)
 
         return panel
+
+    publish_map_ui_state(force=True)
 
     while True:
         if zed.grab(runtime) == sl.ERROR_CODE.SUCCESS:
@@ -2090,6 +2202,7 @@ def main():
                     if map_publisher is not None:
                         map_publisher.push_frame(display_map_vis)
                     process_external_map_command()
+                    publish_map_ui_state()
 
                 if not args.no_gui:
                     # Always show the map (even if the image frame is missing)
@@ -2215,6 +2328,7 @@ def main():
                             manual_turn = 0.0
                 else:
                     time.sleep(0.01)
+                    publish_map_ui_state()
 
     if human_detect_available:
         try:
@@ -2227,6 +2341,18 @@ def main():
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
         mesh_viewer.close()
+    _write_json_atomic(
+        args.map_ui_state_file,
+        {
+            "available": False,
+            "source": "zed_ground_wall",
+            "timestamp_ms": int(time.time() * 1000),
+            "mining_state": mining.state.value,
+            "selected_tool": current_selected_tool(),
+            "brush_radius": int(paint_brush_radius),
+            "controls": [],
+        },
+    )
     if camera_heartbeat is not None:
         camera_heartbeat.stop()
     if camera_publisher is not None:
