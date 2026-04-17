@@ -2091,7 +2091,8 @@ def main():
                         map_publisher.push_frame(display_map_vis)
                     process_external_map_command()
 
-                # Always show the map (even if the image frame is missing)
+                if not args.no_gui:
+                    # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
                         # Draw detected persons on the map
                         for pr, pc_col, is_p in human_person_map_points:
@@ -2111,7 +2112,6 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
-                if not args.no_gui:
                     if display_map_vis is not None:
                         cv2.imshow("ZED Occupancy Map (XZ)", display_map_vis)
                         if not map_window_ready:
@@ -2126,92 +2126,93 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
-                status_panel = render_status_panel(cam_row_col)
-                cv2.imshow("ZED Drive Status", status_panel)
-                if not status_window_ready:
-                    cv2.setMouseCallback("ZED Drive Status", on_status_click)
-                    status_window_ready = True
-                key = cv2.waitKey(1) & 0xFF
-                # If map size input field is focused, route keys to it.
-                if map_size_input_focused:
-                    if key == 13:  # Enter — apply the new rover size
-                        map_size_input_focused = False
-                        raw = map_size_input_text.strip().lower().replace(" ", "")
-                        map_size_input_text = ""
-                        try:
-                            size_ft = float(raw)
-                            new_size_m = round(size_ft * 0.3048, 4)
-                            if new_size_m <= 0:
-                                raise ValueError("must be positive")
-                            args.rover_size_m = new_size_m
-                            mining.cfg["rover_size_m"] = new_size_m
-                            print(f"Rover size updated to {size_ft:.2f} ft ({new_size_m:.3f} m)")
-                        except Exception as _e:
-                            print(f"Rover size parse error: {_e}. Enter a single number in feet, e.g. '2' or '1.5'.")
-                    elif key == 8 or key == 127:  # Backspace/Delete
-                        map_size_input_text = map_size_input_text[:-1]
-                    elif key == 27:  # Escape — cancel
-                        map_size_input_focused = False
-                        map_size_input_text = ""
-                    elif key != 255:
-                        ch = chr(key)
-                        if ch in "0123456789.":
-                            map_size_input_text += ch
-                else:
-                    # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
-                    mining.handle_key(key)
-                if key == ord("q"):
-                    break
-                if key == ord("m"):
-                    manual_mode = not manual_mode
-                    if manual_mode:
-                        # Entering manual mode pauses auto navigation but keeps the last goal.
-                        emergency_stop = False
-                        manual_fwd = 0.0
-                        manual_turn = 0.0
-                        print("Manual drive mode: ON (auto paused)")
+                if not args.no_gui:
+                    status_panel = render_status_panel(cam_row_col)
+                    cv2.imshow("ZED Drive Status", status_panel)
+                    if not status_window_ready:
+                        cv2.setMouseCallback("ZED Drive Status", on_status_click)
+                        status_window_ready = True
+                    key = cv2.waitKey(1) & 0xFF
+                    # If map size input field is focused, route keys to it.
+                    if map_size_input_focused:
+                        if key == 13:  # Enter — apply the new rover size
+                            map_size_input_focused = False
+                            raw = map_size_input_text.strip().lower().replace(" ", "")
+                            map_size_input_text = ""
+                            try:
+                                size_ft = float(raw)
+                                new_size_m = round(size_ft * 0.3048, 4)
+                                if new_size_m <= 0:
+                                    raise ValueError("must be positive")
+                                args.rover_size_m = new_size_m
+                                mining.cfg["rover_size_m"] = new_size_m
+                                print(f"Rover size updated to {size_ft:.2f} ft ({new_size_m:.3f} m)")
+                            except Exception as _e:
+                                print(f"Rover size parse error: {_e}. Enter a single number in feet, e.g. '2' or '1.5'.")
+                        elif key == 8 or key == 127:  # Backspace/Delete
+                            map_size_input_text = map_size_input_text[:-1]
+                        elif key == 27:  # Escape — cancel
+                            map_size_input_focused = False
+                            map_size_input_text = ""
+                        elif key != 255:
+                            ch = chr(key)
+                            if ch in "0123456789.":
+                                map_size_input_text += ch
                     else:
-                        print("Manual drive mode: OFF (auto resumed)")
-                if key == ord("c"):
-                    follow_rover_map = not follow_rover_map
-                    state = "ON" if follow_rover_map else "OFF"
-                    print(f"Map follow mode: {state}")
-                if key == ord("v"):
-                    map_red_only_view = not map_red_only_view
-                    state = "ON" if map_red_only_view else "OFF"
-                    print(f"Map red-only mode: {state}")
-                if key == ord("o"):
-                    map_scale_live = min(12, map_scale_live + 1)
-                    print(f"Map zoom: x{map_scale_live}")
-                if key == ord("p"):
-                    map_scale_live = max(1, map_scale_live - 1)
-                    print(f"Map zoom: x{map_scale_live}")
-                if key == ord(" "):
-                    emergency_stop = True
-                    manual_fwd = 0.0
-                    manual_turn = 0.0
-                now = time.time()
-                if key == ord("w"):
-                    manual_fwd = max(0.0, min(1.0, args.drive_speed))
-                    last_w_time = now
-                if key == ord("s"):
-                    manual_fwd = -max(0.0, min(1.0, args.drive_speed))
-                    last_s_time = now
-                if key == ord("a"):
-                    manual_turn = -max(0.0, min(1.0, args.drive_speed))
-                    last_a_time = now
-                if key == ord("d"):
-                    manual_turn = max(0.0, min(1.0, args.drive_speed))
-                    last_d_time = now
-                if key == ord("x"):
-                    manual_fwd = 0.0
-                    manual_turn = 0.0
-                # Hold-to-move: decay to 0 if key not pressed recently.
-                if manual_mode:
-                    if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                        # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
+                        mining.handle_key(key)
+                    if key == ord("q"):
+                        break
+                    if key == ord("m"):
+                        manual_mode = not manual_mode
+                        if manual_mode:
+                            # Entering manual mode pauses auto navigation but keeps the last goal.
+                            emergency_stop = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                            print("Manual drive mode: ON (auto paused)")
+                        else:
+                            print("Manual drive mode: OFF (auto resumed)")
+                    if key == ord("c"):
+                        follow_rover_map = not follow_rover_map
+                        state = "ON" if follow_rover_map else "OFF"
+                        print(f"Map follow mode: {state}")
+                    if key == ord("v"):
+                        map_red_only_view = not map_red_only_view
+                        state = "ON" if map_red_only_view else "OFF"
+                        print(f"Map red-only mode: {state}")
+                    if key == ord("o"):
+                        map_scale_live = min(12, map_scale_live + 1)
+                        print(f"Map zoom: x{map_scale_live}")
+                    if key == ord("p"):
+                        map_scale_live = max(1, map_scale_live - 1)
+                        print(f"Map zoom: x{map_scale_live}")
+                    if key == ord(" "):
+                        emergency_stop = True
                         manual_fwd = 0.0
-                    if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
                         manual_turn = 0.0
+                    now = time.time()
+                    if key == ord("w"):
+                        manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                        last_w_time = now
+                    if key == ord("s"):
+                        manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                        last_s_time = now
+                    if key == ord("a"):
+                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                        last_a_time = now
+                    if key == ord("d"):
+                        manual_turn = max(0.0, min(1.0, args.drive_speed))
+                        last_d_time = now
+                    if key == ord("x"):
+                        manual_fwd = 0.0
+                        manual_turn = 0.0
+                    # Hold-to-move: decay to 0 if key not pressed recently.
+                    if manual_mode:
+                        if now - last_w_time > key_hold_timeout and now - last_s_time > key_hold_timeout:
+                            manual_fwd = 0.0
+                        if now - last_a_time > key_hold_timeout and now - last_d_time > key_hold_timeout:
+                            manual_turn = 0.0
                 else:
                     time.sleep(0.01)
 
