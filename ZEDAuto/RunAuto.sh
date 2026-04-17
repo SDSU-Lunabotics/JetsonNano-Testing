@@ -121,6 +121,29 @@ if [[ -n "${STREAM_IP:-}" ]]; then
   cmd+=(--stream-port "${STREAM_PORT:-5600}")
   cmd+=(--stream-view "${STREAM_VIEW:-both}")
 fi
+if [[ -n "${MAP_COMMAND_FILE:-}" ]]; then
+  cmd+=(--map-command-file "${MAP_COMMAND_FILE}")
+fi
+if [[ -n "${CAMERA_HEARTBEAT_URL:-}" ]]; then
+  cmd+=(--camera-heartbeat-url "${CAMERA_HEARTBEAT_URL}")
+  cmd+=(--camera-heartbeat-interval-ms "${CAMERA_HEARTBEAT_INTERVAL_MS:-1000}")
+  cmd+=(--camera-heartbeat-timeout-ms "${CAMERA_HEARTBEAT_TIMEOUT_MS:-250}")
+  cmd+=(--camera-heartbeat-source "${CAMERA_HEARTBEAT_SOURCE:-zed_ground_wall}")
+fi
+if [[ -n "${CAMERA_PUBLISH_URL:-}" ]]; then
+  cmd+=(--camera-publish-url "${CAMERA_PUBLISH_URL}")
+  cmd+=(--camera-publish-interval-ms "${CAMERA_PUBLISH_INTERVAL_MS:-120}")
+  cmd+=(--camera-publish-jpeg-quality "${CAMERA_PUBLISH_JPEG_QUALITY:-75}")
+  cmd+=(--camera-publish-timeout-ms "${CAMERA_PUBLISH_TIMEOUT_MS:-250}")
+  cmd+=(--camera-publish-source "${CAMERA_PUBLISH_SOURCE:-zed_ground_wall}")
+fi
+if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
+  cmd+=(--map-publish-url "${MAP_PUBLISH_URL}")
+  cmd+=(--map-publish-interval-ms "${MAP_PUBLISH_INTERVAL_MS:-120}")
+  cmd+=(--map-publish-jpeg-quality "${MAP_PUBLISH_JPEG_QUALITY:-70}")
+  cmd+=(--map-publish-timeout-ms "${MAP_PUBLISH_TIMEOUT_MS:-250}")
+  cmd+=(--map-publish-source "${MAP_PUBLISH_SOURCE:-zed_ground_wall}")
+fi
 if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
 if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 
