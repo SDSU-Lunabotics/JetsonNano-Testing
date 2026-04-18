@@ -6,3 +6,6 @@ names:
   0: rock
   1: obstacle
   2: pole
+  3: berm_marker
+  4: hole_rgb
+  5: unknown_obstacle
