@@ -158,6 +158,15 @@ if [[ "${HUMAN_DETECT:-1}" == "1" ]]; then
   cmd+=(--human-min-conf "${HUMAN_MIN_CONF:-0.40}")
 fi
 
+# Rock detection (custom YOLO model)
+if [[ -n "${ROCK_MODEL:-}" ]]; then
+  cmd+=(--rock-model "${ROCK_MODEL}")
+  cmd+=(--rock-conf "${ROCK_CONF:-0.35}")
+  cmd+=(--rock-every "${ROCK_EVERY:-5}")
+  cmd+=(--rock-stamp "${ROCK_STAMP:-6.0}")
+  cmd+=(--rock-classes "${ROCK_CLASSES:-rock,stone,boulder}")
+fi
+
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"
 exec "${cmd[@]}" "$@"
