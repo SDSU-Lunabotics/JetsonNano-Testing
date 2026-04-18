@@ -367,6 +367,12 @@ def main():
     parser.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP (m)")
     parser.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW (m)")
     parser.add_argument("--human-min-conf", type=float, default=0.40, help="Min person confidence for hazard state")
+    # Rock detection (custom YOLO model)
+    parser.add_argument("--rock-model", default="", help="Path to trained rock YOLO model (.pt). Leave empty to disable.")
+    parser.add_argument("--rock-conf", type=float, default=0.35, help="Rock detection confidence threshold")
+    parser.add_argument("--rock-every", type=int, default=5, help="Run rock detection every N frames")
+    parser.add_argument("--rock-stamp", type=float, default=6.0, help="Obstacle evidence to stamp per detected rock cell")
+    parser.add_argument("--rock-classes", default="rock,stone,boulder", help="Comma-separated class names to treat as rocks")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -485,6 +491,19 @@ def main():
     print("Running. Press Ctrl+C to exit.")
     mapping_mode = "complex" if args.complex else "simple"
     print(f"Mapping mode: {mapping_mode}")
+
+    # Rock detection via custom YOLO model
+    rock_model = None
+    rock_last_frame = -999999
+    rock_class_names = set(n.strip().lower() for n in args.rock_classes.split(",") if n.strip())
+    if args.rock_model:
+        try:
+            from ultralytics import YOLO as _YOLO
+            rock_model = _YOLO(args.rock_model)
+            print(f"Rock detection model loaded: {args.rock_model}  classes={rock_class_names}")
+        except Exception as _rock_exc:
+            print(f"[WARN] Could not load rock model '{args.rock_model}': {_rock_exc}")
+            rock_model = None
 
     # Human detection via ZED SDK built-in object detection
     human_detect_available = False
@@ -1682,6 +1701,59 @@ def main():
                         x = xyz_world[:, 0]
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
+
+                        # Rock detection: run YOLO on the RGB frame, look up 3D depth
+                        # of each detection centre, stamp that world cell as an obstacle.
+                        if (rock_model is not None
+                                and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
+                            rock_last_frame = frame_idx
+                            try:
+                                _img_raw = image_left.get_data()
+                                if _img_raw is not None:
+                                    if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
+                                        _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
+                                    elif _img_raw.ndim == 3 and _img_raw.shape[2] == 3:
+                                        _img_bgr = _img_raw
+                                    else:
+                                        _img_bgr = None
+                                    if _img_bgr is not None:
+                                        _results = rock_model.predict(
+                                            source=_img_bgr,
+                                            conf=args.rock_conf,
+                                            verbose=False,
+                                        )[0]
+                                        _names = _results.names if hasattr(_results, "names") else {}
+                                        _ih, _iw = _img_bgr.shape[:2]
+                                        _cld_h, _cld_w = cloud.shape[:2]
+                                        for _det in (_results.boxes or []):
+                                            _lbl = str(_names.get(int(_det.cls[0]), "")).lower()
+                                            if _lbl not in rock_class_names:
+                                                continue
+                                            _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
+                                            # Centre pixel of bounding box
+                                            _cx = int((_x1 + _x2) / 2)
+                                            _cy = int((_y1 + _y2) / 2)
+                                            # Map pixel → point cloud index
+                                            _pc_c = int(_cx * _cld_w / max(1, _iw))
+                                            _pc_r = int(_cy * _cld_h / max(1, _ih))
+                                            _pc_r = max(0, min(_cld_h - 1, _pc_r))
+                                            _pc_c = max(0, min(_cld_w - 1, _pc_c))
+                                            _pt = cloud[_pc_r, _pc_c, :3]
+                                            if not np.isfinite(_pt).all():
+                                                continue
+                                            # Transform to world frame
+                                            _pt_w = (R_world_cam @ _pt.astype(np.float32)) + t_map
+                                            _rc = occ_map.world_to_grid(float(_pt_w[0]), float(_pt_w[2]))
+                                            if _rc is None:
+                                                continue
+                                            _rr, _cc = _rc
+                                            # Stamp a 3x3 region as strong obstacle
+                                            _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
+                                            _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
+                                            occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
+                                            occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+                            except Exception as _rock_err:
+                                pass  # never crash the main loop on detection errors
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
                     # Smooth mode: remove isolated red-dot noise from display.
                     if smooth_map_enabled and map_vis is not None:
