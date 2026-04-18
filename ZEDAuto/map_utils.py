@@ -129,7 +129,8 @@ class OccupancyMap:
         iz = ((z - self.z_min) / self.map_res_m).astype(np.int32)
         # Flip Z so forward is "up" in the image.
         row = self.grid_h - 1 - iz
-        col = ix
+        # Flip X so world +X is on the right side of the display.
+        col = self.grid_w - 1 - ix
 
         # Two-speed free-space decay:
         # - low-confidence free cells decay faster
@@ -171,7 +172,8 @@ class OccupancyMap:
     def render(self, whole_mode=False):
         # Visualize: white = mapped/known ground, red = confirmed obstacle, blue = hole,
         # black = unknown. When whole_mode is enabled, the map renders all known ground
-        # as white and highlights only well-established obstacle/hole evidence.
+        # as pure white, obstacles and holes are frozen/suppressed (locked view), and
+        # painted-safe cells show as bright white too.
         free_vis = np.log1p(self.free_counts)
         occ_vis = np.log1p(self.occ_counts)
         hole_vis = np.log1p(self.hole_counts)
@@ -190,51 +192,56 @@ class OccupancyMap:
         known = self.known_mask(min_evidence=1.0)
         if np.any(known):
             if whole_mode:
-                map_vis[known] = (240, 240, 240)
+                # Whole-map mode: flat white for all explored ground — obstacles frozen/hidden.
+                map_vis[known] = (255, 255, 255)
             else:
                 free_shade = (free_vis[known] * 160.0 + 80.0).astype(np.uint8)
                 map_vis[known, 1] = free_shade
                 map_vis[known, 0] = np.minimum(map_vis[known, 0], (free_shade // 2).astype(np.uint8))
                 map_vis[known, 2] = np.minimum(map_vis[known, 2], (free_shade // 2).astype(np.uint8))
 
-        # Show red obstacles only when we have strong evidence.
+        # Show red obstacles only when we have strong evidence (skipped in whole-map mode to freeze the view).
         strong_occ = self.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
-        if np.any(strong_occ):
+        if not whole_mode and np.any(strong_occ):
             occ_intensity = (occ_vis[strong_occ] * 255.0).astype(np.uint8)
             occ_intensity = np.maximum(occ_intensity, 120)
             map_vis[strong_occ, 2] = occ_intensity
             map_vis[strong_occ, 1] = np.minimum(map_vis[strong_occ, 1], 40)
             map_vis[strong_occ, 0] = np.minimum(map_vis[strong_occ, 0], 40)
 
-        # Show holes as blue when there is hole evidence.
+        # Show holes as blue when there is hole evidence (skipped in whole-map mode).
         hole_cells = (self.hole_counts > 0) & ~strong_occ
-        if np.any(hole_cells):
+        if not whole_mode and np.any(hole_cells):
             hole_intensity = (hole_vis[hole_cells] * 255.0).astype(np.uint8)
             hole_intensity = np.maximum(hole_intensity, 80)
             map_vis[hole_cells, 0] = hole_intensity
             map_vis[hole_cells, 1] = np.minimum(map_vis[hole_cells, 1], 140)
             map_vis[hole_cells, 2] = np.minimum(map_vis[hole_cells, 2], 60)
 
-        # Gentle halo around confirmed free-space to improve readability.
-        confirmed_free = self.free_counts >= self.free_confirm_hits
-        if np.any(confirmed_free):
-            near_confirmed_free = inflate_mask(confirmed_free, radius_cells=1)
-            evidence = self.free_counts + self.occ_counts + self.hole_counts
+        # Gentle halo around confirmed free-space to improve readability (normal mode only).
+        if not whole_mode:
+            confirmed_free = self.free_counts >= self.free_confirm_hits
+            if np.any(confirmed_free):
+                near_confirmed_free = inflate_mask(confirmed_free, radius_cells=1)
+                evidence = self.free_counts + self.occ_counts + self.hole_counts
 
-            halo_unknown = near_confirmed_free & (evidence < 1.0)
-            if np.any(halo_unknown):
-                map_vis[halo_unknown] = (220, 220, 220)
+                halo_unknown = near_confirmed_free & (evidence < 1.0)
+                if np.any(halo_unknown):
+                    map_vis[halo_unknown] = (220, 220, 220)
 
-        # Painted-safe cells shown as bright cyan, always on top.
+        # Painted-safe cells: bright cyan-green in normal mode, pure white in whole-map mode (locked/safe).
         if np.any(self.painted_free):
-            map_vis[self.painted_free] = (255, 230, 80)  # BGR: bright cyan-green
+            if whole_mode:
+                map_vis[self.painted_free] = (255, 255, 255)
+            else:
+                map_vis[self.painted_free] = (255, 230, 80)  # BGR: bright cyan-green
 
         return map_vis
 
     def world_to_grid(self, x, z):
         if x < self.x_min or x >= self.x_max or z < self.z_min or z >= self.z_max:
             return None
-        col = int((x - self.x_min) / self.map_res_m)
+        col = self.grid_w - 1 - int((x - self.x_min) / self.map_res_m)
         row = int(self.grid_h - 1 - ((z - self.z_min) / self.map_res_m))
         if row < 0 or row >= self.grid_h or col < 0 or col >= self.grid_w:
             return None
@@ -243,7 +250,7 @@ class OccupancyMap:
     def grid_to_world(self, row, col):
         if row < 0 or row >= self.grid_h or col < 0 or col >= self.grid_w:
             return None
-        x = self.x_min + (col + 0.5) * self.map_res_m
+        x = self.x_min + (self.grid_w - 1 - col + 0.5) * self.map_res_m
         z = self.z_min + (self.grid_h - 1 - row + 0.5) * self.map_res_m
         return x, z
 

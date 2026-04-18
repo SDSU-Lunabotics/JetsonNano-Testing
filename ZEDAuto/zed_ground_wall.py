@@ -328,6 +328,33 @@ def main():
     parser.add_argument("--map-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published occupancy map")
     parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
     parser.add_argument("--manual-start", action="store_true", help="Start in keyboard manual drive mode")
+    parser.add_argument(
+        "--nt-timeout-sec",
+        type=float,
+        default=3.0,
+        help="Stop driving if NetworkTables connection is lost for this many seconds (watchdog). 0 disables.",
+    )
+    parser.add_argument(
+        "--ds-joystick",
+        action="store_true",
+        help="Read DS controller axes from NT (DS/JoystickFwd, DS/JoystickTurn) and mix into drive commands",
+    )
+    parser.add_argument(
+        "--ds-joystick-fwd-key",
+        default="DS/JoystickFwd",
+        help="NT key the RoboRIO publishes for DS joystick forward axis (-1 to 1)",
+    )
+    parser.add_argument(
+        "--ds-joystick-turn-key",
+        default="DS/JoystickTurn",
+        help="NT key the RoboRIO publishes for DS joystick turn axis (-1 to 1)",
+    )
+    parser.add_argument(
+        "--ds-joystick-scale",
+        type=float,
+        default=0.5,
+        help="Scale applied to DS joystick axes before mixing into auto drive (0-1)",
+    )
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     parser.add_argument(
         "--overlay-red-only",
@@ -566,6 +593,7 @@ def main():
     status_button_rects = {}
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
+    smooth_map_enabled = False
     emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
@@ -590,6 +618,10 @@ def main():
     last_backup_log_time = 0.0
     backup_hold_until = 0.0
     nt_connected_cached = False
+    last_nt_ok_time = time.time()   # watchdog: last time NT was confirmed connected
+    nt_watchdog_tripped = False     # set True when watchdog fires, cleared on reconnect
+    ds_joystick_fwd = 0.0           # DS controller forward axis from NT
+    ds_joystick_turn = 0.0          # DS controller turn axis from NT
     status_cmd_enabled = False
     status_cmd_fwd = 0.0
     status_cmd_turn = 0.0
@@ -822,7 +854,7 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def on_status_click(event, x, y, flags, param):
-        nonlocal disable_holes, whole_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
+        nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
         is_drag = event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON)
         if event != cv2.EVENT_LBUTTONDOWN and not is_drag:
@@ -914,6 +946,13 @@ def main():
                 set_brush_tool("paint_obstacle" if next_active else None)
                 print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
                 return
+        rect = status_button_rects.get("smooth_map")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                smooth_map_enabled = not smooth_map_enabled
+                print(f"Smooth Map {'ENABLED — noise pixels filtered' if smooth_map_enabled else 'DISABLED'}")
+                return
         rect = status_button_rects.get("clear_paint")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -933,6 +972,24 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 paint_brush_radius = min(15, paint_brush_radius + 1)
                 print(f"Brush radius: {paint_brush_radius} cells")
+                return
+        rect = status_button_rects.get("auto_run")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                _is_active = mining.state not in (
+                    auto_mining.MiningState.IDLE,
+                    auto_mining.MiningState.DRAW_EXCAV,
+                    auto_mining.MiningState.DRAW_DEPOSIT,
+                    auto_mining.MiningState.DONE,
+                    auto_mining.MiningState.ABORTED,
+                )
+                if _is_active:
+                    mining.handle_key(ord("t"))   # abort current run
+                    print("Auto Run: ABORTED via button")
+                else:
+                    mining.handle_key(ord("r"))   # start run
+                    print("Auto Run: STARTED via button")
                 return
     def process_external_map_command():
         nonlocal last_map_command_seq
@@ -1145,7 +1202,9 @@ def main():
         put_line("ZED DRIVE STATUS", 30, (255, 255, 255), 0.72)
         put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
-        put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
+        _nt_status_color = (170, 255, 170) if nt_connected_cached else (0, 60, 255)
+        _nt_watchdog_txt = " [WATCHDOG TRIPPED]" if nt_watchdog_tripped else ""
+        put_line(f"NT: {'OK' if nt_connected_cached else 'LOST'}{_nt_watchdog_txt}", 114, _nt_status_color)
         if tracking_enabled:
             track_txt = "OK" if tracking_pose_ok else "LOST"
             if args.area_memory:
@@ -1250,7 +1309,8 @@ def main():
         top_y    = bottom_y - button_h - 10
         mid_y    = top_y    - button_h - 10
         upper_y  = mid_y    - button_h - 10
-        slider_y = upper_y  - 44
+        auto_y   = upper_y  - button_h - 10
+        slider_y = auto_y   - 44
 
         # ---- Row 1 (bottom): zoom + holes ----
         excav_rect    = (16, top_y, 16 + button_w, top_y + button_h)
@@ -1265,10 +1325,20 @@ def main():
         erase_rect       = (16 + button_w + gap, mid_y, 16 + 2*button_w + gap, mid_y + button_h)
         clear_paint_rect = (16 + 2*(button_w+gap), mid_y, 16 + 3*button_w + 2*gap, mid_y + button_h)
 
-        # ---- Row 3: Paint Obstacle (full-width) ----
+        # ---- Row 3: Paint Obstacle | Smooth Map ----
         obstacle_rect = (16, upper_y, 16 + button_w, upper_y + button_h)
+        smooth_rect   = (16 + button_w + gap, upper_y, 16 + 2*button_w + gap, upper_y + button_h)
 
-        # ---- Row 4: Brush size slider ----
+        # ---- Row 4: Auto Run (Start / Abort excavation+deposition cycle) ----
+        _mining_active = mining.state not in (
+            auto_mining.MiningState.IDLE,
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.DONE,
+            auto_mining.MiningState.ABORTED,
+        )
+        auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
+        auto_run_rect  = (16, auto_y, 16 + 2*button_w + gap, auto_y + button_h)
         btn_sm = 36
         brush_minus_rect  = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
         brush_plus_rect   = (16 + btn_sm + 8 + (panel_w - 16 - 16 - 2*btn_sm - 16), slider_y + 4,
@@ -1303,6 +1373,10 @@ def main():
         draw_button(clear_paint_rect, "Clear All", True)
         _active_button(obstacle_rect, "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
                        paint_obstacle_mode, (0, 0, 200), (80, 80, 255))
+        _active_button(smooth_rect, "Smooth Map: ON" if smooth_map_enabled else "Smooth Map",
+                       smooth_map_enabled, (0, 160, 160), (80, 220, 220))
+        _active_button(auto_run_rect, auto_run_label,
+                       _mining_active, (0, 140, 40), (60, 240, 100))
 
         # Brush size slider
         cv2.rectangle(panel, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (60, 60, 60), -1)
@@ -1331,12 +1405,14 @@ def main():
         status_button_rects["erase_safe"]    = erase_rect
         status_button_rects["clear_paint"]   = clear_paint_rect
         status_button_rects["paint_obstacle"]= obstacle_rect
+        status_button_rects["smooth_map"]    = smooth_rect
+        status_button_rects["auto_run"]      = auto_run_rect
         status_button_rects["brush_minus"]   = brush_minus_rect
         status_button_rects["brush_plus"]    = brush_plus_rect
         status_button_rects["brush_slider"]  = brush_slider_rect
 
         put_line(
-            f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
+            f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Smooth: {'ON' if smooth_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
             top_y - 8, (200, 240, 255), 0.48,
         )
         if paint_safe_mode:
@@ -1607,6 +1683,15 @@ def main():
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
+                    # Smooth mode: remove isolated red-dot noise from display.
+                    if smooth_map_enabled and map_vis is not None:
+                        kernel = np.ones((3, 3), np.uint8)
+                        red_ch = map_vis[:, :, 2]
+                        red_mask = (red_ch > 100).astype(np.uint8)
+                        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+                        map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
+                        map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
+                        map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
                     # Draw camera position marker (blue square).
                     cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
                     # Mining tick: may override goal_cell or supply a direct drive command.
@@ -1714,6 +1799,12 @@ def main():
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                                 min_occ_advantage=args.path_avoid_occ_advantage,
                             )
+                            # Smooth mode: remove isolated noise pixels (morphological opening)
+                            if smooth_map_enabled and np.any(obs):
+                                kernel = np.ones((3, 3), np.uint8)
+                                obs = cv2.morphologyEx(
+                                    obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                ).astype(bool)
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
                                 unknown = np.logical_not(known)
@@ -1822,6 +1913,9 @@ def main():
                             nt_health_seq += 1
                             connected = NetworkTables.isConnected()
                             nt_connected_cached = bool(connected)
+                            if connected:
+                                last_nt_ok_time = now
+                                nt_watchdog_tripped = False
                             sd.putNumber("Jetson/NTClientSeq", float(nt_health_seq))
                             sd.putNumber("Jetson/NTClientUnix", float(now))
                             sd.putString("Jetson/NTClientName", "zed_ground_wall.py")
@@ -1840,18 +1934,54 @@ def main():
                             # Periodic lightweight connection status when health debug is off.
                             connected = NetworkTables.isConnected()
                             nt_connected_cached = bool(connected)
+                            if connected:
+                                last_nt_ok_time = now
+                                nt_watchdog_tripped = False
                             print(f"NT connected={connected} target={args.roborio_ip}")
                             nt_last_conn_log = now
                         if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
                             last_drive_send = now
                             status_target_cell = None
                             status_target_world = None
+                            # Read DS joystick axes from NT if enabled.
+                            if args.ds_joystick and sd is not None:
+                                _ds_scale = max(0.0, min(1.0, float(args.ds_joystick_scale)))
+                                ds_joystick_fwd  = float(sd.getNumber(args.ds_joystick_fwd_key,  0.0)) * _ds_scale
+                                ds_joystick_turn = float(sd.getNumber(args.ds_joystick_turn_key, 0.0)) * _ds_scale
+                            else:
+                                ds_joystick_fwd  = 0.0
+                                ds_joystick_turn = 0.0
+                            # Watchdog: NT telemetry lost — stop immediately.
+                            _nt_timeout = float(args.nt_timeout_sec)
+                            if _nt_timeout > 0 and (now - last_nt_ok_time) > _nt_timeout:
+                                if not nt_watchdog_tripped:
+                                    nt_watchdog_tripped = True
+                                    print(f"[WATCHDOG] NT telemetry lost for >{_nt_timeout:.1f}s — stopping rover!")
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                continue
+                            # Human STOP: stamp person cells as temporary obstacles so A* reroutes.
+                            if human_hazard_state == "STOP" and human_person_map_points:
+                                for _hr, _hc, _hisp in human_person_map_points:
+                                    if _hisp and 0 <= _hr < occ_map.grid_h and 0 <= _hc < occ_map.grid_w:
+                                        r0 = max(0, _hr - 1); r1 = min(occ_map.grid_h - 1, _hr + 1)
+                                        c0 = max(0, _hc - 1); c1 = min(occ_map.grid_w - 1, _hc + 1)
+                                        occ_map.occ_counts[r0:r1+1, c0:c1+1] += 4.0
+                                        occ_map.free_counts[r0:r1+1, c0:c1+1] = 0.0
+                                path_cells = None          # force replan around person
+                                last_path_plan_time = 0.0
                             if close_obstacle_detected:
                                 backup_hold_until = max(
                                     backup_hold_until,
                                     now + max(0.05, float(args.backup_hold_sec)),
                                 )
                             if emergency_stop:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif human_hazard_state == "STOP":
+                                # Person too close — hold still while A* replans around them.
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
                                 send_nt_command(False, 0.0, 0.0, 0.1)
@@ -1873,10 +2003,15 @@ def main():
                             elif manual_mode:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
+                                # DS joystick overrides keyboard in manual mode when connected.
+                                _man_fwd  = manual_fwd  + ds_joystick_fwd
+                                _man_turn = manual_turn + ds_joystick_turn
+                                _man_fwd  = max(-1.0, min(1.0, _man_fwd))
+                                _man_turn = max(-1.0, min(1.0, _man_turn))
                                 send_nt_command(
                                     True,
-                                    manual_fwd,
-                                    manual_turn,
+                                    _man_fwd,
+                                    _man_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             elif tracking_enabled and (not tracking_pose_ok):
@@ -1990,6 +2125,11 @@ def main():
 
                                 align_scale = max(0.0, math.cos(err))
                                 fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+
+                                # DS joystick mix-in: driver can nudge auto commands.
+                                if args.ds_joystick:
+                                    fwd  = max(-1.0, min(1.0, fwd  + ds_joystick_fwd))
+                                    turn = max(-1.0, min(1.0, turn + ds_joystick_turn))
 
                                 send_nt_command(
                                     True,

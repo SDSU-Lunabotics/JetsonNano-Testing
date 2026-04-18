@@ -552,57 +552,96 @@ class MiningAutomation:
 
     def _generate_dig_points(self, occ_map):
         """
-        Build a serpentine (boustrophedon) list of dig-strip waypoints.
+        Quarry-mode dig planning: find the largest contiguous obstacle-free
+        region inside the excavation zone, then sweep it with a serpentine
+        (boustrophedon) pattern.
 
-        Each strip corresponds to one row of cells inside the excavation
-        polygon, subsampled at strip_pitch spacing.  Even-numbered rows
-        go left→right; odd rows go right→left (reduces repositioning turns).
-        Cells that fall inside the current obstacle mask are skipped.
+        Focusing on the single largest clear blob means:
+          - Every waypoint is reachable without crossing obstacles
+          - Small pockets near walls/rocks are ignored automatically
+          - Maximum material per run with minimum crash risk
+
+        Steps:
+          1. Rasterise the excav polygon onto a mask
+          2. Zero out any cells in the obstacle mask (with an extra erosion
+             margin of one rover-width to keep the path clear of edges)
+          3. Run connected-component labelling — pick the largest blob
+          4. Generate boustrophedon waypoints across that blob only
         """
         self.dig_points_rc = []
         if not self.excav_corners_rc:
             return
 
-        cells = self._polygon_cells(
-            self.excav_corners_rc, (occ_map.grid_h, occ_map.grid_w)
-        )
+        grid_shape = (occ_map.grid_h, occ_map.grid_w)
+
+        # --- 1. Polygon mask ---
+        cells = self._polygon_cells(self.excav_corners_rc, grid_shape)
         if not cells:
             print("[Mining] Excavation polygon produced no grid cells.")
             return
 
-        rows_arr = np.array([r for r, c in cells], dtype=np.int32)
-        cols_arr = np.array([c for r, c in cells], dtype=np.int32)
+        poly_mask = np.zeros(grid_shape, dtype=np.uint8)
+        for r, c in cells:
+            poly_mask[r, c] = 1
 
-        # Strip pitch in grid cells
-        rover_size_m   = float(self.cfg.get("rover_size_m", 0.305))
-        strip_pitch_m  = float(self.cfg.get("strip_pitch_m", 0.0))
+        # --- 2. Remove obstacles + erode by half a rover-width for safety margin ---
+        rover_size_m  = float(self.cfg.get("rover_size_m", 0.305))
+        strip_pitch_m = float(self.cfg.get("strip_pitch_m", 0.0))
         if strip_pitch_m <= 0.0:
             strip_pitch_m = max(0.05, rover_size_m * 0.8)
         step_cells = max(1, int(math.ceil(strip_pitch_m / occ_map.map_res_m)))
 
-        # Obstacle mask for filtering blocked waypoints
         obs = occ_map.obstacle_mask()
+        free_mask = poly_mask.copy()
+        free_mask[obs] = 0  # zero out obstacle cells
 
-        # Walk unique rows in the polygon at step_cells spacing (serpentine)
+        # Erode by rover radius so waypoints never sit right on an obstacle edge.
+        margin_cells = max(1, int(math.ceil((rover_size_m * 0.5) / occ_map.map_res_m)))
+        if HAS_CV2:
+            kernel = np.ones((margin_cells * 2 + 1, margin_cells * 2 + 1), np.uint8)
+            free_mask = cv2.erode(free_mask, kernel, iterations=1)
+
+        if not np.any(free_mask):
+            print("[Mining] No obstacle-free cells inside excavation zone after erosion.")
+            self.dig_points_rc = []
+            return
+
+        # --- 3. Largest connected component (quarry selection) ---
+        if HAS_CV2:
+            num_labels, label_img = cv2.connectedComponents(free_mask, connectivity=8)
+            if num_labels <= 1:
+                print("[Mining] No clear region found inside excavation zone.")
+                return
+            # Label 0 is background — find largest non-background label.
+            best_label = 1 + int(
+                np.argmax([np.sum(label_img == lbl) for lbl in range(1, num_labels)])
+            )
+            quarry_mask = (label_img == best_label).astype(np.uint8)
+            quarry_cells_count = int(np.sum(quarry_mask))
+            total_free = int(np.sum(free_mask))
+            pct = 100.0 * quarry_cells_count / max(1, total_free)
+            print(f"[Mining] Quarry blob: {quarry_cells_count} cells "
+                  f"({pct:.0f}% of free area, {num_labels - 1} region(s) found).")
+        else:
+            # No cv2 — fall back to using all free cells.
+            quarry_mask = free_mask
+            print("[Mining] cv2 unavailable — using all free cells (no blob selection).")
+
+        rows_arr, cols_arr = np.where(quarry_mask)
+
+        # --- 4. Boustrophedon sweep across the quarry blob ---
         unique_rows = sorted(set(int(v) for v in rows_arr))
         selected_rows = unique_rows[::step_cells]
 
         points = []
         for i, r in enumerate(selected_rows):
-            row_mask = (rows_arr == r)
-            if not np.any(row_mask):
-                continue
-            row_cols = sorted(int(v) for v in cols_arr[row_mask])
+            row_cols = sorted(int(cols_arr[j]) for j in range(len(rows_arr))
+                              if rows_arr[j] == r)
             if not row_cols:
                 continue
-            # Serpentine direction
             if i % 2 == 1:
                 row_cols = row_cols[::-1]
-            # Use the centre column in this strip row
             mid_c = row_cols[len(row_cols) // 2]
-            # Skip cells blocked by confirmed obstacles
-            if obs[r, mid_c]:
-                continue
             points.append((r, mid_c))
 
         self.dig_points_rc = points
