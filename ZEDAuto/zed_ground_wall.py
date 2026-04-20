@@ -1918,10 +1918,21 @@ def main():
                             )
                             if path_cells:
                                 last_path_cells = path_cells
+                                stuck_escape_counter = 0
                             else:
                                 # Do not keep stale path to an old goal.
                                 last_path_cells = None
                                 print("No path to selected goal yet; retrying...")
+                                # --- Begin Escape Maneuver ---
+                                if 'stuck_escape_counter' not in locals():
+                                    stuck_escape_counter = 0
+                                stuck_escape_counter += 1
+                                # Try to back up and turn if stuck for several cycles
+                                if stuck_escape_counter >= 3:
+                                    print("Auto escape: backing up and turning to escape red spot.")
+                                    send_nt_command(True, -0.3, 0.5, 0.5)
+                                    stuck_escape_counter = 0
+                                    time.sleep(0.5)
                             last_start = cam_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
@@ -2530,10 +2541,10 @@ def main():
                         manual_fwd = -max(0.0, min(1.0, args.drive_speed))
                         last_s_time = now
                     if key == ord("a"):
-                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                        manual_turn = max(0.0, min(1.0, args.drive_speed))
                         last_a_time = now
                     if key == ord("d"):
-                        manual_turn = max(0.0, min(1.0, args.drive_speed))
+                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
                         last_d_time = now
                     if key == ord("x"):
                         manual_fwd = 0.0
