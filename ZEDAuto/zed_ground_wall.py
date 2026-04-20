@@ -1826,24 +1826,13 @@ def main():
                                 dtype=np.int32,
                             )
                         cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
-                        # Draw heading triangle (blue) if tracking is enabled.
+                        # Draw heading arrow (yellow) if tracking is enabled.
                         if tracking_enabled and HAS_CV2:
-                            # Match visualization heading with drive-control heading convention.
                             ang = heading_ang
-                            size = max(3, int(args.map_camera_size) * 2)
-                            tip_r = int(r0 - np.sin(ang) * size)
-                            tip_c = int(c0 + np.cos(ang) * size)
-                            left_ang = ang + 2.5
-                            right_ang = ang - 2.5
-                            base_r1 = int(r0 - np.sin(left_ang) * (size * 0.6))
-                            base_c1 = int(c0 + np.cos(left_ang) * (size * 0.6))
-                            base_r2 = int(r0 - np.sin(right_ang) * (size * 0.6))
-                            base_c2 = int(c0 + np.cos(right_ang) * (size * 0.6))
-                            tri = np.array(
-                                [[tip_c, tip_r], [base_c1, base_r1], [base_c2, base_r2]],
-                                dtype=np.int32,
-                            )
-                            cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+                            size = max(8, int(args.map_camera_size) * 4)
+                            start_pt = (int(c0), int(r0))
+                            end_pt = (int(c0 + np.cos(ang) * size), int(r0 - np.sin(ang) * size))
+                            cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
                     if (not map_integration_ok) and HAS_CV2:
                         cv2.putText(
                             map_vis,
@@ -2161,7 +2150,7 @@ def main():
                                 # Assume robot forward is +Y in map frame.
                                 # Calculate robot heading in map X/Y plane.
                                 forward = R_world_cam[:, 2]
-                                heading = math.atan2(float(forward[1]), float(forward[0]))  # Y, X
+                                heading = math.atan2(float(forward[1]), float(forward[0])) + math.pi  # Invert heading to match goal arrow
                                 if args.drive_heading_flip:
                                     heading += math.pi
                                 target = math.atan2(dz, dx)  # dz = goal_z - curr_z, dx = goal_x - curr_x
