@@ -2164,7 +2164,7 @@ def main():
                                 heading = math.atan2(float(forward[1]), float(forward[0]))  # Y, X
                                 if args.drive_heading_flip:
                                     heading += math.pi
-                                target = math.atan2(dy, dx)  # dy = goal_y - curr_y, dx = goal_x - curr_x
+                                target = math.atan2(dz, dx)  # dz = goal_z - curr_z, dx = goal_x - curr_x
                                 err = target - heading
                                 # Wrap to [-pi, pi].
                                 while err > math.pi:
