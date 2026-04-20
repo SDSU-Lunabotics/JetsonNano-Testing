@@ -1740,7 +1740,8 @@ def main():
                                                 continue
                                             # Transform to world frame
                                             _pt_w = (R_world_cam @ _pt.astype(np.float32)) + t_map
-                                            _rc = occ_map.world_to_grid(float(_pt_w[0]), float(_pt_w[2]))
+                                            # Flip X axis to correct left/right inversion
+                                            _rc = occ_map.world_to_grid(-float(_pt_w[0]), float(_pt_w[2]))
                                             if _rc is None:
                                                 continue
                                             _rr, _cc = _rc
