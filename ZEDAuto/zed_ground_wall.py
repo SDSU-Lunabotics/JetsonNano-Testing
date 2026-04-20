@@ -2157,12 +2157,14 @@ def main():
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
-                                # Heading error from camera forward axis.
+                                # Heading error using map X (sideways) and Y (forward) axes.
+                                # Assume robot forward is +Y in map frame.
+                                # Calculate robot heading in map X/Y plane.
                                 forward = R_world_cam[:, 2]
-                                heading = math.atan2(float(forward[2]), float(forward[0]))
+                                heading = math.atan2(float(forward[1]), float(forward[0]))  # Y, X
                                 if args.drive_heading_flip:
                                     heading += math.pi
-                                target = math.atan2(dz, dx)
+                                target = math.atan2(dy, dx)  # dy = goal_y - curr_y, dx = goal_x - curr_x
                                 err = target - heading
                                 # Wrap to [-pi, pi].
                                 while err > math.pi:
