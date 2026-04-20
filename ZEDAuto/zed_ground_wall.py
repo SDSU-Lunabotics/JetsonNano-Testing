@@ -1702,8 +1702,7 @@ def main():
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
 
-                        # Rock detection: run YOLO on the RGB frame, look up 3D depth
-                        # of each detection centre, stamp that world cell as an obstacle.
+                        # Object detection: persist static objects, keep people as live-only markers.
                         if (rock_model is not None
                                 and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
                             rock_last_frame = frame_idx
@@ -1727,8 +1726,6 @@ def main():
                                         _cld_h, _cld_w = cloud.shape[:2]
                                         for _det in (_results.boxes or []):
                                             _lbl = str(_names.get(int(_det.cls[0]), "")).lower()
-                                            if _lbl not in rock_class_names:
-                                                continue
                                             _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
                                             # Centre pixel of bounding box
                                             _cx = int((_x1 + _x2) / 2)
@@ -1747,11 +1744,15 @@ def main():
                                             if _rc is None:
                                                 continue
                                             _rr, _cc = _rc
-                                            # Stamp a 3x3 region as strong obstacle
-                                            _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
-                                            _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
-                                            occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
-                                            occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+                                            if _lbl in rock_class_names:
+                                                # Static object: persist on map
+                                                _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
+                                                _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
+                                                occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
+                                                occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+                                            elif _lbl in {"person", "people", "human", "pedestrian"}:
+                                                # Dynamic object: show as live marker only (handled elsewhere)
+                                                pass
                             except Exception as _rock_err:
                                 pass  # never crash the main loop on detection errors
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
