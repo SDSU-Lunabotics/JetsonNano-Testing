@@ -144,6 +144,11 @@ class OccupancyMap:
         def _unique_cells(rr, cc):
             if rr.size == 0:
                 return rr, cc
+            valid = (rr >= 0) & (rr < self.grid_h) & (cc >= 0) & (cc < self.grid_w)
+            if not np.any(valid):
+                return rr[:0], cc[:0]
+            rr = rr[valid]
+            cc = cc[valid]
             flat = np.ravel_multi_index((rr, cc), (self.grid_h, self.grid_w))
             uniq = np.unique(flat)
             ur, uc = np.unravel_index(uniq, (self.grid_h, self.grid_w))
