@@ -69,7 +69,8 @@ class MiningAutomation:
           backup_speed          float  0.35  Motor value during backup
           deposit_duration      float  5.0   Seconds reversing into deposit zone
           deposit_backup_speed  float  0.35  Motor value during deposit reverse
-          deposit_approach_dist float  1.0   Metres outside deposit zone to stop
+          deposit_approach_dist float  1.0   Fallback metres outside deposit center
+          deposit_boundary_inset_m float 0.05 Rear edge inset into deposit zone
           strip_pitch_m         float  0.0   Row spacing (0 = rover_size_m * 0.8)
           goal_tol_m            float  0.4   Goal-reached distance (m)
           rover_size_m          float  0.305 Rover footprint (m, square)
@@ -151,8 +152,7 @@ class MiningAutomation:
 
     def handle_key(self, key):
         """
-        Called for every key event. Returns True if the key was consumed.
-        Consumed keys: e, d, r, t
+        Called for mining UI button/key actions. Returns True if consumed.
         """
         if not HAS_CV2:
             return False
@@ -303,7 +303,7 @@ class MiningAutomation:
 
     def render_overlay(self, map_vis, occ_map):
         """
-        Draw zone boxes, dig waypoints, and status banner onto map_vis.
+        Draw zone boxes and dig waypoints onto map_vis.
         map_vis must be the raw grid frame (grid_h x grid_w) BEFORE apply_map_view
         and BEFORE zoom-resize. Coordinates are in raw grid pixel space.
         """
@@ -375,28 +375,64 @@ class MiningAutomation:
                 if 0 <= cr < h and 0 <= cc < w:
                     cv2.circle(map_vis, (cc, cr), 2, col, -1)
 
-        # -- Status banner at bottom of map --
-        s = self.state
-        label = s.value
-        if s == MiningState.NAVIGATE_DIG and self.dig_points_rc:
-            label += f" {self.dig_index + 1}/{len(self.dig_points_rc)}"
-        hint = ""
-        if s == MiningState.IDLE:
-            if not self.excav_corners_rc:
-                hint = " e=excav"
-            elif not self.deposit_corners_rc:
-                hint = " d=dep"
-            else:
-                hint = " r=run"
-        elif s in (MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
-            hint = f" ({len(self._click_buffer)}/4 clicks)"
+    def render_status_banner(self, map_vis):
+        """
+        Draw a fixed automation task banner on the already positioned map view.
+        Call this AFTER apply_map_view so it stays pinned at the top of the map.
+        """
+        if not HAS_CV2 or map_vis is None:
+            return
+        h, w = map_vis.shape[:2]
+        if h <= 0 or w <= 0:
+            return
+
+        text = self._task_text()
+        cv2.rectangle(map_vis, (0, 0), (w, 24), (0, 0, 0), -1)
         cv2.putText(
             map_vis,
-            f"MINE:{label}{hint}",
-            (4, h - 5),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.34,
-            (255, 255, 255), 1, cv2.LINE_AA,
+            text,
+            (6, 17),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
         )
+
+    def _task_text(self):
+        """Human-readable task text for the map banner."""
+        s = self.state
+        if s == MiningState.IDLE:
+            if not self.excav_corners_rc:
+                return "TASK: Set excavation zone"
+            elif not self.deposit_corners_rc:
+                return "TASK: Set deposit zone"
+            else:
+                return "TASK: Ready to start auto run"
+        if s == MiningState.DRAW_EXCAV:
+            return f"TASK: Draw excavation zone ({len(self._click_buffer)}/4)"
+        if s == MiningState.DRAW_DEPOSIT:
+            return f"TASK: Draw deposit zone ({len(self._click_buffer)}/4)"
+        if s == MiningState.PLAN_SWEEP:
+            return "TASK: Planning excavation path"
+        if s == MiningState.NAVIGATE_DIG:
+            total = len(self.dig_points_rc)
+            if total:
+                return f"TASK: Driving to dig point {self.dig_index + 1}/{total}"
+            return "TASK: Driving to dig point"
+        if s == MiningState.DIGGING:
+            return "TASK: Digging"
+        if s == MiningState.BACKUP:
+            return "TASK: Backing away from dig strip"
+        if s == MiningState.NAVIGATE_DEPOSIT:
+            return "TASK: Driving to deposit edge"
+        if s == MiningState.DEPOSITING:
+            return "TASK: Depositing - backing into zone"
+        if s == MiningState.DONE:
+            return "TASK: Done"
+        if s == MiningState.ABORTED:
+            return "TASK: Aborted"
+        return f"TASK: {s.value}"
 
     def save_zones(self, occ_map):
         """Persist both zone polygons as world-space (x, z) pairs to JSON."""
@@ -550,59 +586,130 @@ class MiningAutomation:
                 cells.append((r, c))
         return cells
 
+    @staticmethod
+    def _ray_polygon_boundary_distance(origin_x, origin_z, dir_x, dir_z, poly_world):
+        """
+        Return distance from origin to the first polygon edge hit by a ray.
+        poly_world is a list of (x, z) vertices in polygon order.
+        """
+        if len(poly_world) < 3:
+            return None
+
+        def _cross(ax, az, bx, bz):
+            return ax * bz - az * bx
+
+        best_t = None
+        eps = 1e-6
+        for i, (x1, z1) in enumerate(poly_world):
+            x2, z2 = poly_world[(i + 1) % len(poly_world)]
+            edge_x = x2 - x1
+            edge_z = z2 - z1
+            denom = _cross(dir_x, dir_z, edge_x, edge_z)
+            if abs(denom) < eps:
+                continue
+
+            rel_x = x1 - origin_x
+            rel_z = z1 - origin_z
+            t = _cross(rel_x, rel_z, edge_x, edge_z) / denom
+            u = _cross(rel_x, rel_z, dir_x, dir_z) / denom
+            if t >= -eps and -eps <= u <= 1.0 + eps:
+                if best_t is None or t < best_t:
+                    best_t = max(0.0, t)
+
+        return best_t
+
     def _generate_dig_points(self, occ_map):
         """
-        Build a serpentine (boustrophedon) list of dig-strip waypoints.
+        Quarry-mode dig planning: find the largest contiguous obstacle-free
+        region inside the excavation zone, then sweep it with a serpentine
+        (boustrophedon) pattern.
 
-        Each strip corresponds to one row of cells inside the excavation
-        polygon, subsampled at strip_pitch spacing.  Even-numbered rows
-        go left→right; odd rows go right→left (reduces repositioning turns).
-        Cells that fall inside the current obstacle mask are skipped.
+        Focusing on the single largest clear blob means:
+          - Every waypoint is reachable without crossing obstacles
+          - Small pockets near walls/rocks are ignored automatically
+          - Maximum material per run with minimum crash risk
+
+        Steps:
+          1. Rasterise the excav polygon onto a mask
+          2. Zero out any cells in the obstacle mask (with an extra erosion
+             margin of one rover-width to keep the path clear of edges)
+          3. Run connected-component labelling — pick the largest blob
+          4. Generate boustrophedon waypoints across that blob only
         """
         self.dig_points_rc = []
         if not self.excav_corners_rc:
             return
 
-        cells = self._polygon_cells(
-            self.excav_corners_rc, (occ_map.grid_h, occ_map.grid_w)
-        )
+        grid_shape = (occ_map.grid_h, occ_map.grid_w)
+
+        # --- 1. Polygon mask ---
+        cells = self._polygon_cells(self.excav_corners_rc, grid_shape)
         if not cells:
             print("[Mining] Excavation polygon produced no grid cells.")
             return
 
-        rows_arr = np.array([r for r, c in cells], dtype=np.int32)
-        cols_arr = np.array([c for r, c in cells], dtype=np.int32)
+        poly_mask = np.zeros(grid_shape, dtype=np.uint8)
+        for r, c in cells:
+            poly_mask[r, c] = 1
 
-        # Strip pitch in grid cells
-        rover_size_m   = float(self.cfg.get("rover_size_m", 0.305))
-        strip_pitch_m  = float(self.cfg.get("strip_pitch_m", 0.0))
+        # --- 2. Remove obstacles + erode by half a rover-width for safety margin ---
+        rover_size_m  = float(self.cfg.get("rover_size_m", 0.305))
+        strip_pitch_m = float(self.cfg.get("strip_pitch_m", 0.0))
         if strip_pitch_m <= 0.0:
             strip_pitch_m = max(0.05, rover_size_m * 0.8)
         step_cells = max(1, int(math.ceil(strip_pitch_m / occ_map.map_res_m)))
 
-        # Obstacle mask for filtering blocked waypoints
         obs = occ_map.obstacle_mask()
+        free_mask = poly_mask.copy()
+        free_mask[obs] = 0  # zero out obstacle cells
 
-        # Walk unique rows in the polygon at step_cells spacing (serpentine)
+        # Erode by rover radius so waypoints never sit right on an obstacle edge.
+        margin_cells = max(1, int(math.ceil((rover_size_m * 0.5) / occ_map.map_res_m)))
+        if HAS_CV2:
+            kernel = np.ones((margin_cells * 2 + 1, margin_cells * 2 + 1), np.uint8)
+            free_mask = cv2.erode(free_mask, kernel, iterations=1)
+
+        if not np.any(free_mask):
+            print("[Mining] No obstacle-free cells inside excavation zone after erosion.")
+            self.dig_points_rc = []
+            return
+
+        # --- 3. Largest connected component (quarry selection) ---
+        if HAS_CV2:
+            num_labels, label_img = cv2.connectedComponents(free_mask, connectivity=8)
+            if num_labels <= 1:
+                print("[Mining] No clear region found inside excavation zone.")
+                return
+            # Label 0 is background — find largest non-background label.
+            best_label = 1 + int(
+                np.argmax([np.sum(label_img == lbl) for lbl in range(1, num_labels)])
+            )
+            quarry_mask = (label_img == best_label).astype(np.uint8)
+            quarry_cells_count = int(np.sum(quarry_mask))
+            total_free = int(np.sum(free_mask))
+            pct = 100.0 * quarry_cells_count / max(1, total_free)
+            print(f"[Mining] Quarry blob: {quarry_cells_count} cells "
+                  f"({pct:.0f}% of free area, {num_labels - 1} region(s) found).")
+        else:
+            # No cv2 — fall back to using all free cells.
+            quarry_mask = free_mask
+            print("[Mining] cv2 unavailable — using all free cells (no blob selection).")
+
+        rows_arr, cols_arr = np.where(quarry_mask)
+
+        # --- 4. Boustrophedon sweep across the quarry blob ---
         unique_rows = sorted(set(int(v) for v in rows_arr))
         selected_rows = unique_rows[::step_cells]
 
         points = []
         for i, r in enumerate(selected_rows):
-            row_mask = (rows_arr == r)
-            if not np.any(row_mask):
-                continue
-            row_cols = sorted(int(v) for v in cols_arr[row_mask])
+            row_cols = sorted(int(cols_arr[j]) for j in range(len(rows_arr))
+                              if rows_arr[j] == r)
             if not row_cols:
                 continue
-            # Serpentine direction
             if i % 2 == 1:
                 row_cols = row_cols[::-1]
-            # Use the centre column in this strip row
             mid_c = row_cols[len(row_cols) // 2]
-            # Skip cells blocked by confirmed obstacles
-            if obs[r, mid_c]:
-                continue
             points.append((r, mid_c))
 
         self.dig_points_rc = points
@@ -611,20 +718,16 @@ class MiningAutomation:
 
     def _find_deposit_approach(self, occ_map):
         """
-        Compute an approach waypoint just outside the deposit zone on the
-        excavation side, so the rover can reverse in (treadmill on rear).
+        Compute the deposit-edge waypoint on the excavation side.
 
-        Geometry:
-          approach = deposit_centroid
-                     + normalize(excav_centroid − deposit_centroid)
-                     × approach_dist_m
+        The rover center is placed so its rear edge is just inside the
+        deposit polygon boundary. That makes the rover footprint touch the
+        drawn deposit zone instead of stopping at a fixed centroid offset.
 
         Returns (row, col) or None on failure.
         """
         if not self.deposit_corners_rc or not self.excav_corners_rc:
             return None
-
-        approach_dist = float(self.cfg.get("deposit_approach_dist", 1.0))
 
         # Centroids in grid space
         dep_r, dep_c = self._poly_centroid(self.deposit_corners_rc)
@@ -649,9 +752,33 @@ class MiningAutomation:
         dx /= length
         dz /= length
 
-        # Approach point in world space
-        ap_x = dep_x + dx * approach_dist
-        ap_z = dep_z + dz * approach_dist
+        deposit_poly_world = []
+        for r, c in self.deposit_corners_rc:
+            w = occ_map.grid_to_world(r, c)
+            if w is not None:
+                deposit_poly_world.append((float(w[0]), float(w[1])))
+
+        boundary_dist = self._ray_polygon_boundary_distance(
+            dep_x, dep_z, dx, dz, deposit_poly_world
+        )
+
+        rover_size_m = max(0.01, float(self.cfg.get("rover_size_m", 0.305)))
+        rover_half_m = rover_size_m * 0.5
+        inset_m = max(0.0, float(self.cfg.get("deposit_boundary_inset_m", 0.05)))
+        inset_m = min(inset_m, max(0.0, rover_half_m - 0.01))
+
+        if boundary_dist is None:
+            approach_dist = float(self.cfg.get("deposit_approach_dist", 1.0))
+            ap_dist = max(0.0, approach_dist)
+            print("[Mining] Deposit edge intersection failed; using fallback "
+                  f"approach distance {ap_dist:.2f} m.")
+        else:
+            ap_dist = boundary_dist + max(0.0, rover_half_m - inset_m)
+
+        # Approach point in world space. The rear bumper will sit at
+        # boundary - inset_m along this ray when the rover reaches the point.
+        ap_x = dep_x + dx * ap_dist
+        ap_z = dep_z + dz * ap_dist
 
         # Convert to grid
         rc = occ_map.world_to_grid(ap_x, ap_z)

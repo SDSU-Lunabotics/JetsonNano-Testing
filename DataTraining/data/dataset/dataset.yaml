@@ -1,4 +1,4 @@
-path: /Users/gecsanreyes/Desktop/RoboRio/JetsonNano-Testing/DataTraining/data/dataset
+path: /Users/gecsanreyes/Desktop/RoboRio/Jet/JetsonNano-Testing/DataTraining/data/dataset
 train: images/train
 val: images/val
 test: images/test
@@ -6,3 +6,6 @@ names:
   0: rock
   1: obstacle
   2: pole
+  3: berm_marker
+  4: hole_rgb
+  5: unknown_obstacle

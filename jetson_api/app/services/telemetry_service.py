@@ -104,6 +104,8 @@ class TelemetryService:
 
         bridge_status = roborio_bridge_service.get_status()
         bridge_connected = bool(bridge_status.get("connected", False))
+        bridge_heartbeat = bridge_status.get("heartbeat") or {}
+        bridge_heartbeat_fresh = bool(bridge_heartbeat.get("fresh", False))
 
         # Fallback: if the local RoboRIO HTTP bridge is unavailable, use direct
         # NT connectivity so status still reflects live RoboRIO link health.
@@ -115,7 +117,14 @@ class TelemetryService:
             if bridge_connected:
                 bridge_status["connected"] = True
 
-        if bridge_connected:
+        if bridge_heartbeat_fresh:
+            try:
+                self._roborio_last_seen_ms = int(bridge_heartbeat.get("last_seen_ms"))
+            except (TypeError, ValueError):
+                self._roborio_last_seen_ms = now
+        elif bridge_connected and not bridge_heartbeat:
+            # Older bridge versions did not expose heartbeat freshness. Preserve
+            # the NetworkTables-based behavior for that case only.
             self._roborio_last_seen_ms = now
 
         rover = RoverStatus(

@@ -10,6 +10,12 @@ __pycache__/
 runs/
 DataTraining/runs/
 
+# Trained model weights (large binary files — share via Drive/SSH, not git)
+# Keep ZEDAuto/models/README.md tracked but ignore the actual .pt files
+ZEDAuto/models/*.pt
+# Also ignore any stray .pt files at repo root
+*.pt
+
 # Exclude heavy generated ROS workspace outputs in nested repos
 OtherREPOS/**/build/
 OtherREPOS/**/install/

@@ -62,6 +62,30 @@ def main():
     parser.add_argument("--area-load-path", default=None, help="Path to load ZED area memory (.area)")
     parser.add_argument("--area-save-path", default=None, help="Path to save ZED area memory (.area)")
     parser.add_argument("--area-save-every", type=float, default=30.0, help="Seconds between area-memory saves")
+    parser.add_argument(
+        "--tracking-max-pose-jump-m",
+        type=float,
+        default=0.80,
+        help="Reject tracking pose jumps larger than this between frames. Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--localize-turn-speed",
+        type=float,
+        default=0.25,
+        help="Turn command used during Localize Scan (0-1).",
+    )
+    parser.add_argument(
+        "--localize-scan-sec",
+        type=float,
+        default=8.0,
+        help="Seconds to rotate for a manual Localize Scan when tracking is already OK.",
+    )
+    parser.add_argument(
+        "--localize-max-sec",
+        type=float,
+        default=20.0,
+        help="Maximum seconds to keep Localize Scan active while tracking is lost.",
+    )
     parser.add_argument("--map-width-m", type=float, default=20.0, help="Top-down map width in meters (X axis)")
     parser.add_argument("--map-height-m", type=float, default=20.0, help="Top-down map height in meters (Z axis)")
     parser.add_argument("--map-res-m", type=float, default=0.05, help="Map resolution in meters per cell")
@@ -220,6 +244,8 @@ def main():
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
+    parser.add_argument("--main-rover-mode", action="store_true", help="Enable main-rover controls on the RoboRIO")
+    parser.add_argument("--main-rover-debug", action="store_true", help="Enable Drive/MainRoverDebugMode on the RoboRIO")
     parser.add_argument(
         "--drive-ready-pulse-sec",
         type=float,
@@ -327,6 +353,34 @@ def main():
     parser.add_argument("--map-publish-jpeg-quality", type=int, default=70, help="JPEG quality for published occupancy map")
     parser.add_argument("--map-publish-timeout-ms", type=int, default=250, help="HTTP timeout for published occupancy map")
     parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
+    parser.add_argument("--manual-start", action="store_true", help="Start in keyboard manual drive mode")
+    parser.add_argument(
+        "--nt-timeout-sec",
+        type=float,
+        default=3.0,
+        help="Stop driving if NetworkTables connection is lost for this many seconds (watchdog). 0 disables.",
+    )
+    parser.add_argument(
+        "--ds-joystick",
+        action="store_true",
+        help="Read DS controller axes from NT (DS/JoystickFwd, DS/JoystickTurn) and mix into drive commands",
+    )
+    parser.add_argument(
+        "--ds-joystick-fwd-key",
+        default="DS/JoystickFwd",
+        help="NT key the RoboRIO publishes for DS joystick forward axis (-1 to 1)",
+    )
+    parser.add_argument(
+        "--ds-joystick-turn-key",
+        default="DS/JoystickTurn",
+        help="NT key the RoboRIO publishes for DS joystick turn axis (-1 to 1)",
+    )
+    parser.add_argument(
+        "--ds-joystick-scale",
+        type=float,
+        default=0.5,
+        help="Scale applied to DS joystick axes before mixing into auto drive (0-1)",
+    )
     parser.add_argument("--no-gui", action="store_true", help="Disable local OpenCV windows")
     parser.add_argument(
         "--overlay-red-only",
@@ -339,6 +393,23 @@ def main():
     parser.add_argument("--human-stop-m", type=float, default=1.5, help="Person distance to trigger STOP (m)")
     parser.add_argument("--human-slow-m", type=float, default=3.0, help="Person distance to trigger SLOW (m)")
     parser.add_argument("--human-min-conf", type=float, default=0.40, help="Min person confidence for hazard state")
+    # Rock detection (custom YOLO model)
+    parser.add_argument("--rock-model", default="", help="Path to trained rock YOLO model (.pt). Leave empty to disable.")
+    parser.add_argument("--rock-conf", type=float, default=0.35, help="Rock detection confidence threshold")
+    parser.add_argument("--rock-every", type=int, default=5, help="Run rock detection every N frames")
+    parser.add_argument("--rock-stamp", type=float, default=6.0, help="Obstacle evidence to stamp per detected rock cell")
+    parser.add_argument("--rock-classes", default="rock,stone,boulder", help="Comma-separated class names to treat as rocks")
+    parser.add_argument(
+        "--landmark-memory",
+        action="store_true",
+        default=True,
+        help="Save static AI detections as map landmarks for relocalization awareness.",
+    )
+    parser.add_argument("--no-landmark-memory", action="store_false", dest="landmark_memory", help="Disable landmark memory")
+    parser.add_argument("--landmark-path", default=os.path.join(SCRIPT_DIR, "zed_landmarks.json"), help="Path to static AI landmark memory JSON")
+    parser.add_argument("--landmark-assoc-m", type=float, default=0.45, help="Merge detections into an existing landmark within this distance")
+    parser.add_argument("--landmark-min-hits", type=int, default=2, help="Minimum repeated detections before drawing a landmark")
+    parser.add_argument("--landmark-save-every", type=float, default=5.0, help="Seconds between landmark memory saves")
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -458,6 +529,19 @@ def main():
     mapping_mode = "complex" if args.complex else "simple"
     print(f"Mapping mode: {mapping_mode}")
 
+    # Rock detection via custom YOLO model
+    rock_model = None
+    rock_last_frame = -999999
+    rock_class_names = set(n.strip().lower() for n in args.rock_classes.split(",") if n.strip())
+    if args.rock_model:
+        try:
+            from ultralytics import YOLO as _YOLO
+            rock_model = _YOLO(args.rock_model)
+            print(f"Rock detection model loaded: {args.rock_model}  classes={rock_class_names}")
+        except Exception as _rock_exc:
+            print(f"[WARN] Could not load rock model '{args.rock_model}': {_rock_exc}")
+            rock_model = None
+
     # Human detection via ZED SDK built-in object detection
     human_detect_available = False
     human_objects = None
@@ -519,6 +603,16 @@ def main():
     )
     last_save = time.time()
 
+    def map_x_from_zed(x):
+        # ZED +X is camera-right, while the occupancy map image mirrors X for display.
+        return -float(x)
+
+    def map_world_to_grid(x, z):
+        return occ_map.world_to_grid(map_x_from_zed(x), float(z))
+
+    def zed_x_from_map(x):
+        return -float(x)
+
     if args.map_load and os.path.exists(args.map_save_path):
         try:
             ok, msg = occ_map.load(args.map_save_path)
@@ -535,6 +629,9 @@ def main():
         "deposit_duration":      float(os.getenv("MINING_DEPOSIT_DURATION",       "5.0")),
         "deposit_backup_speed":  float(os.getenv("MINING_DEPOSIT_BACKUP_SPEED",   "0.35")),
         "deposit_approach_dist": float(os.getenv("MINING_DEPOSIT_APPROACH_DIST",  "1.0")),
+        "deposit_boundary_inset_m": float(os.getenv(
+            "MINING_DEPOSIT_BOUNDARY_INSET_M", "0.05"
+        )),
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
         "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
         "rover_size_m":          float(args.rover_size_m),
@@ -550,7 +647,13 @@ def main():
         else:
             NetworkTables.initialize(server=args.roborio_ip)
             sd = NetworkTables.getTable("SmartDashboard")
-            print(f"Drive enabled: NetworkTables to {args.roborio_ip}")
+            sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
+            sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
+            sd.putBoolean("Drive/MainRoverEmergencyStop", bool(emergency_stop))
+            print(
+                f"Drive enabled: NetworkTables to {args.roborio_ip} "
+                f"main_rover_mode={'on' if args.main_rover_mode else 'off'}"
+            )
 
     goal_cell = None
     path_cells = None
@@ -560,13 +663,19 @@ def main():
     map_window_ready = False
     status_window_ready = False
     status_button_rects = {}
+    reset_map_confirm = False
+    status_scroll_y = 0
+    status_scroll_max = 0
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
+    smooth_map_enabled = False
     emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
-    manual_mode = False
+    manual_mode = bool(args.manual_start)
+    if manual_mode:
+        print("Manual drive mode: ON (startup)")
     last_w_time = 0.0
     last_s_time = 0.0
     last_a_time = 0.0
@@ -584,6 +693,10 @@ def main():
     last_backup_log_time = 0.0
     backup_hold_until = 0.0
     nt_connected_cached = False
+    last_nt_ok_time = time.time()   # watchdog: last time NT was confirmed connected
+    nt_watchdog_tripped = False     # set True when watchdog fires, cleared on reconnect
+    ds_joystick_fwd = 0.0           # DS controller forward axis from NT
+    ds_joystick_turn = 0.0          # DS controller turn axis from NT
     status_cmd_enabled = False
     status_cmd_fwd = 0.0
     status_cmd_turn = 0.0
@@ -606,6 +719,14 @@ def main():
     map_view_shift_c = 0
     frame_idx = 0
     human_person_map_points = []  # list of (row, col) for map markers
+    localization_scan_active = False
+    localization_scan_started = 0.0
+    localization_scan_started_lost = False
+    localization_scan_reason = ""
+    last_localization_log = 0.0
+    landmark_memory = {"version": 1, "landmarks": []}
+    landmark_dirty = False
+    last_landmark_save = time.time()
     map_size_input_text = ""      # user-typed map size string e.g. "6x8" (feet)
     map_size_input_focused = False
     paint_safe_mode = False       # when True, map clicks paint cells as permanently safe
@@ -628,6 +749,159 @@ def main():
             os.replace(tmp_path, path)
         except Exception:
             pass
+
+    def load_landmark_memory():
+        nonlocal landmark_memory
+        if not args.landmark_memory or not args.landmark_path:
+            return
+        try:
+            if os.path.exists(args.landmark_path):
+                with open(args.landmark_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict) and isinstance(data.get("landmarks"), list):
+                    landmark_memory = data
+                    print(f"Loaded {len(landmark_memory['landmarks'])} AI landmark(s): {args.landmark_path}")
+        except Exception as exc:
+            print(f"Failed to load landmark memory: {exc}")
+
+    def save_landmark_memory(force=False):
+        nonlocal landmark_dirty, last_landmark_save
+        if not args.landmark_memory or not args.landmark_path:
+            return
+        now = time.time()
+        if (not force) and ((not landmark_dirty) or (now - last_landmark_save) < float(args.landmark_save_every)):
+            return
+        landmark_memory["version"] = 1
+        landmark_memory["updated_ms"] = int(now * 1000)
+        _write_json_atomic(args.landmark_path, landmark_memory)
+        landmark_dirty = False
+        last_landmark_save = now
+
+    def record_static_landmark(label, map_x, map_z, confidence):
+        """
+        Save stable AI detections in map coordinates. People are intentionally
+        excluded; this is for static objects like rocks/obstacles.
+        """
+        nonlocal landmark_dirty
+        if not args.landmark_memory:
+            return
+        if not np.isfinite([map_x, map_z]).all():
+            return
+        label = str(label or "object").strip().lower()
+        now_ms = int(time.time() * 1000)
+        assoc_m = max(0.05, float(args.landmark_assoc_m))
+        best = None
+        best_dist = None
+        for item in landmark_memory.get("landmarks", []):
+            if item.get("label") != label:
+                continue
+            dist = math.hypot(float(item.get("x", 0.0)) - map_x, float(item.get("z", 0.0)) - map_z)
+            if dist <= assoc_m and (best_dist is None or dist < best_dist):
+                best = item
+                best_dist = dist
+        if best is None:
+            best = {
+                "id": f"{label}_{len(landmark_memory.get('landmarks', [])) + 1}",
+                "label": label,
+                "x": float(map_x),
+                "z": float(map_z),
+                "confidence": float(confidence),
+                "hits": 1,
+                "first_seen_ms": now_ms,
+                "last_seen_ms": now_ms,
+            }
+            landmark_memory.setdefault("landmarks", []).append(best)
+        else:
+            hits = int(best.get("hits", 1)) + 1
+            alpha = 1.0 / min(12.0, float(hits))
+            best["x"] = float((1.0 - alpha) * float(best.get("x", map_x)) + alpha * map_x)
+            best["z"] = float((1.0 - alpha) * float(best.get("z", map_z)) + alpha * map_z)
+            best["confidence"] = float(max(float(best.get("confidence", 0.0)), float(confidence)))
+            best["hits"] = hits
+            best["last_seen_ms"] = now_ms
+        landmark_dirty = True
+
+    def iter_visible_landmarks():
+        min_hits = max(1, int(args.landmark_min_hits))
+        for item in landmark_memory.get("landmarks", []):
+            if int(item.get("hits", 0)) < min_hits:
+                continue
+            rc = occ_map.world_to_grid(float(item.get("x", 0.0)), float(item.get("z", 0.0)))
+            if rc is None:
+                continue
+            yield item, rc
+
+    def draw_landmarks(frame):
+        if not HAS_CV2 or frame is None:
+            return
+        for item, (row, col) in iter_visible_landmarks():
+            display_cell = display_cell_for_map_cell(row, col, frame)
+            if display_cell is None:
+                continue
+            dr, dc = display_cell
+            color = (255, 0, 180)
+            cv2.drawMarker(frame, (dc, dr), color, cv2.MARKER_CROSS, 9, 1, cv2.LINE_AA)
+            label = str(item.get("label", "obj"))[:10]
+            cv2.putText(
+                frame,
+                label,
+                (min(frame.shape[1] - 1, dc + 5), max(10, dr - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.30,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+    def start_localization_scan(reason="manual"):
+        nonlocal localization_scan_active, localization_scan_started
+        nonlocal localization_scan_started_lost, localization_scan_reason
+        nonlocal emergency_stop, manual_mode, manual_fwd, manual_turn
+        localization_scan_active = True
+        localization_scan_started = time.time()
+        localization_scan_started_lost = bool(tracking_enabled and not tracking_pose_ok)
+        localization_scan_reason = reason
+        emergency_stop = False
+        manual_mode = False
+        manual_fwd = 0.0
+        manual_turn = 0.0
+        print(f"Localize Scan started ({reason}). Rotate/look for known area-memory features and AI landmarks.")
+
+    def stop_localization_scan(reason="done"):
+        nonlocal localization_scan_active, localization_scan_reason
+        if localization_scan_active:
+            print(f"Localize Scan stopped ({reason}).")
+        localization_scan_active = False
+        localization_scan_reason = ""
+
+    def update_localization_scan_state():
+        if not localization_scan_active:
+            return
+        elapsed = time.time() - localization_scan_started
+        if tracking_enabled and localization_scan_started_lost and tracking_pose_ok:
+            stop_localization_scan("tracking relocked")
+        elif tracking_pose_ok and elapsed >= max(0.5, float(args.localize_scan_sec)):
+            stop_localization_scan("scan complete")
+        elif (not tracking_pose_ok) and elapsed >= max(1.0, float(args.localize_max_sec)):
+            stop_localization_scan("timeout")
+
+    def draw_localization_banner(frame):
+        if not HAS_CV2 or frame is None or not localization_scan_active:
+            return
+        h, w = frame.shape[:2]
+        y0, y1 = 24, min(h, 48)
+        if y1 <= y0:
+            return
+        cv2.rectangle(frame, (0, y0), (w, y1), (0, 70, 180), -1)
+        if tracking_enabled:
+            lock = "LOCKED" if tracking_pose_ok else "SEARCHING"
+        else:
+            lock = "TRACKING OFF"
+        count = len(list(iter_visible_landmarks()))
+        text = f"LOCALIZE: {lock} | landmarks {count} | L toggles"
+        cv2.putText(frame, text, (6, y0 + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
+
+    load_landmark_memory()
 
     def mining_buttons_enabled():
         return mining.state not in (
@@ -664,6 +938,69 @@ def main():
         occ_map.painted_free[:] = False
         print("Cleared all painted-safe cells")
 
+    def set_main_rover_mode(enabled):
+        args.main_rover_mode = bool(enabled)
+        if sd is not None:
+            sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
+            sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
+        print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
+
+    def lock_green_zones_permanent():
+        nonlocal last_save
+        strong_occ = occ_map.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
+        green_mask = (
+            (occ_map.free_counts >= 1.0)
+            & (occ_map.free_counts >= occ_map.occ_counts)
+            & (occ_map.free_counts >= occ_map.hole_counts)
+            & (~strong_occ)
+        )
+        count = int(np.count_nonzero(green_mask))
+        if count <= 0:
+            print("Lock Green: no green/safe cells to lock.")
+            return
+        occ_map.painted_free[green_mask] = True
+        occ_map.occ_counts[green_mask] = 0.0
+        occ_map.hole_counts[green_mask] = 0.0
+        occ_map.free_counts[green_mask] = np.maximum(
+            occ_map.free_counts[green_mask],
+            float(occ_map.free_confirm_hits),
+        )
+        try:
+            occ_map.save(args.map_save_path)
+            last_save = time.time()
+        except Exception as exc:
+            print(f"Lock Green save failed: {exc}")
+        print(f"Lock Green: {count} green/safe cells marked permanent.")
+
+    def set_status_scroll(delta):
+        nonlocal status_scroll_y
+        status_scroll_y = max(0, min(int(status_scroll_max), int(status_scroll_y + delta)))
+
+    def reset_map_memory():
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
+        occ_map.free_counts[:] = 0.0
+        occ_map.occ_counts[:] = 0.0
+        occ_map.hole_counts[:] = 0.0
+        occ_map.painted_free[:] = False
+        goal_cell = None
+        path_cells = None
+        last_path_cells = None
+        last_start = None
+        last_goal = None
+        last_path_plan_time = 0.0
+        emergency_stop = True
+        reset_map_confirm = False
+        landmark_memory = {"version": 1, "landmarks": []}
+        landmark_dirty = True
+        try:
+            occ_map.save(args.map_save_path)
+            last_save = time.time()
+        except Exception as exc:
+            print(f"Map reset save failed: {exc}")
+        save_landmark_memory(force=True)
+        print("Map reset: occupancy, painted cells, path, goal, and AI landmarks cleared.")
+
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
         now = time.time()
@@ -677,6 +1014,8 @@ def main():
             "source": "zed_ground_wall",
             "timestamp_ms": int(now * 1000),
             "mining_state": mining.state.value,
+            "localization_scan_active": bool(localization_scan_active),
+            "landmark_count": int(len(landmark_memory.get("landmarks", []))),
             "selected_tool": selected_tool,
             "brush_radius": int(paint_brush_radius),
             "controls": [
@@ -706,6 +1045,34 @@ def main():
                     "label": "Clear All",
                     "command": "clear_all",
                     "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "lock_green",
+                    "label": "Lock Green",
+                    "command": "lock_green",
+                    "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "reset_map",
+                    "label": "Reset Map",
+                    "command": "reset_map",
+                    "active": bool(reset_map_confirm),
+                    "enabled": True,
+                },
+                {
+                    "id": "localize_scan",
+                    "label": "Localize Scan",
+                    "command": "localize_scan",
+                    "active": bool(localization_scan_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "main_rover_mode",
+                    "label": "Main Rover Mode",
+                    "command": "main_rover_mode",
+                    "active": bool(args.main_rover_mode),
                     "enabled": True,
                 },
                 {
@@ -754,6 +1121,25 @@ def main():
             out[dst_r0:dst_r1, dst_c0:dst_c1] = frame[src_r0:src_r1, src_c0:src_c1]
 
         return out, shift_r, shift_c
+
+    def display_cell_for_map_cell(row, col, frame):
+        if frame is None:
+            return None
+        dr = int(row) + int(map_view_shift_r)
+        dc = int(col) + int(map_view_shift_c)
+        if dr < 0 or dr >= frame.shape[0] or dc < 0 or dc >= frame.shape[1]:
+            return None
+        return dr, dc
+
+    def draw_live_detection_marker(frame, row, col, is_person):
+        display_cell = display_cell_for_map_cell(row, col, frame)
+        if display_cell is None:
+            return
+        dr, dc = display_cell
+        color = (0, 0, 255) if is_person else (0, 200, 255)
+        cv2.circle(frame, (dc, dr), 3, color, -1)
+        if is_person:
+            cv2.circle(frame, (dc, dr), 6, color, 1)
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
@@ -816,11 +1202,48 @@ def main():
         print(f"New goal set at row={row}, col={col}")
 
     def on_status_click(event, x, y, flags, param):
-        nonlocal disable_holes, whole_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
+        nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
+        nonlocal reset_map_confirm
+        if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
+            try:
+                wheel_delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                wheel_delta = 1 if flags > 0 else -1
+            set_status_scroll(-80 if wheel_delta > 0 else 80)
+            return
         is_drag = event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON)
         if event != cv2.EVENT_LBUTTONDOWN and not is_drag:
             return
+
+        if reset_map_confirm:
+            rect = status_button_rects.get("reset_confirm")
+            if rect is not None:
+                x0, y0, x1, y1 = rect
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    reset_map_memory()
+                    return
+            rect = status_button_rects.get("reset_cancel")
+            if rect is not None:
+                x0, y0, x1, y1 = rect
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    reset_map_confirm = False
+                    print("Map reset canceled.")
+                    return
+            return
+
+        rect = status_button_rects.get("scroll_up")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_status_scroll(-90)
+                return
+        rect = status_button_rects.get("scroll_down")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_status_scroll(90)
+                return
         # Brush size slider supports drag.
         rect = status_button_rects.get("brush_slider")
         if rect is not None:
@@ -855,9 +1278,53 @@ def main():
                 map_scale_live = max(1, map_scale_live - 1)
                 print(f"Map zoom: x{map_scale_live}")
                 return
-        button_enabled = mining_buttons_enabled()
-        if not button_enabled:
-            return
+        mining_running = mining.state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+        rect = status_button_rects.get("auto_run")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if mining_running:
+                    mining.handle_key(ord("t"))   # abort current run
+                    print("Auto Run: ABORTED via button")
+                else:
+                    mining.handle_key(ord("r"))   # start run
+                    print("Auto Run: START requested via button")
+                return
+        rect = status_button_rects.get("localize_scan")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if localization_scan_active:
+                    stop_localization_scan("button")
+                else:
+                    start_localization_scan("button")
+                return
+        rect = status_button_rects.get("reset_map")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                reset_map_confirm = True
+                print("Confirm map reset in the status panel.")
+                return
+        rect = status_button_rects.get("lock_green")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                lock_green_zones_permanent()
+                return
+        rect = status_button_rects.get("main_rover_mode")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_main_rover_mode(not args.main_rover_mode)
+                return
         rect = status_button_rects.get("excav")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -870,6 +1337,9 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 mining.handle_key(ord("d"))
                 return
+        button_enabled = mining_buttons_enabled()
+        if not button_enabled:
+            return
         rect = status_button_rects.get("whole")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -908,6 +1378,13 @@ def main():
                 set_brush_tool("paint_obstacle" if next_active else None)
                 print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
                 return
+        rect = status_button_rects.get("smooth_map")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                smooth_map_enabled = not smooth_map_enabled
+                print(f"Smooth Map {'ENABLED — noise pixels filtered' if smooth_map_enabled else 'DISABLED'}")
+                return
         rect = status_button_rects.get("clear_paint")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -929,7 +1406,7 @@ def main():
                 print(f"Brush radius: {paint_brush_radius} cells")
                 return
     def process_external_map_command():
-        nonlocal last_map_command_seq
+        nonlocal last_map_command_seq, reset_map_confirm
         try:
             if not args.map_command_file or (not os.path.exists(args.map_command_file)):
                 return
@@ -973,6 +1450,18 @@ def main():
             print(f"Paint Obstacle mode {'ON — click/drag map to force obstacle cells' if paint_obstacle_mode else 'OFF'}")
         elif action == "clear_all":
             clear_manual_paint()
+        elif action == "lock_green":
+            lock_green_zones_permanent()
+        elif action == "reset_map":
+            reset_map_confirm = True
+            print("Confirm map reset in the status panel.")
+        elif action == "localize_scan":
+            if localization_scan_active:
+                stop_localization_scan("external command")
+            else:
+                start_localization_scan("external command")
+        elif action == "main_rover_mode":
+            set_main_rover_mode(not args.main_rover_mode)
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
                 mining.handle_key(ord("e"))
@@ -999,6 +1488,9 @@ def main():
             nonlocal nt_last_auto_push
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
+            sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
+            sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
+            sd.putBoolean("Drive/MainRoverEmergencyStop", False)
             sd.putBoolean("Jetson/AutomationEnabled", enabled)
             # Robot-side code may scale command by these keys.
             if enabled:
@@ -1076,10 +1568,12 @@ def main():
         return ", ".join(parts)
 
     def render_status_panel(cam_cell):
-        panel_h = 780
+        nonlocal status_scroll_y, status_scroll_max
+        panel_h = 680
         panel_w = 620
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
+        status_button_rects.clear()
 
         def put_line(text, y, color=(235, 235, 235), scale=0.55):
             cv2.putText(
@@ -1123,6 +1617,9 @@ def main():
         elif emergency_stop:
             mode_label = "STOPPED"
             mode_color = (0, 80, 255)
+        elif localization_scan_active:
+            mode_label = "LOCALIZE"
+            mode_color = (0, 180, 255)
         elif tracking_enabled and not tracking_pose_ok:
             mode_label = "TRACK LOST"
             mode_color = (0, 140, 255)
@@ -1139,7 +1636,15 @@ def main():
         put_line("ZED DRIVE STATUS", 30, (255, 255, 255), 0.72)
         put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
-        put_line(f"NT connected: {nt_connected_cached}", 114, (170, 255, 170) if nt_connected_cached else (140, 140, 255))
+        _nt_status_color = (170, 255, 170) if nt_connected_cached else (0, 60, 255)
+        _nt_watchdog_txt = " [WATCHDOG TRIPPED]" if nt_watchdog_tripped else ""
+        put_line(f"NT: {'OK' if nt_connected_cached else 'LOST'}{_nt_watchdog_txt}", 114, _nt_status_color)
+        put_line(
+            f"Main rover mode: {'ON' if args.main_rover_mode else 'OFF'} (u)",
+            132,
+            (255, 220, 170) if args.main_rover_mode else (190, 190, 190),
+            0.45,
+        )
         if tracking_enabled:
             track_txt = "OK" if tracking_pose_ok else "LOST"
             if args.area_memory:
@@ -1152,58 +1657,64 @@ def main():
         track_color = (170, 255, 170) if tracking_pose_ok else (0, 140, 255)
         put_line(
             f"Tracking: {track_txt} | AreaMem: {area_txt} | Follow: {'ON' if follow_rover_map else 'OFF'} (c)",
-            140,
+            150,
             track_color,
             0.52,
+        )
+        put_line(
+            f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved | Localize Scan: {'ON' if localization_scan_active else 'OFF'} (l)",
+            168,
+            (255, 220, 170) if localization_scan_active else (190, 190, 190),
+            0.45,
         )
 
         excav_set = bool(mining.excav_corners_rc)
         deposit_set = bool(mining.deposit_corners_rc)
-        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 168, (170, 255, 170) if excav_set else (190, 190, 190))
-        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 192, (170, 255, 170) if deposit_set else (190, 190, 190))
-        put_line("Click a button below, then define 4 corners on the map.", 216, (210, 210, 210), 0.48)
+        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 194, (170, 255, 170) if excav_set else (190, 190, 190))
+        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 218, (170, 255, 170) if deposit_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", 242, (210, 210, 210), 0.48)
 
         if goal_cell is None:
-            put_line("Goal cell: none", 238, (190, 190, 190))
-            put_line("Goal world: none", 262, (190, 190, 190))
+            put_line("Goal cell: none", 264, (190, 190, 190))
+            put_line("Goal world: none", 288, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 238, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 264, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 262, (190, 190, 190))
+                put_line("Goal world: unavailable", 288, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 262, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 288, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 286, (190, 190, 190))
+            put_line("Active target: none", 302, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    286,
+                    302,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    286,
+                    302,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 310, (190, 190, 190))
+            put_line("Robot cell: unavailable", 326, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 310, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 326, (180, 255, 220))
 
-        put_line(f"Map zoom: x{map_scale_live}", 334, (220, 240, 255))
+        put_line(f"Map zoom: x{map_scale_live}", 350, (220, 240, 255))
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            358,
+            374,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 382)
-        draw_axis("Turn", status_cmd_turn, 404)
+        draw_axis("Forward", status_cmd_fwd, 398)
+        draw_axis("Turn", status_cmd_turn, 420)
 
         # --- Rover size input field (placed between axis bars and the zone buttons) ---
         cur_rover_ft = args.rover_size_m / 0.3048
@@ -1237,115 +1748,231 @@ def main():
             0.48,
         )
 
+        controls_top = 506
+        controls_bottom = panel_h - 16
+        controls_h = max(1, controls_bottom - controls_top)
+        content_h = 420
+        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
+        controls[:] = (28, 28, 28)
+
         button_h = 42
         button_w = 160
         gap = 20
-        bottom_y = panel_h - 20 - button_h
-        top_y    = bottom_y - button_h - 10
-        mid_y    = top_y    - button_h - 10
-        upper_y  = mid_y    - button_h - 10
-        slider_y = upper_y  - 44
+        x1 = 16 + button_w + gap
+        x2 = 16 + 2 * (button_w + gap)
+        row0 = 36
+        row1 = row0 + button_h + 10
+        row2 = row1 + button_h + 10
+        row3 = row2 + button_h + 10
+        row4 = row3 + button_h + 10
+        row5 = row4 + button_h + 10
+        slider_y = row5 + button_h + 20
 
-        # ---- Row 1 (bottom): zoom + holes ----
-        excav_rect    = (16, top_y, 16 + button_w, top_y + button_h)
-        deposit_rect  = (16 + button_w + gap, top_y, 16 + 2*button_w + gap, top_y + button_h)
-        whole_rect    = (16 + 2*(button_w+gap), top_y, 16 + 3*button_w + 2*gap, top_y + button_h)
-        holes_rect    = (16, bottom_y, 16 + button_w, bottom_y + button_h)
-        zoom_in_rect  = (16 + button_w + gap, bottom_y, 16 + 2*button_w + gap, bottom_y + button_h)
-        zoom_out_rect = (16 + 2*(button_w+gap), bottom_y, 16 + 3*button_w + 2*gap, bottom_y + button_h)
+        def put_control_line(text, y, color=(235, 235, 235), scale=0.48):
+            cv2.putText(controls, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
-        # ---- Row 2: Paint Safe | Erase Safe | Clear All ----
-        paint_rect       = (16, mid_y, 16 + button_w, mid_y + button_h)
-        erase_rect       = (16 + button_w + gap, mid_y, 16 + 2*button_w + gap, mid_y + button_h)
-        clear_paint_rect = (16 + 2*(button_w+gap), mid_y, 16 + 3*button_w + 2*gap, mid_y + button_h)
+        def draw_control_button(rect, label, enabled, active=False, active_color=(70, 130, 220), active_border=(200, 200, 200)):
+            x0, y0, x1b, y1b = rect
+            fill = active_color if active else ((70, 130, 220) if enabled else (50, 50, 50))
+            border = active_border if active else ((200, 200, 200) if enabled else (120, 120, 120))
+            text_color = (255, 255, 255) if enabled or active else (180, 180, 180)
+            cv2.rectangle(controls, (x0, y0), (x1b, y1b), fill, -1)
+            cv2.rectangle(controls, (x0, y0), (x1b, y1b), border, 2 if active else 1)
+            tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
+            cv2.putText(
+                controls,
+                label,
+                (x0 + (x1b - x0 - tsz[0]) // 2, y0 + (y1b - y0 + tsz[1]) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                text_color,
+                1,
+                cv2.LINE_AA,
+            )
 
-        # ---- Row 3: Paint Obstacle (full-width) ----
-        obstacle_rect = (16, upper_y, 16 + button_w, upper_y + button_h)
+        def _screen_rect(rect):
+            x0, y0, x1b, y1b = rect
+            sy0 = y0 - status_scroll_y + controls_top
+            sy1 = y1b - status_scroll_y + controls_top
+            if sy1 < controls_top or sy0 > controls_bottom:
+                return None
+            return (x0, max(controls_top, sy0), x1b, min(controls_bottom, sy1))
 
-        # ---- Row 4: Brush size slider ----
-        btn_sm = 36
-        brush_minus_rect  = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
-        brush_plus_rect   = (16 + btn_sm + 8 + (panel_w - 16 - 16 - 2*btn_sm - 16), slider_y + 4,
-                             panel_w - 16, slider_y + 4 + btn_sm)
-        slider_x0 = 16 + btn_sm + 8
-        slider_x1 = panel_w - 16 - btn_sm - 8
-        brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
+        def _register_button(name, rect):
+            srect = _screen_rect(rect)
+            if srect is not None:
+                status_button_rects[name] = srect
 
         button_enabled = mining_buttons_enabled()
-        draw_button(excav_rect, "Draw Excav Zone", button_enabled)
-        draw_button(deposit_rect, "Draw Deposit Zone", button_enabled)
-        draw_button(whole_rect, "Whole Map", button_enabled)
-        draw_button(holes_rect, "Disable Holes", button_enabled)
-        draw_button(zoom_in_rect, "+ Zoom", True)
-        draw_button(zoom_out_rect, "- Zoom", True)
+        mining_running = mining.state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+        excav_drawing = mining.state == auto_mining.MiningState.DRAW_EXCAV
+        deposit_drawing = mining.state == auto_mining.MiningState.DRAW_DEPOSIT
+        zone_buttons_enabled = not mining_running
+        _mining_active = mining.state not in (
+            auto_mining.MiningState.IDLE,
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.DONE,
+            auto_mining.MiningState.ABORTED,
+        )
 
-        def _active_button(rect, label, active, active_color, active_border):
-            x0, y0, x1, y1 = rect
-            fill   = active_color  if active else (70, 130, 220)
-            border = active_border if active else (200, 200, 200)
-            cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
-            cv2.rectangle(panel, (x0, y0), (x1, y1), border, 2 if active else 1)
-            tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
-            cv2.putText(panel, label,
-                        (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+        auto_run_rect = (16, row0, 16 + 2 * button_w + gap, row0 + button_h)
+        localize_rect = (x2, row0, x2 + button_w, row0 + button_h)
+        excav_rect = (16, row1, 16 + button_w, row1 + button_h)
+        deposit_rect = (x1, row1, x1 + button_w, row1 + button_h)
+        whole_rect = (x2, row1, x2 + button_w, row1 + button_h)
+        obstacle_rect = (16, row2, 16 + button_w, row2 + button_h)
+        paint_rect = (x1, row2, x1 + button_w, row2 + button_h)
+        erase_rect = (x2, row2, x2 + button_w, row2 + button_h)
+        smooth_rect = (16, row3, 16 + button_w, row3 + button_h)
+        holes_rect = (x1, row3, x1 + button_w, row3 + button_h)
+        clear_paint_rect = (x2, row3, x2 + button_w, row3 + button_h)
+        reset_map_rect = (16, row4, 16 + button_w, row4 + button_h)
+        lock_green_rect = (x1, row4, x1 + button_w, row4 + button_h)
+        zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
+        zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
+        main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
 
-        _active_button(paint_rect,    "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
-                       paint_safe_mode, (0, 180, 80), (80, 255, 140))
-        _active_button(erase_rect,    "Erase: ON" if erase_safe_mode else "Erase Safe",
-                       erase_safe_mode, (0, 80, 200), (80, 140, 255))
-        draw_button(clear_paint_rect, "Clear All", True)
-        _active_button(obstacle_rect, "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
-                       paint_obstacle_mode, (0, 0, 200), (80, 80, 255))
+        auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
+        draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
+        draw_control_button(localize_rect, "Localize: ON" if localization_scan_active else "Localize Scan",
+                            True, localization_scan_active, (0, 120, 200), (80, 220, 255))
+        excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
+        deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
+        draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
+        draw_control_button(deposit_rect, deposit_label, zone_buttons_enabled, deposit_drawing or deposit_set, (180, 150, 0), (255, 230, 80))
+        draw_control_button(whole_rect, "Whole Map", button_enabled)
+        draw_control_button(obstacle_rect, "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
+                            True, paint_obstacle_mode, (0, 0, 200), (80, 80, 255))
+        draw_control_button(paint_rect, "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
+                            True, paint_safe_mode, (0, 180, 80), (80, 255, 140))
+        draw_control_button(erase_rect, "Erase: ON" if erase_safe_mode else "Erase Safe",
+                            True, erase_safe_mode, (0, 80, 200), (80, 140, 255))
+        draw_control_button(smooth_rect, "Smooth Map: ON" if smooth_map_enabled else "Smooth Map",
+                            button_enabled, smooth_map_enabled, (0, 160, 160), (80, 220, 220))
+        draw_control_button(holes_rect, "Disable Holes", button_enabled)
+        draw_control_button(clear_paint_rect, "Clear Paint", True)
+        draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
+        draw_control_button(lock_green_rect, "Lock Green", True, False, (0, 160, 80), (80, 255, 140))
+        draw_control_button(zoom_in_rect, "+ Zoom", True)
+        draw_control_button(zoom_out_rect, "- Zoom", True)
+        draw_control_button(
+            main_rover_rect,
+            "Main Rover: ON" if args.main_rover_mode else "Main Rover",
+            True,
+            args.main_rover_mode,
+            (0, 120, 200),
+            (80, 220, 255),
+        )
 
-        # Brush size slider
-        cv2.rectangle(panel, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (60, 60, 60), -1)
-        cv2.rectangle(panel, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (120, 120, 120), 1)
+        btn_sm = 36
+        brush_minus_rect = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
+        brush_plus_rect = (panel_w - 16 - btn_sm, slider_y + 4, panel_w - 16, slider_y + 4 + btn_sm)
+        slider_x0 = brush_minus_rect[2] + 8
+        slider_x1 = brush_plus_rect[0] - 8
+        brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
+        put_control_line("Brush size:", slider_y - 8, (170, 200, 230), 0.44)
+        cv2.rectangle(controls, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (60, 60, 60), -1)
+        cv2.rectangle(controls, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (120, 120, 120), 1)
         frac = (paint_brush_radius - 1) / 14.0
         knob_x = int(slider_x0 + frac * (slider_x1 - slider_x0))
-        cv2.circle(panel, (knob_x, slider_y + 22), 11, (100, 200, 255), -1)
-        cv2.circle(panel, (knob_x, slider_y + 22), 11, (200, 240, 255), 1)
-        put_line(f"Brush: {paint_brush_radius}", slider_y + 28, (220, 240, 255), 0.46)
-        # - / + buttons
+        cv2.circle(controls, (knob_x, slider_y + 22), 11, (100, 200, 255), -1)
+        cv2.circle(controls, (knob_x, slider_y + 22), 11, (200, 240, 255), 1)
+        put_control_line(f"Brush: {paint_brush_radius}", slider_y + 28, (220, 240, 255), 0.46)
         for rect, lbl in ((brush_minus_rect, "-"), (brush_plus_rect, "+")):
-            x0, y0, x1, y1 = rect
-            cv2.rectangle(panel, (x0, y0), (x1, y1), (70, 130, 220), -1)
-            cv2.rectangle(panel, (x0, y0), (x1, y1), (200, 200, 200), 1)
+            x0b, y0b, x1b, y1b = rect
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (70, 130, 220), -1)
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (200, 200, 200), 1)
             tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-            cv2.putText(panel, lbl, (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
+            cv2.putText(controls, lbl, (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
-        status_button_rects["excav"]         = excav_rect
-        status_button_rects["deposit"]       = deposit_rect
-        status_button_rects["whole"]         = whole_rect
-        status_button_rects["holes"]         = holes_rect
-        status_button_rects["zoom_in"]       = zoom_in_rect
-        status_button_rects["zoom_out"]      = zoom_out_rect
-        status_button_rects["paint_safe"]    = paint_rect
-        status_button_rects["erase_safe"]    = erase_rect
-        status_button_rects["clear_paint"]   = clear_paint_rect
-        status_button_rects["paint_obstacle"]= obstacle_rect
-        status_button_rects["brush_minus"]   = brush_minus_rect
-        status_button_rects["brush_plus"]    = brush_plus_rect
-        status_button_rects["brush_slider"]  = brush_slider_rect
+        status_scroll_max = max(0, content_h - controls_h)
+        status_scroll_y = max(0, min(status_scroll_y, status_scroll_max))
+        panel[controls_top:controls_bottom, :] = controls[status_scroll_y:status_scroll_y + controls_h, :]
+        cv2.rectangle(panel, (0, controls_top), (panel_w - 1, controls_bottom), (90, 90, 90), 1)
+
+        for name, rect in (
+            ("auto_run", auto_run_rect),
+            ("localize_scan", localize_rect),
+            ("excav", excav_rect),
+            ("deposit", deposit_rect),
+            ("whole", whole_rect),
+            ("paint_obstacle", obstacle_rect),
+            ("paint_safe", paint_rect),
+            ("erase_safe", erase_rect),
+            ("smooth_map", smooth_rect),
+            ("holes", holes_rect),
+            ("clear_paint", clear_paint_rect),
+            ("reset_map", reset_map_rect),
+            ("lock_green", lock_green_rect),
+            ("zoom_in", zoom_in_rect),
+            ("zoom_out", zoom_out_rect),
+            ("main_rover_mode", main_rover_rect),
+            ("brush_minus", brush_minus_rect),
+            ("brush_plus", brush_plus_rect),
+            ("brush_slider", brush_slider_rect),
+        ):
+            _register_button(name, rect)
+
+        scroll_up_rect = (panel_w - 42, controls_top + 6, panel_w - 10, controls_top + 34)
+        scroll_down_rect = (panel_w - 42, controls_bottom - 34, panel_w - 10, controls_bottom - 6)
+        status_button_rects["scroll_up"] = scroll_up_rect
+        status_button_rects["scroll_down"] = scroll_down_rect
+        for rect, lbl, enabled in (
+            (scroll_up_rect, "^", status_scroll_y > 0),
+            (scroll_down_rect, "v", status_scroll_y < status_scroll_max),
+        ):
+            x0b, y0b, x1b, y1b = rect
+            fill = (70, 130, 220) if enabled else (50, 50, 50)
+            cv2.rectangle(panel, (x0b, y0b), (x1b, y1b), fill, -1)
+            cv2.rectangle(panel, (x0b, y0b), (x1b, y1b), (200, 200, 200), 1)
+            tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 1)
+            cv2.putText(panel, lbl, (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
 
         put_line(
-            f"Whole map: {'ON' if whole_map_enabled else 'OFF'} | Holes disabled: {'YES' if disable_holes else 'NO'}",
-            top_y - 8, (200, 240, 255), 0.48,
+            f"Controls scroll: {status_scroll_y}/{status_scroll_max} | Wheel or ^/v buttons",
+            controls_top - 8,
+            (170, 200, 230),
+            0.42,
         )
-        if paint_safe_mode:
-            mode_hint = "PAINTING SAFE — drag map to lock cells (cyan)"
-        elif erase_safe_mode:
-            mode_hint = "ERASING SAFE — drag map to remove painted cells"
-        elif paint_obstacle_mode:
-            mode_hint = "PAINTING OBSTACLE — drag map to force obstacle cells (red)"
-        else:
-            mode_hint = "Brush tools: Paint Safe / Erase / Paint Obstacle"
-        hint_color = (100, 255, 160) if paint_safe_mode else (
-            (80, 140, 255) if erase_safe_mode else (
-            (80, 80, 255) if paint_obstacle_mode else (170, 200, 230)))
-        put_line(mode_hint, upper_y - 8, hint_color, 0.44)
-        put_line("Brush size:", slider_y - 10, (170, 200, 230), 0.44)
+
+        if reset_map_confirm:
+            overlay = panel.copy()
+            overlay[:] = (0, 0, 0)
+            panel[:] = cv2.addWeighted(panel, 0.35, overlay, 0.65, 0)
+            box = (70, 230, panel_w - 70, 430)
+            cv2.rectangle(panel, (box[0], box[1]), (box[2], box[3]), (36, 36, 36), -1)
+            cv2.rectangle(panel, (box[0], box[1]), (box[2], box[3]), (210, 210, 210), 1)
+            cv2.putText(panel, "Confirm Map Reset", (box[0] + 22, box[1] + 42),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.72, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(panel, "This clears map evidence, painted cells,", (box[0] + 22, box[1] + 82),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
+            cv2.putText(panel, "current goal/path, and saved AI landmarks.", (box[0] + 22, box[1] + 106),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
+            cancel_rect = (box[0] + 22, box[3] - 58, box[0] + 190, box[3] - 18)
+            confirm_rect = (box[2] - 210, box[3] - 58, box[2] - 22, box[3] - 18)
+            status_button_rects["reset_cancel"] = cancel_rect
+            status_button_rects["reset_confirm"] = confirm_rect
+            for rect, label, fill in (
+                (cancel_rect, "Cancel", (70, 130, 220)),
+                (confirm_rect, "Reset Map", (0, 70, 220)),
+            ):
+                x0b, y0b, x1b, y1b = rect
+                cv2.rectangle(panel, (x0b, y0b), (x1b, y1b), fill, -1)
+                cv2.rectangle(panel, (x0b, y0b), (x1b, y1b), (230, 230, 230), 1)
+                tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+                cv2.putText(panel, label,
+                            (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
         return panel
 
@@ -1359,6 +1986,18 @@ def main():
                 R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
+                if tracking_pose_ok and tracking_prev_ok and float(args.tracking_max_pose_jump_m) > 0.0:
+                    pose_jump_m = float(np.linalg.norm(np.array(t_world_cam, dtype=np.float32) - last_valid_t_world_cam))
+                    if pose_jump_m > float(args.tracking_max_pose_jump_m):
+                        tracking_pose_ok = False
+                        R_world_cam = last_valid_R_world_cam
+                        t_world_cam = last_valid_t_world_cam
+                        if not localization_scan_active:
+                            start_localization_scan(f"pose jump {pose_jump_m:.2f}m")
+                        print(
+                            f"Tracking pose jump rejected ({pose_jump_m:.2f}m > "
+                            f"{float(args.tracking_max_pose_jump_m):.2f}m); holding last pose."
+                        )
                 if tracking_pose_ok:
                     last_valid_R_world_cam = R_world_cam
                     last_valid_t_world_cam = t_world_cam
@@ -1385,6 +2024,7 @@ def main():
                 t_world_cam = np.zeros(3, dtype=np.float32)
                 tracking_pose_ok = True
                 tracking_prev_ok = True
+            update_localization_scan_state()
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -1583,11 +2223,9 @@ def main():
                 map_vis = None
                 heatmap_vis = None
                 cam_row_col = None
-                if args.complex:
-                    map_integration_ok = (not tracking_enabled) or tracking_pose_ok
-                else:
-                    # Simple mode: always integrate map
-                    map_integration_ok = True
+                # Never integrate new points while tracking is lost or a pose
+                # jump was rejected; otherwise one bad pose can drag the map.
+                map_integration_ok = (not tracking_enabled) or tracking_pose_ok
                 # Compute map-local translation for simple mode
                 if not args.complex and map_origin_set:
                     t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
@@ -1597,12 +2235,82 @@ def main():
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
                         xyz_world = (R_world_cam @ xyz.T).T + t_map
-                        x = xyz_world[:, 0]
+                        x = -xyz_world[:, 0]
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
+
+                        # Object detection: persist static objects, keep people as live-only markers.
+                        if (rock_model is not None
+                                and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
+                            rock_last_frame = frame_idx
+                            try:
+                                _img_raw = image_left.get_data()
+                                if _img_raw is not None:
+                                    if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
+                                        _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
+                                    elif _img_raw.ndim == 3 and _img_raw.shape[2] == 3:
+                                        _img_bgr = _img_raw
+                                    else:
+                                        _img_bgr = None
+                                    if _img_bgr is not None:
+                                        _results = rock_model.predict(
+                                            source=_img_bgr,
+                                            conf=args.rock_conf,
+                                            verbose=False,
+                                        )[0]
+                                        _names = _results.names if hasattr(_results, "names") else {}
+                                        _ih, _iw = _img_bgr.shape[:2]
+                                        _cld_h, _cld_w = cloud.shape[:2]
+                                        for _det in (_results.boxes or []):
+                                            _lbl = str(_names.get(int(_det.cls[0]), "")).lower()
+                                            _conf = float(_det.conf[0]) if hasattr(_det, "conf") else float(args.rock_conf)
+                                            _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
+                                            # Centre pixel of bounding box
+                                            _cx = int((_x1 + _x2) / 2)
+                                            _cy = int((_y1 + _y2) / 2)
+                                            # Map pixel → point cloud index
+                                            _pc_c = int(_cx * _cld_w / max(1, _iw))
+                                            _pc_r = int(_cy * _cld_h / max(1, _ih))
+                                            _pc_r = max(0, min(_cld_h - 1, _pc_r))
+                                            _pc_c = max(0, min(_cld_w - 1, _pc_c))
+                                            _pt = cloud[_pc_r, _pc_c, :3]
+                                            if not np.isfinite(_pt).all():
+                                                continue
+                                            _pt_w = (R_world_cam @ _pt.astype(np.float32)) + t_map
+                                            _rc = map_world_to_grid(_pt_w[0], _pt_w[2])
+                                            if _rc is None:
+                                                continue
+                                            _rr, _cc = _rc
+                                            if _lbl in rock_class_names:
+                                                # Static object: persist on map
+                                                _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
+                                                _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
+                                                occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
+                                                occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+                                                if (not tracking_enabled) or tracking_pose_ok:
+                                                    record_static_landmark(
+                                                        _lbl,
+                                                        map_x_from_zed(_pt_w[0]),
+                                                        float(_pt_w[2]),
+                                                        _conf,
+                                                    )
+                                            elif _lbl in {"person", "people", "human", "pedestrian"}:
+                                                # Dynamic object: show as live marker only (handled elsewhere)
+                                                pass
+                            except Exception as _rock_err:
+                                pass  # never crash the main loop on detection errors
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
+                    # Smooth mode: remove isolated red-dot noise from display.
+                    if smooth_map_enabled and map_vis is not None:
+                        kernel = np.ones((3, 3), np.uint8)
+                        red_ch = map_vis[:, :, 2]
+                        red_mask = (red_ch > 100).astype(np.uint8)
+                        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+                        map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
+                        map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
+                        map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
                     # Draw camera position marker (blue square).
-                    cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
+                    cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                     # Mining tick: may override goal_cell or supply a direct drive command.
                     _mine_goal, _mine_drive, _mine_status = mining.tick(
                         cam_row_col, occ_map, time.time()
@@ -1622,7 +2330,7 @@ def main():
                         heading_ang = None
                         if tracking_enabled:
                             forward = R_world_cam[:, 2]
-                            fx, fz = float(forward[0]), float(forward[2])
+                            fx, fz = map_x_from_zed(forward[0]), float(forward[2])
                             heading_ang = np.arctan2(fz, fx)
                             if args.drive_heading_flip:
                                 heading_ang += np.pi
@@ -1663,24 +2371,13 @@ def main():
                                 dtype=np.int32,
                             )
                         cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
-                        # Draw heading triangle (blue) if tracking is enabled.
+                        # Draw heading arrow (yellow) if tracking is enabled.
                         if tracking_enabled and HAS_CV2:
-                            # Match visualization heading with drive-control heading convention.
                             ang = heading_ang
-                            size = max(3, int(args.map_camera_size) * 2)
-                            tip_r = int(r0 - np.sin(ang) * size)
-                            tip_c = int(c0 + np.cos(ang) * size)
-                            left_ang = ang + 2.5
-                            right_ang = ang - 2.5
-                            base_r1 = int(r0 - np.sin(left_ang) * (size * 0.6))
-                            base_c1 = int(c0 + np.cos(left_ang) * (size * 0.6))
-                            base_r2 = int(r0 - np.sin(right_ang) * (size * 0.6))
-                            base_c2 = int(c0 + np.cos(right_ang) * (size * 0.6))
-                            tri = np.array(
-                                [[tip_c, tip_r], [base_c1, base_r1], [base_c2, base_r2]],
-                                dtype=np.int32,
-                            )
-                            cv2.fillConvexPoly(map_vis, tri, (255, 0, 0))
+                            size = max(8, int(args.map_camera_size) * 4)
+                            start_pt = (int(c0), int(r0))
+                            end_pt = (int(c0 + np.cos(ang) * size), int(r0 - np.sin(ang) * size))
+                            cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
                     if (not map_integration_ok) and HAS_CV2:
                         cv2.putText(
                             map_vis,
@@ -1708,6 +2405,12 @@ def main():
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                                 min_occ_advantage=args.path_avoid_occ_advantage,
                             )
+                            # Smooth mode: remove isolated noise pixels (morphological opening)
+                            if smooth_map_enabled and np.any(obs):
+                                kernel = np.ones((3, 3), np.uint8)
+                                obs = cv2.morphologyEx(
+                                    obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                ).astype(bool)
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
                                 unknown = np.logical_not(known)
@@ -1749,10 +2452,21 @@ def main():
                             )
                             if path_cells:
                                 last_path_cells = path_cells
+                                stuck_escape_counter = 0
                             else:
                                 # Do not keep stale path to an old goal.
                                 last_path_cells = None
                                 print("No path to selected goal yet; retrying...")
+                                # --- Begin Escape Maneuver ---
+                                if 'stuck_escape_counter' not in locals():
+                                    stuck_escape_counter = 0
+                                stuck_escape_counter += 1
+                                # Try to back up and turn if stuck for several cycles
+                                if stuck_escape_counter >= 3:
+                                    print("Auto escape: backing up and turning to escape red spot.")
+                                    send_nt_command(True, -0.3, 0.5, 0.5)
+                                    stuck_escape_counter = 0
+                                    time.sleep(0.5)
                             last_start = cam_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
@@ -1801,6 +2515,8 @@ def main():
 
                     # Optional display-only map recentering around rover.
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    mining.render_status_banner(map_vis)
+                    draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
 
@@ -1816,6 +2532,9 @@ def main():
                             nt_health_seq += 1
                             connected = NetworkTables.isConnected()
                             nt_connected_cached = bool(connected)
+                            if connected:
+                                last_nt_ok_time = now
+                                nt_watchdog_tripped = False
                             sd.putNumber("Jetson/NTClientSeq", float(nt_health_seq))
                             sd.putNumber("Jetson/NTClientUnix", float(now))
                             sd.putString("Jetson/NTClientName", "zed_ground_wall.py")
@@ -1834,18 +2553,54 @@ def main():
                             # Periodic lightweight connection status when health debug is off.
                             connected = NetworkTables.isConnected()
                             nt_connected_cached = bool(connected)
+                            if connected:
+                                last_nt_ok_time = now
+                                nt_watchdog_tripped = False
                             print(f"NT connected={connected} target={args.roborio_ip}")
                             nt_last_conn_log = now
                         if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
                             last_drive_send = now
                             status_target_cell = None
                             status_target_world = None
+                            # Read DS joystick axes from NT if enabled.
+                            if args.ds_joystick and sd is not None:
+                                _ds_scale = max(0.0, min(1.0, float(args.ds_joystick_scale)))
+                                ds_joystick_fwd  = float(sd.getNumber(args.ds_joystick_fwd_key,  0.0)) * _ds_scale
+                                ds_joystick_turn = float(sd.getNumber(args.ds_joystick_turn_key, 0.0)) * _ds_scale
+                            else:
+                                ds_joystick_fwd  = 0.0
+                                ds_joystick_turn = 0.0
+                            # Watchdog: NT telemetry lost — stop immediately.
+                            _nt_timeout = float(args.nt_timeout_sec)
+                            if _nt_timeout > 0 and (now - last_nt_ok_time) > _nt_timeout:
+                                if not nt_watchdog_tripped:
+                                    nt_watchdog_tripped = True
+                                    print(f"[WATCHDOG] NT telemetry lost for >{_nt_timeout:.1f}s — stopping rover!")
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                continue
+                            # Human STOP: stamp person cells as temporary obstacles so A* reroutes.
+                            if human_hazard_state == "STOP" and human_person_map_points:
+                                for _hr, _hc, _hisp in human_person_map_points:
+                                    if _hisp and 0 <= _hr < occ_map.grid_h and 0 <= _hc < occ_map.grid_w:
+                                        r0 = max(0, _hr - 1); r1 = min(occ_map.grid_h - 1, _hr + 1)
+                                        c0 = max(0, _hc - 1); c1 = min(occ_map.grid_w - 1, _hc + 1)
+                                        occ_map.occ_counts[r0:r1+1, c0:c1+1] += 4.0
+                                        occ_map.free_counts[r0:r1+1, c0:c1+1] = 0.0
+                                path_cells = None          # force replan around person
+                                last_path_plan_time = 0.0
                             if close_obstacle_detected:
                                 backup_hold_until = max(
                                     backup_hold_until,
                                     now + max(0.05, float(args.backup_hold_sec)),
                                 )
                             if emergency_stop:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif human_hazard_state == "STOP":
+                                # Person too close — hold still while A* replans around them.
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
                                 send_nt_command(False, 0.0, 0.0, 0.1)
@@ -1864,13 +2619,34 @@ def main():
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif localization_scan_active:
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                turn_speed = max(-1.0, min(1.0, float(args.localize_turn_speed)))
+                                if abs(turn_speed) < 0.05:
+                                    turn_speed = 0.05
+                                if (now - last_localization_log) >= 1.0:
+                                    last_localization_log = now
+                                    state_txt = "tracking OK" if tracking_pose_ok else "tracking lost"
+                                    print(f"Localize Scan rotating in place ({state_txt}).")
+                                send_nt_command(
+                                    True,
+                                    0.0,
+                                    turn_speed,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif manual_mode:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
+                                # DS joystick overrides keyboard in manual mode when connected.
+                                _man_fwd  = manual_fwd  + ds_joystick_fwd
+                                _man_turn = manual_turn + ds_joystick_turn
+                                _man_fwd  = max(-1.0, min(1.0, _man_fwd))
+                                _man_turn = max(-1.0, min(1.0, _man_turn))
                                 send_nt_command(
                                     True,
-                                    manual_fwd,
-                                    manual_turn,
+                                    _man_fwd,
+                                    _man_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             elif tracking_enabled and (not tracking_pose_ok):
@@ -1918,27 +2694,30 @@ def main():
                                     last_auto_turn_time = now
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
-                                # Current pose in map coordinates.
+                                # Auto-drive uses the robot/ZED physical X axis.
+                                # The map view is mirrored for display, so convert map targets back.
                                 cx, cz = float(t_map[0]), float(t_map[2])
-                                dx = tx - cx
+                                tx_drive = zed_x_from_map(tx)
+                                dx = tx_drive - cx
                                 dz = tz - cz
 
                                 # Stop if close enough to goal.
                                 goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
                                 if goal_world is not None:
                                     gx, gz = goal_world
-                                    if math.hypot(gx - cx, gz - cz) <= args.drive_goal_tol_m:
+                                    gx_drive = zed_x_from_map(gx)
+                                    if math.hypot(gx_drive - cx, gz - cz) <= args.drive_goal_tol_m:
                                         last_auto_turn_cmd = 0.0
                                         last_auto_turn_time = now
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
-                                # Heading error from camera forward axis.
+                                # Heading error in the physical X/Z frame, not the mirrored display frame.
                                 forward = R_world_cam[:, 2]
                                 heading = math.atan2(float(forward[2]), float(forward[0]))
                                 if args.drive_heading_flip:
                                     heading += math.pi
-                                target = math.atan2(dz, dx)
+                                target = math.atan2(dz, dx)  # dz = target_z - curr_z, dx = target_x - curr_x
                                 err = target - heading
                                 # Wrap to [-pi, pi].
                                 while err > math.pi:
@@ -1985,6 +2764,11 @@ def main():
                                 align_scale = max(0.0, math.cos(err))
                                 fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
 
+                                # DS joystick mix-in: driver can nudge auto commands.
+                                if args.ds_joystick:
+                                    fwd  = max(-1.0, min(1.0, fwd  + ds_joystick_fwd))
+                                    turn = max(-1.0, min(1.0, turn + ds_joystick_turn))
+
                                 send_nt_command(
                                     True,
                                     fwd,
@@ -1995,6 +2779,7 @@ def main():
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
                         last_save = time.time()
+                    save_landmark_memory()
                     # Periodically save ZED area memory for startup relocalization.
                     if (
                         tracking_enabled
@@ -2032,6 +2817,8 @@ def main():
                                 alpha=args.heatmap_alpha,
                             )
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    mining.render_status_banner(map_vis)
+                    draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
 
@@ -2137,7 +2924,7 @@ def main():
                                         p3 = cloud[cy_px, cx_px, :3]
                                         if np.isfinite(p3).all():
                                             pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_map
-                                            rc = occ_map.world_to_grid(float(pw[0]), float(pw[2]))
+                                            rc = map_world_to_grid(pw[0], pw[2])
                                             if rc is not None:
                                                 human_person_map_points.append((rc[0], rc[1], is_person))
                                             if is_person and conf >= float(args.human_min_conf):
@@ -2187,12 +2974,9 @@ def main():
                 display_map_vis = None
                 if map_vis is not None:
                     display_map_vis = map_vis.copy()
+                    draw_landmarks(display_map_vis)
                     for pr, pc_col, is_p in human_person_map_points:
-                        if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
-                            color = (0, 0, 255) if is_p else (0, 200, 255)
-                            cv2.circle(display_map_vis, (pc_col, pr), 3, color, -1)
-                            if is_p:
-                                cv2.circle(display_map_vis, (pc_col, pr), 6, color, 1)
+                        draw_live_detection_marker(display_map_vis, pr, pc_col, is_p)
                     if args.map_scale > 1:
                         display_map_vis = cv2.resize(
                             display_map_vis,
@@ -2208,12 +2992,9 @@ def main():
                     # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
                         # Draw detected persons on the map
+                        draw_landmarks(map_vis)
                         for pr, pc_col, is_p in human_person_map_points:
-                            if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
-                                color = (0, 0, 255) if is_p else (0, 200, 255)
-                                cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
-                                if is_p:
-                                    cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
+                            draw_live_detection_marker(map_vis, pr, pc_col, is_p)
                         if map_red_only_view:
                             # Red-only map mode for easier obstacle inspection.
                             map_vis[:, :, 0] = 0
@@ -2294,6 +3075,13 @@ def main():
                         map_red_only_view = not map_red_only_view
                         state = "ON" if map_red_only_view else "OFF"
                         print(f"Map red-only mode: {state}")
+                    if key == ord("l"):
+                        if localization_scan_active:
+                            stop_localization_scan("key")
+                        else:
+                            start_localization_scan("key")
+                    if key == ord("u"):
+                        set_main_rover_mode(not args.main_rover_mode)
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)
                         print(f"Map zoom: x{map_scale_live}")
@@ -2312,10 +3100,10 @@ def main():
                         manual_fwd = -max(0.0, min(1.0, args.drive_speed))
                         last_s_time = now
                     if key == ord("a"):
-                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                        manual_turn = max(0.0, min(1.0, args.drive_speed))
                         last_a_time = now
                     if key == ord("d"):
-                        manual_turn = max(0.0, min(1.0, args.drive_speed))
+                        manual_turn = -max(0.0, min(1.0, args.drive_speed))
                         last_d_time = now
                     if key == ord("x"):
                         manual_fwd = 0.0
@@ -2337,6 +3125,7 @@ def main():
             pass
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
+    save_landmark_memory(force=True)
     if tracking_enabled and args.area_save_path:
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
     if mesh_viewer is not None:
