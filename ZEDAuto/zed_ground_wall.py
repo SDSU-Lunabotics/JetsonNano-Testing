@@ -566,6 +566,13 @@ def main():
     )
     last_save = time.time()
 
+    def map_x_from_zed(x):
+        # ZED +X is camera-right, while the occupancy map image mirrors X for display.
+        return -float(x)
+
+    def map_world_to_grid(x, z):
+        return occ_map.world_to_grid(map_x_from_zed(x), float(z))
+
     if args.map_load and os.path.exists(args.map_save_path):
         try:
             ok, msg = occ_map.load(args.map_save_path)
@@ -1698,7 +1705,7 @@ def main():
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
                         xyz_world = (R_world_cam @ xyz.T).T + t_map
-                        x = xyz_world[:, 0]
+                        x = -xyz_world[:, 0]
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
 
@@ -1738,10 +1745,8 @@ def main():
                                             _pt = cloud[_pc_r, _pc_c, :3]
                                             if not np.isfinite(_pt).all():
                                                 continue
-                                            # Transform to world frame
                                             _pt_w = (R_world_cam @ _pt.astype(np.float32)) + t_map
-                                            # Flip X axis to correct left/right inversion
-                                            _rc = occ_map.world_to_grid(-float(_pt_w[0]), float(_pt_w[2]))
+                                            _rc = map_world_to_grid(_pt_w[0], _pt_w[2])
                                             if _rc is None:
                                                 continue
                                             _rr, _cc = _rc
@@ -1767,7 +1772,7 @@ def main():
                         map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
                         map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
                     # Draw camera position marker (blue square).
-                    cam_row_col = occ_map.world_to_grid(float(t_map[0]), float(t_map[2]))
+                    cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                     # Mining tick: may override goal_cell or supply a direct drive command.
                     _mine_goal, _mine_drive, _mine_status = mining.tick(
                         cam_row_col, occ_map, time.time()
@@ -1787,7 +1792,7 @@ def main():
                         heading_ang = None
                         if tracking_enabled:
                             forward = R_world_cam[:, 2]
-                            fx, fz = float(forward[0]), float(forward[2])
+                            fx, fz = map_x_from_zed(forward[0]), float(forward[2])
                             heading_ang = np.arctan2(fz, fx)
                             if args.drive_heading_flip:
                                 heading_ang += np.pi
@@ -2134,7 +2139,7 @@ def main():
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
                                 # Current pose in map coordinates.
-                                cx, cz = float(t_map[0]), float(t_map[2])
+                                cx, cz = map_x_from_zed(t_map[0]), float(t_map[2])
                                 dx = tx - cx
                                 dz = tz - cz
 
@@ -2148,11 +2153,9 @@ def main():
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
-                                # Heading error using map X (sideways) and Y (forward) axes.
-                                # Assume robot forward is +Y in map frame.
-                                # Calculate robot heading in map X/Y plane.
+                                # Heading error in the same top-down map X/Z frame used by the overlay.
                                 forward = R_world_cam[:, 2]
-                                heading = math.atan2(float(forward[1]), float(forward[0])) + math.pi  # Invert heading to match goal arrow
+                                heading = math.atan2(float(forward[2]), map_x_from_zed(forward[0]))
                                 if args.drive_heading_flip:
                                     heading += math.pi
                                 target = math.atan2(dz, dx)  # dz = goal_z - curr_z, dx = goal_x - curr_x
@@ -2359,7 +2362,7 @@ def main():
                                         p3 = cloud[cy_px, cx_px, :3]
                                         if np.isfinite(p3).all():
                                             pw = (R_world_cam @ p3.reshape(3, 1)).reshape(3,) + t_map
-                                            rc = occ_map.world_to_grid(float(pw[0]), float(pw[2]))
+                                            rc = map_world_to_grid(pw[0], pw[2])
                                             if rc is not None:
                                                 human_person_map_points.append((rc[0], rc[1], is_person))
                                             if is_person and conf >= float(args.human_min_conf):
