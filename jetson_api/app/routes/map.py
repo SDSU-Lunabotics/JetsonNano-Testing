@@ -36,8 +36,17 @@ _SUPPORTED_UI_COMMANDS = {
     "paint_safe",
     "erase_safe",
     "clear_all",
+    "lock_green",
+    "reset_map",
+    "reset_confirm",
+    "reset_cancel",
+    "localize_scan",
+    "main_rover_mode",
     "draw_excav_zone",
     "draw_deposit_zone",
+    "brush_minus",
+    "brush_plus",
+    "set_brush_radius",
 }
 
 
@@ -85,8 +94,12 @@ def _read_ui_state() -> MapUiStateResponse:
         source=payload.get("source"),
         timestamp_ms=payload.get("timestamp_ms"),
         mining_state=payload.get("mining_state"),
+        localization_scan_active=payload.get("localization_scan_active"),
+        landmark_count=payload.get("landmark_count"),
         selected_tool=payload.get("selected_tool"),
         brush_radius=payload.get("brush_radius"),
+        brush_radius_min=payload.get("brush_radius_min"),
+        brush_radius_max=payload.get("brush_radius_max"),
         controls=controls,
     )
 
@@ -179,16 +192,19 @@ def post_map_ui_command(req: MapUiCommandRequest) -> MapUiCommandResponse:
     if command not in _SUPPORTED_UI_COMMANDS:
         raise HTTPException(status_code=400, detail=f"Unsupported map UI command: {command}")
 
-    command_seq = int(time.time() * 1000)
-    _write_waypoint_command(
-        {
-            "seq": command_seq,
-            "type": "ui_action",
-            "action": command,
-            "source": req.source,
-            "timestamp_ms": command_seq,
-        }
-    )
+    payload = {
+        "seq": int(time.time() * 1000),
+        "type": "ui_action",
+        "action": command,
+        "source": req.source,
+        "timestamp_ms": int(time.time() * 1000),
+    }
+    if req.value is not None:
+        payload["value"] = int(req.value)
+
+    command_seq = int(payload["seq"])
+    payload["timestamp_ms"] = command_seq
+    _write_waypoint_command(payload)
     return MapUiCommandResponse(
         ok=True,
         timestamp_ms=command_seq,
