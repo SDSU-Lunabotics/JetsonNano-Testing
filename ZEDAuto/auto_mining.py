@@ -7,6 +7,7 @@ and deposit cycles using the live occupancy map.
 Zone setup (on the map window):
   Use the Draw Excav Zone button, then click 4 corners  - define excavation zone
   Use the Draw Deposit Zone button, then click 4 corners - define deposit zone
+  Use the Pick Dig Start button, then click inside excavation - choose first strip
   Press 'r'                                                - start automated run
   Press 't'                                                - abort run at any time
 
@@ -41,6 +42,7 @@ class MiningState(enum.Enum):
     IDLE             = "IDLE"
     DRAW_EXCAV       = "DRAW_EXCAV"
     DRAW_DEPOSIT     = "DRAW_DEPOSIT"
+    PICK_DIG_START   = "PICK_DIG_START"
     PLAN_SWEEP       = "PLAN_SWEEP"
     NAVIGATE_DIG     = "NAVIGATE_DIG"
     DIGGING          = "DIGGING"
@@ -93,6 +95,7 @@ class MiningAutomation:
         self.dig_points_rc = []       # boustrophedon waypoints inside excav zone
         self.dig_index = 0
         self.visited = set()          # set of completed dig_index values
+        self.preferred_start_rc = None # optional user-picked dig start
 
         # Deposit approach waypoint (recomputed when None)
         self._deposit_approach_rc = None
@@ -117,6 +120,24 @@ class MiningAutomation:
         Called when the user left-clicks on the map.
         Returns True when the click is consumed (suppresses normal goal assignment).
         """
+        if self.state == MiningState.PICK_DIG_START:
+            if not self.excav_corners_rc:
+                print("[Mining] Set the excavation zone before picking a dig start.")
+                self.state = MiningState.IDLE
+                return True
+            if not self._point_in_polygon_rc(
+                row, col, self.excav_corners_rc, (occ_map.grid_h, occ_map.grid_w)
+            ):
+                print("[Mining] Dig start must be inside the excavation zone.")
+                return True
+            self.preferred_start_rc = (row, col)
+            self.state = MiningState.IDLE
+            self.dig_points_rc = []
+            print(f"[Mining] Dig start selected at r={row} c={col}.")
+            if self.excav_corners_rc and self.deposit_corners_rc:
+                self.save_zones(occ_map)
+            return True
+
         if self.state not in (MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
             return False
 
@@ -134,6 +155,7 @@ class MiningAutomation:
 
         if self.state == MiningState.DRAW_EXCAV:
             self.excav_corners_rc = corners
+            self.preferred_start_rc = None
             print("[Mining] Excavation zone defined.")
         else:
             self.deposit_corners_rc = corners
@@ -158,6 +180,10 @@ class MiningAutomation:
     def start_draw_deposit(self):
         """Begin collecting four map clicks for the deposit zone."""
         self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
+
+    def start_pick_dig_start(self):
+        """Begin collecting one map click for the preferred dig start."""
+        self._start_pick_dig_start()
 
     def start_run(self):
         """Start the automated excavation/deposit run."""
@@ -210,6 +236,8 @@ class MiningAutomation:
             zname = "EXCAV" if s == MiningState.DRAW_EXCAV else "DEPOSIT"
             n = len(self._click_buffer)
             return None, None, f"DRAW_{zname} ({n}/4)"
+        if s == MiningState.PICK_DIG_START:
+            return None, None, "PICK_DIG_START"
 
         # --- Idle / terminal ---
         if s == MiningState.IDLE:
@@ -369,6 +397,56 @@ class MiningAutomation:
                 )
                 cv2.polylines(map_vis, [diamond], True, (255, 0, 255), 1, cv2.LINE_AA)
 
+        # -- User-selected preferred dig start (green crosshair) --
+        if self.preferred_start_rc is not None:
+            sr, sc = self.preferred_start_rc
+            if 0 <= sr < h and 0 <= sc < w:
+                cv2.drawMarker(
+                    map_vis,
+                    (int(sc), int(sr)),
+                    (80, 255, 140),
+                    cv2.MARKER_CROSS,
+                    9,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        # -- Planned dig sweep path ("snake") --
+        if len(self.dig_points_rc) >= 2:
+            pts = []
+            idxs = []
+            for idx, (r, c) in enumerate(self.dig_points_rc):
+                if 0 <= r < h and 0 <= c < w:
+                    pts.append([int(c), int(r)])
+                    idxs.append(idx)
+            pts = np.array(pts, dtype=np.int32)
+            if pts.shape[0] >= 2:
+                for i in range(pts.shape[0] - 1):
+                    p0 = pts[i]
+                    p1 = pts[i + 1]
+                    seg_done = idxs[i] in self.visited and idxs[i + 1] in self.visited
+                    color = (150, 150, 150) if seg_done else (0, 190, 255)
+                    cv2.line(
+                        map_vis,
+                        (int(p0[0]), int(p0[1])),
+                        (int(p1[0]), int(p1[1])),
+                        color,
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    dx = int(p1[0] - p0[0])
+                    dy = int(p1[1] - p0[1])
+                    if dx * dx + dy * dy >= 25:
+                        mid = ((int(p0[0]) + int(p1[0])) // 2, (int(p0[1]) + int(p1[1])) // 2)
+                        ang = math.atan2(dy, dx)
+                        wing = 3
+                        a1 = ang + math.pi * 0.78
+                        a2 = ang - math.pi * 0.78
+                        q1 = (int(mid[0] + math.cos(a1) * wing), int(mid[1] + math.sin(a1) * wing))
+                        q2 = (int(mid[0] + math.cos(a2) * wing), int(mid[1] + math.sin(a2) * wing))
+                        cv2.line(map_vis, mid, q1, color, 1, cv2.LINE_AA)
+                        cv2.line(map_vis, mid, q2, color, 1, cv2.LINE_AA)
+
         # -- Dig waypoints --
         active_states = (
             MiningState.NAVIGATE_DIG,
@@ -435,6 +513,8 @@ class MiningAutomation:
             return f"TASK: Draw excavation zone ({len(self._click_buffer)}/4)"
         if s == MiningState.DRAW_DEPOSIT:
             return f"TASK: Draw deposit zone ({len(self._click_buffer)}/4)"
+        if s == MiningState.PICK_DIG_START:
+            return "TASK: Pick dig start inside excavation zone"
         if s == MiningState.PLAN_SWEEP:
             return "TASK: Planning excavation path"
         if s == MiningState.NAVIGATE_DIG:
@@ -471,6 +551,13 @@ class MiningAutomation:
                 "excav":   _rc_to_world(self.excav_corners_rc),
                 "deposit": _rc_to_world(self.deposit_corners_rc),
             }
+            if self.preferred_start_rc is not None:
+                w_start = occ_map.grid_to_world(
+                    self.preferred_start_rc[0],
+                    self.preferred_start_rc[1],
+                )
+                if w_start is not None:
+                    data["dig_start"] = [float(w_start[0]), float(w_start[1])]
             d = os.path.dirname(self.zones_path)
             if d:
                 os.makedirs(d, exist_ok=True)
@@ -507,6 +594,13 @@ class MiningAutomation:
                 if len(rc) == 4:
                     self.deposit_corners_rc = rc
                     loaded = True
+            if "dig_start" in data and len(data["dig_start"]) == 2:
+                rc = occ_map.world_to_grid(
+                    float(data["dig_start"][0]),
+                    float(data["dig_start"][1]),
+                )
+                if rc is not None:
+                    self.preferred_start_rc = rc
             if loaded:
                 print(f"[Mining] Zones loaded ← {self.zones_path}")
         except Exception as exc:
@@ -532,6 +626,26 @@ class MiningAutomation:
         self.state = draw_state
         self._click_buffer = []
         print(f"[Mining] Drawing {name} zone — click 4 corners on the map.")
+
+    def _start_pick_dig_start(self):
+        blocked = (
+            MiningState.PLAN_SWEEP,
+            MiningState.NAVIGATE_DIG,
+            MiningState.DIGGING,
+            MiningState.BACKUP,
+            MiningState.NAVIGATE_DEPOSIT,
+            MiningState.DEPOSITING,
+        )
+        if self.state in blocked:
+            print(f"[Mining] Cannot pick dig start while running "
+                  f"(state={self.state.value}). Press 't' to abort first.")
+            return
+        if not self.excav_corners_rc:
+            print("[Mining] Set the excavation zone before picking a dig start.")
+            return
+        self.state = MiningState.PICK_DIG_START
+        self._click_buffer = []
+        print("[Mining] Pick dig start — click inside the excavation zone.")
 
     def _start_run(self):
         if not self.excav_corners_rc:
@@ -560,7 +674,8 @@ class MiningAutomation:
 
     def _abort(self):
         if self.state in (MiningState.IDLE, MiningState.DONE, MiningState.ABORTED,
-                          MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT):
+                          MiningState.DRAW_EXCAV, MiningState.DRAW_DEPOSIT,
+                          MiningState.PICK_DIG_START):
             self.state = MiningState.IDLE
             self._click_buffer = []
             return
@@ -618,6 +733,23 @@ class MiningAutomation:
             for c in range(min_c, max_c + 1):
                 cells.append((r, c))
         return cells
+
+    @staticmethod
+    def _point_in_polygon_rc(row, col, corners_rc, grid_shape):
+        """Return True when a grid cell is inside the polygon."""
+        if len(corners_rc) < 3:
+            return False
+        h, w = grid_shape
+        if row < 0 or row >= h or col < 0 or col >= w:
+            return False
+        if HAS_CV2:
+            pts = np.array([[c, r] for r, c in corners_rc], dtype=np.int32)
+            return cv2.pointPolygonTest(pts, (float(col), float(row)), False) >= 0
+        min_r = max(0, min(r for r, c in corners_rc))
+        max_r = min(h - 1, max(r for r, c in corners_rc))
+        min_c = max(0, min(c for r, c in corners_rc))
+        max_c = min(w - 1, max(c for r, c in corners_rc))
+        return min_r <= row <= max_r and min_c <= col <= max_c
 
     @staticmethod
     def _ray_polygon_boundary_distance(origin_x, origin_z, dir_x, dir_z, poly_world):
@@ -744,6 +876,18 @@ class MiningAutomation:
                 row_cols = row_cols[::-1]
             mid_c = row_cols[len(row_cols) // 2]
             points.append((r, mid_c))
+
+        if points and self.preferred_start_rc is not None:
+            sr, sc = self.preferred_start_rc
+            start_idx = min(
+                range(len(points)),
+                key=lambda idx: (points[idx][0] - sr) ** 2 + (points[idx][1] - sc) ** 2,
+            )
+            if start_idx > 0:
+                points = points[start_idx:] + points[:start_idx]
+            start_r, start_c = points[0]
+            print(f"[Mining] Sweep starts near picked dig start "
+                  f"(r={start_r} c={start_c}).")
 
         self.dig_points_rc = points
         print(f"[Mining] {len(points)} dig waypoints "

@@ -916,6 +916,7 @@ def main():
             auto_mining.MiningState.DEPOSITING,
             auto_mining.MiningState.DRAW_EXCAV,
             auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
         )
 
     def set_brush_tool(tool_name):
@@ -935,6 +936,8 @@ def main():
             return "draw_excav_zone"
         if mining.state == auto_mining.MiningState.DRAW_DEPOSIT:
             return "draw_deposit_zone"
+        if mining.state == auto_mining.MiningState.PICK_DIG_START:
+            return "pick_dig_start"
         return None
 
     def clear_manual_paint():
@@ -1100,6 +1103,15 @@ def main():
                     "active": mining.state == auto_mining.MiningState.DRAW_DEPOSIT,
                     "enabled": bool(button_enabled),
                 },
+                {
+                    "id": "pick_dig_start",
+                    "label": "Pick Dig Start",
+                    "command": "pick_dig_start",
+                    "active": mining.state == auto_mining.MiningState.PICK_DIG_START
+                              or mining.preferred_start_rc is not None,
+                    "enabled": bool((not button_enabled and mining.state == auto_mining.MiningState.PICK_DIG_START)
+                                    or (button_enabled and bool(mining.excav_corners_rc))),
+                },
             ],
         }
         _write_json_atomic(args.map_ui_state_file, payload)
@@ -1170,6 +1182,7 @@ def main():
         if event == cv2.EVENT_LBUTTONDOWN and mining.state in (
             auto_mining.MiningState.DRAW_EXCAV,
             auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
         ):
             if mining.consume_click(row, col, occ_map):
                 return
@@ -1356,6 +1369,14 @@ def main():
                 set_brush_tool(None)
                 mining.start_draw_deposit()
                 return
+        rect = status_button_rects.get("pick_dig_start")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if not mining_running and mining.excav_corners_rc:
+                    set_brush_tool(None)
+                    mining.start_pick_dig_start()
+                return
         button_enabled = mining_buttons_enabled()
         if not button_enabled:
             return
@@ -1489,6 +1510,10 @@ def main():
             if mining_buttons_enabled():
                 set_brush_tool(None)
                 mining.start_draw_deposit()
+        elif action == "pick_dig_start":
+            if mining_buttons_enabled() and mining.excav_corners_rc:
+                set_brush_tool(None)
+                mining.start_pick_dig_start()
 
         last_map_command_seq = seq
 
@@ -1835,11 +1860,13 @@ def main():
         )
         excav_drawing = mining.state == auto_mining.MiningState.DRAW_EXCAV
         deposit_drawing = mining.state == auto_mining.MiningState.DRAW_DEPOSIT
+        picking_dig_start = mining.state == auto_mining.MiningState.PICK_DIG_START
         zone_buttons_enabled = not mining_running
         _mining_active = mining.state not in (
             auto_mining.MiningState.IDLE,
             auto_mining.MiningState.DRAW_EXCAV,
             auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
             auto_mining.MiningState.DONE,
             auto_mining.MiningState.ABORTED,
         )
@@ -1857,6 +1884,7 @@ def main():
         clear_paint_rect = (x2, row3, x2 + button_w, row3 + button_h)
         reset_map_rect = (16, row4, 16 + button_w, row4 + button_h)
         lock_green_rect = (x1, row4, x1 + button_w, row4 + button_h)
+        pick_dig_start_rect = (x2, row4, x2 + button_w, row4 + button_h)
         zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
@@ -1883,6 +1911,17 @@ def main():
         draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
         lock_label = "Green Locked" if lock_green_applied else "Lock Green"
         draw_control_button(lock_green_rect, lock_label, True, lock_green_applied, (0, 160, 80), (80, 255, 140))
+        pick_label = "Picking Start..." if picking_dig_start else (
+            "Dig Start Set" if mining.preferred_start_rc is not None else "Pick Dig Start"
+        )
+        draw_control_button(
+            pick_dig_start_rect,
+            pick_label,
+            zone_buttons_enabled and excav_set,
+            picking_dig_start or mining.preferred_start_rc is not None,
+            (0, 170, 70),
+            (100, 255, 160),
+        )
         draw_control_button(zoom_in_rect, "+ Zoom", True)
         draw_control_button(zoom_out_rect, "- Zoom", True)
         draw_control_button(
@@ -1935,6 +1974,7 @@ def main():
             ("clear_paint", clear_paint_rect),
             ("reset_map", reset_map_rect),
             ("lock_green", lock_green_rect),
+            ("pick_dig_start", pick_dig_start_rect),
             ("zoom_in", zoom_in_rect),
             ("zoom_out", zoom_out_rect),
             ("main_rover_mode", main_rover_rect),
