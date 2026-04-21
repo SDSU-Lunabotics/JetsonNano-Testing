@@ -111,6 +111,7 @@ Additional settings that can be used (with defaults):
 - `--spatial-viewer`: Show live Open3D mesh viewer.
 - `--spatial-filter none`: Mesh filter (none|low|medium|high).
 - `--drive-turn-k 0.8`: Turn gain for heading error.
+- `--drive-turn-sign -1.0`: Auto-drive turn direction multiplier. Use `1.0` if the robot turns away from the path after this fix.
 - `--drive-rate-hz 10.0`: Drive command rate (Hz).
 - `--drive-goal-tol-m 0.3`: Goal tolerance (m).
 - `--drive-heading-tol-deg 10.0`: Heading tolerance (deg).

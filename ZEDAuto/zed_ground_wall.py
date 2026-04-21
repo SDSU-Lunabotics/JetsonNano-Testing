@@ -151,6 +151,12 @@ def main():
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
     parser.add_argument(
+        "--drive-turn-sign",
+        type=float,
+        default=-1.0,
+        help="Auto turn sign multiplier. Use -1 if positive heading error makes the robot turn away from the target.",
+    )
+    parser.add_argument(
         "--drive-max-turn-cmd",
         type=float,
         default=0.60,
@@ -2192,7 +2198,11 @@ def main():
                                 if err_abs <= tol:
                                     turn_target = 0.0
                                 else:
-                                    turn_target = max(-max_turn_cmd, min(max_turn_cmd, args.drive_turn_k * err))
+                                    turn_sign = -1.0 if float(args.drive_turn_sign) < 0.0 else 1.0
+                                    turn_target = max(
+                                        -max_turn_cmd,
+                                        min(max_turn_cmd, turn_sign * args.drive_turn_k * err),
+                                    )
 
                                 dt_turn = max(1e-3, now - last_auto_turn_time)
                                 max_turn_step = max(0.0, float(args.drive_turn_slew_per_sec)) * dt_turn
