@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from app.core.settings import settings
 from app.schemas.admin import AdminActionResponse
 
 
 class AdminService:
+    def __init__(self) -> None:
+        self._script_dir = Path(__file__).resolve().parents[2] / "scripts"
+
     def restart_service(self, service_name: str) -> AdminActionResponse:
         if not service_name.strip():
             raise ValueError("service_name is required")
@@ -38,11 +42,15 @@ class AdminService:
                 message="[dry_run] Would reboot Jetson",
             )
 
+        script_path = self._script_dir / "restart_jetson.sh"
+        if not script_path.exists():
+            raise ValueError(f"Restart script not found: {script_path}")
+
         try:
-            subprocess.Popen(["sudo", "reboot"])
+            subprocess.Popen([str(script_path)])
             return AdminActionResponse(
                 ok=True,
-                message="Jetson reboot initiated",
+                message="Jetson reboot initiated via restart_jetson.sh",
             )
         except Exception as e:
             raise ValueError(f"Failed to reboot Jetson: {e}")
