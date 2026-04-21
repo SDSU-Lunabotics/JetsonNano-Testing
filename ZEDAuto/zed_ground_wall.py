@@ -941,9 +941,25 @@ def main():
                 map_scale_live = max(1, map_scale_live - 1)
                 print(f"Map zoom: x{map_scale_live}")
                 return
-        button_enabled = mining_buttons_enabled()
-        if not button_enabled:
-            return
+        mining_running = mining.state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+        rect = status_button_rects.get("auto_run")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if mining_running:
+                    mining.handle_key(ord("t"))   # abort current run
+                    print("Auto Run: ABORTED via button")
+                else:
+                    mining.handle_key(ord("r"))   # start run
+                    print("Auto Run: START requested via button")
+                return
         rect = status_button_rects.get("excav")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -956,6 +972,9 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 mining.handle_key(ord("d"))
                 return
+        button_enabled = mining_buttons_enabled()
+        if not button_enabled:
+            return
         rect = status_button_rects.get("whole")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1020,24 +1039,6 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 paint_brush_radius = min(15, paint_brush_radius + 1)
                 print(f"Brush radius: {paint_brush_radius} cells")
-                return
-        rect = status_button_rects.get("auto_run")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                _is_active = mining.state not in (
-                    auto_mining.MiningState.IDLE,
-                    auto_mining.MiningState.DRAW_EXCAV,
-                    auto_mining.MiningState.DRAW_DEPOSIT,
-                    auto_mining.MiningState.DONE,
-                    auto_mining.MiningState.ABORTED,
-                )
-                if _is_active:
-                    mining.handle_key(ord("t"))   # abort current run
-                    print("Auto Run: ABORTED via button")
-                else:
-                    mining.handle_key(ord("r"))   # start run
-                    print("Auto Run: STARTED via button")
                 return
     def process_external_map_command():
         nonlocal last_map_command_seq
@@ -1395,24 +1396,52 @@ def main():
         slider_x1 = panel_w - 16 - btn_sm - 8
         brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
 
-        button_enabled = mining_buttons_enabled()
-        draw_button(excav_rect, "Draw Excav Zone", button_enabled)
-        draw_button(deposit_rect, "Draw Deposit Zone", button_enabled)
-        draw_button(whole_rect, "Whole Map", button_enabled)
-        draw_button(holes_rect, "Disable Holes", button_enabled)
-        draw_button(zoom_in_rect, "+ Zoom", True)
-        draw_button(zoom_out_rect, "- Zoom", True)
-
-        def _active_button(rect, label, active, active_color, active_border):
+        def _active_button(rect, label, active, active_color, active_border, enabled=True):
             x0, y0, x1, y1 = rect
-            fill   = active_color  if active else (70, 130, 220)
-            border = active_border if active else (200, 200, 200)
+            fill = active_color if active else ((70, 130, 220) if enabled else (50, 50, 50))
+            border = active_border if active else ((200, 200, 200) if enabled else (120, 120, 120))
+            text_color = (255, 255, 255) if enabled or active else (180, 180, 180)
             cv2.rectangle(panel, (x0, y0), (x1, y1), fill, -1)
             cv2.rectangle(panel, (x0, y0), (x1, y1), border, 2 if active else 1)
             tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
             cv2.putText(panel, label,
                         (x0 + (x1-x0-tsz[0])//2, y0 + (y1-y0+tsz[1])//2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, text_color, 1, cv2.LINE_AA)
+
+        button_enabled = mining_buttons_enabled()
+        mining_running = mining.state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+        excav_drawing = mining.state == auto_mining.MiningState.DRAW_EXCAV
+        deposit_drawing = mining.state == auto_mining.MiningState.DRAW_DEPOSIT
+        zone_buttons_enabled = not mining_running
+        excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
+        deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
+        _active_button(
+            excav_rect,
+            excav_label,
+            excav_drawing or excav_set,
+            (0, 120, 220),
+            (80, 200, 255),
+            zone_buttons_enabled,
+        )
+        _active_button(
+            deposit_rect,
+            deposit_label,
+            deposit_drawing or deposit_set,
+            (180, 150, 0),
+            (255, 230, 80),
+            zone_buttons_enabled,
+        )
+        draw_button(whole_rect, "Whole Map", button_enabled)
+        draw_button(holes_rect, "Disable Holes", button_enabled)
+        draw_button(zoom_in_rect, "+ Zoom", True)
+        draw_button(zoom_out_rect, "- Zoom", True)
 
         _active_button(paint_rect,    "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
                        paint_safe_mode, (0, 180, 80), (80, 255, 140))

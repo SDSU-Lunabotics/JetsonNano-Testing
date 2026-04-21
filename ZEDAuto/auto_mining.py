@@ -151,8 +151,22 @@ class MiningAutomation:
 
     def handle_key(self, key):
         """
-        Mining zone and automation keybinds are disabled; use UI buttons only.
+        Called for mining UI button/key actions. Returns True if consumed.
         """
+        if not HAS_CV2:
+            return False
+        if key == ord("e"):
+            self._start_draw(MiningState.DRAW_EXCAV, "excavation")
+            return True
+        if key == ord("d"):
+            self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
+            return True
+        if key == ord("r"):
+            self._start_run()
+            return True
+        if key == ord("t"):
+            self._abort()
+            return True
         return False
 
     def tick(self, cam_rc, occ_map, now):
