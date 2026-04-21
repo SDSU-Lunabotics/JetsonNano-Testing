@@ -1018,6 +1018,8 @@ def main():
             "landmark_count": int(len(landmark_memory.get("landmarks", []))),
             "selected_tool": selected_tool,
             "brush_radius": int(paint_brush_radius),
+            "brush_radius_min": 1,
+            "brush_radius_max": 15,
             "controls": [
                 {
                     "id": "paint_obstacle",
@@ -1062,6 +1064,20 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "reset_confirm",
+                    "label": "Confirm Reset",
+                    "command": "reset_confirm",
+                    "active": False,
+                    "enabled": bool(reset_map_confirm),
+                },
+                {
+                    "id": "reset_cancel",
+                    "label": "Cancel Reset",
+                    "command": "reset_cancel",
+                    "active": False,
+                    "enabled": bool(reset_map_confirm),
+                },
+                {
                     "id": "localize_scan",
                     "label": "Localize Scan",
                     "command": "localize_scan",
@@ -1088,6 +1104,20 @@ def main():
                     "command": "draw_deposit_zone",
                     "active": mining.state == auto_mining.MiningState.DRAW_DEPOSIT,
                     "enabled": bool(button_enabled),
+                },
+                {
+                    "id": "brush_minus",
+                    "label": "Brush -",
+                    "command": "brush_minus",
+                    "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "brush_plus",
+                    "label": "Brush +",
+                    "command": "brush_plus",
+                    "active": False,
+                    "enabled": True,
                 },
             ],
         }
@@ -1455,6 +1485,13 @@ def main():
         elif action == "reset_map":
             reset_map_confirm = True
             print("Confirm map reset in the status panel.")
+        elif action == "reset_confirm":
+            if reset_map_confirm:
+                reset_map_memory()
+        elif action == "reset_cancel":
+            if reset_map_confirm:
+                reset_map_confirm = False
+                print("Map reset canceled.")
         elif action == "localize_scan":
             if localization_scan_active:
                 stop_localization_scan("external command")
@@ -1468,6 +1505,19 @@ def main():
         elif action == "draw_deposit_zone":
             if mining_buttons_enabled():
                 mining.handle_key(ord("d"))
+        elif action == "brush_minus":
+            paint_brush_radius = max(1, paint_brush_radius - 1)
+            print(f"Brush radius: {paint_brush_radius} cells")
+        elif action == "brush_plus":
+            paint_brush_radius = min(15, paint_brush_radius + 1)
+            print(f"Brush radius: {paint_brush_radius} cells")
+        elif action == "set_brush_radius":
+            try:
+                value = int(payload.get("value", paint_brush_radius))
+            except Exception:
+                value = paint_brush_radius
+            paint_brush_radius = max(1, min(15, value))
+            print(f"Brush radius: {paint_brush_radius} cells")
 
         last_map_command_seq = seq
 
