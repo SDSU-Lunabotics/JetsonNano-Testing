@@ -149,7 +149,7 @@ def main():
     parser.add_argument("--drive", action="store_true", help="Enable RoboRIO driving commands")
     parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
-    parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
+    parser.add_argument("--drive-turn-k", type=float, default=0.5, help="Turn gain for heading error")
     parser.add_argument(
         "--drive-turn-sign",
         type=float,
@@ -157,21 +157,27 @@ def main():
         help="Auto turn sign multiplier. Use -1 if positive heading error makes the robot turn away from the target.",
     )
     parser.add_argument(
+        "--drive-lookahead-m",
+        type=float,
+        default=0.80,
+        help="Path lookahead distance for auto-drive waypoint selection (m)",
+    )
+    parser.add_argument(
         "--drive-max-turn-cmd",
         type=float,
-        default=0.60,
+        default=0.35,
         help="Maximum absolute turn command while auto-driving (0-1)",
     )
     parser.add_argument(
         "--drive-slow-turn-deg",
         type=float,
-        default=12.0,
+        default=25.0,
         help="Begin reducing forward speed above this heading error (deg)",
     )
     parser.add_argument(
         "--drive-stop-turn-deg",
         type=float,
-        default=22.0,
+        default=60.0,
         help="Stop forward motion above this heading error (deg)",
     )
     parser.add_argument(
@@ -224,7 +230,13 @@ def main():
         help="How long to continue backup once triggered (seconds).",
     )
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
-    parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
+    parser.add_argument("--drive-heading-tol-deg", type=float, default=18.0, help="Heading tolerance (deg)")
+    parser.add_argument(
+        "--drive-tracking-warmup-sec",
+        type=float,
+        default=1.5,
+        help="Wait this long after tracking locks before auto-drive commands are allowed",
+    )
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     parser.add_argument(
         "--drive-ready-pulse-sec",
@@ -663,6 +675,11 @@ def main():
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
+    auto_turn_sign = -1.0 if float(args.drive_turn_sign) < 0.0 else 1.0
+    auto_turn_observe = None
+    last_auto_turn_sign_flip_time = 0.0
+    tracking_ok_since = time.time() if tracking_pose_ok else 0.0
+    tracking_warmup_notice_time = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
     plane_reject_count = 0
@@ -1496,6 +1513,8 @@ def main():
                     last_valid_R_world_cam = R_world_cam
                     last_valid_t_world_cam = t_world_cam
                     tracking_loss_warned = False
+                    if not tracking_prev_ok or tracking_ok_since <= 0.0:
+                        tracking_ok_since = time.time()
                     if not args.complex and not map_origin_set:
                         map_origin_t = np.array(t_world_cam, dtype=np.float32)
                         map_origin_set = True
@@ -1507,6 +1526,7 @@ def main():
                     # Hold last known pose and pause map integration until tracking recovers.
                     R_world_cam = last_valid_R_world_cam
                     t_world_cam = last_valid_t_world_cam
+                    tracking_ok_since = 0.0
                     if not tracking_loss_warned:
                         print("Tracking lost: holding last pose and pausing map integration.")
                         tracking_loss_warned = True
@@ -1518,6 +1538,7 @@ def main():
                 t_world_cam = np.zeros(3, dtype=np.float32)
                 tracking_pose_ok = True
                 tracking_prev_ok = True
+                tracking_ok_since = time.time()
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -1951,7 +1972,7 @@ def main():
                                 # Try to back up and turn if stuck for several cycles
                                 if stuck_escape_counter >= 3:
                                     print("Auto escape: backing up and turning to escape red spot.")
-                                    send_nt_command(True, -0.3, 0.5, 0.5)
+                                    send_nt_command(True, -0.3, 0.5 * auto_turn_sign, 0.5)
                                     stuck_escape_counter = 0
                                     time.sleep(0.5)
                             last_start = cam_row_col
@@ -2123,6 +2144,24 @@ def main():
                                 last_auto_turn_time = now
                                 # Keep robot safe while localization is uncertain.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif (
+                                tracking_enabled
+                                and float(args.drive_tracking_warmup_sec) > 0.0
+                                and (
+                                    tracking_ok_since <= 0.0
+                                    or (now - tracking_ok_since) < float(args.drive_tracking_warmup_sec)
+                                )
+                            ):
+                                last_auto_turn_cmd = 0.0
+                                last_auto_turn_time = now
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                                if (now - tracking_warmup_notice_time) >= 1.0:
+                                    remain = max(
+                                        0.0,
+                                        float(args.drive_tracking_warmup_sec) - max(0.0, now - tracking_ok_since),
+                                    )
+                                    print(f"Auto waiting for tracking to settle ({remain:.1f}s).")
+                                    tracking_warmup_notice_time = now
                             elif cam_row_col is None:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
@@ -2141,7 +2180,11 @@ def main():
                             else:
                                 # Pick a waypoint a few steps ahead.
                                 if draw_path is not None and len(draw_path) > 0:
-                                    wp_index = min(5, len(draw_path) - 1)
+                                    lookahead_cells = max(
+                                        1,
+                                        int(round(max(0.05, float(args.drive_lookahead_m)) / float(occ_map.map_res_m))),
+                                    )
+                                    wp_index = min(lookahead_cells, len(draw_path) - 1)
                                     wp_rc = draw_path[wp_index]
                                     wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
                                     if wp_world is None:
@@ -2195,13 +2238,33 @@ def main():
                                 err_abs = abs(err)
                                 max_turn_cmd = max(0.0, min(1.0, float(args.drive_max_turn_cmd)))
 
+                                if auto_turn_observe is not None:
+                                    prev_time, prev_err_abs, prev_turn = auto_turn_observe
+                                    if (
+                                        abs(prev_turn) >= 0.18
+                                        and (now - prev_time) >= 0.25
+                                        and (now - prev_time) <= 1.0
+                                        and (now - last_auto_turn_sign_flip_time) >= 1.0
+                                        and err_abs > max(prev_err_abs + math.radians(4.0), tol * 1.5)
+                                    ):
+                                        auto_turn_sign *= -1.0
+                                        last_auto_turn_sign_flip_time = now
+                                        last_auto_turn_cmd = 0.0
+                                        auto_turn_observe = None
+                                        print(
+                                            "Auto turn sign flipped: heading error grew while turning "
+                                            f"({math.degrees(prev_err_abs):.1f}deg -> {math.degrees(err_abs):.1f}deg). "
+                                            f"New sign={auto_turn_sign:+.0f}"
+                                        )
+                                    elif (now - prev_time) > 1.0:
+                                        auto_turn_observe = None
+
                                 if err_abs <= tol:
                                     turn_target = 0.0
                                 else:
-                                    turn_sign = -1.0 if float(args.drive_turn_sign) < 0.0 else 1.0
                                     turn_target = max(
                                         -max_turn_cmd,
-                                        min(max_turn_cmd, turn_sign * args.drive_turn_k * err),
+                                        min(max_turn_cmd, auto_turn_sign * args.drive_turn_k * err),
                                     )
 
                                 dt_turn = max(1e-3, now - last_auto_turn_time)
@@ -2215,6 +2278,7 @@ def main():
                                     turn = turn_target
                                 last_auto_turn_cmd = turn
                                 last_auto_turn_time = now
+                                auto_turn_observe = (now, err_abs, turn)
 
                                 # Reduce forward speed as heading error grows to avoid cutting sharp arcs.
                                 slow_turn_rad = math.radians(max(0.0, float(args.drive_slow_turn_deg)))
