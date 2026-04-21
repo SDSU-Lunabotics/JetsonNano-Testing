@@ -819,6 +819,25 @@ def main():
 
         return out, shift_r, shift_c
 
+    def display_cell_for_map_cell(row, col, frame):
+        if frame is None:
+            return None
+        dr = int(row) + int(map_view_shift_r)
+        dc = int(col) + int(map_view_shift_c)
+        if dr < 0 or dr >= frame.shape[0] or dc < 0 or dc >= frame.shape[1]:
+            return None
+        return dr, dc
+
+    def draw_live_detection_marker(frame, row, col, is_person):
+        display_cell = display_cell_for_map_cell(row, col, frame)
+        if display_cell is None:
+            return
+        dr, dc = display_cell
+        color = (0, 0, 255) if is_person else (0, 200, 255)
+        cv2.circle(frame, (dc, dr), 3, color, -1)
+        if is_person:
+            cv2.circle(frame, (dc, dr), 6, color, 1)
+
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
@@ -2413,11 +2432,7 @@ def main():
                 if map_vis is not None:
                     display_map_vis = map_vis.copy()
                     for pr, pc_col, is_p in human_person_map_points:
-                        if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
-                            color = (0, 0, 255) if is_p else (0, 200, 255)
-                            cv2.circle(display_map_vis, (pc_col, pr), 3, color, -1)
-                            if is_p:
-                                cv2.circle(display_map_vis, (pc_col, pr), 6, color, 1)
+                        draw_live_detection_marker(display_map_vis, pr, pc_col, is_p)
                     if args.map_scale > 1:
                         display_map_vis = cv2.resize(
                             display_map_vis,
@@ -2434,11 +2449,7 @@ def main():
                     if map_vis is not None:
                         # Draw detected persons on the map
                         for pr, pc_col, is_p in human_person_map_points:
-                            if 0 <= pr < occ_map.grid_h and 0 <= pc_col < occ_map.grid_w:
-                                color = (0, 0, 255) if is_p else (0, 200, 255)
-                                cv2.circle(map_vis, (pc_col, pr), 3, color, -1)
-                                if is_p:
-                                    cv2.circle(map_vis, (pc_col, pr), 6, color, 1)
+                            draw_live_detection_marker(map_vis, pr, pc_col, is_p)
                         if map_red_only_view:
                             # Red-only map mode for easier obstacle inspection.
                             map_vis[:, :, 0] = 0
