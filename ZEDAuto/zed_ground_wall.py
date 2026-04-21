@@ -632,6 +632,7 @@ def main():
         "deposit_boundary_inset_m": float(os.getenv(
             "MINING_DEPOSIT_BOUNDARY_INSET_M", "0.05"
         )),
+        "continuous_runs":      os.getenv("MINING_CONTINUOUS_RUNS", "1"),
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
         "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
         "rover_size_m":          float(args.rover_size_m),
@@ -733,6 +734,8 @@ def main():
     erase_safe_mode = False      # when True, map clicks erase painted cells
     paint_obstacle_mode = False  # when True, map clicks paint cells as obstacles
     paint_brush_radius = 2       # radius in cells for all brush tools (1–15)
+    lock_green_applied = False
+    lock_green_locked_count = 0
     last_map_command_seq = 0
     last_map_ui_state_write = 0.0
 
@@ -935,7 +938,10 @@ def main():
         return None
 
     def clear_manual_paint():
+        nonlocal lock_green_applied, lock_green_locked_count
         occ_map.painted_free[:] = False
+        lock_green_applied = False
+        lock_green_locked_count = 0
         print("Cleared all painted-safe cells")
 
     def set_main_rover_mode(enabled):
@@ -946,7 +952,7 @@ def main():
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
     def lock_green_zones_permanent():
-        nonlocal last_save
+        nonlocal last_save, lock_green_applied, lock_green_locked_count
         strong_occ = occ_map.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
         green_mask = (
             (occ_map.free_counts >= 1.0)
@@ -958,6 +964,8 @@ def main():
         if count <= 0:
             print("Lock Green: no green/safe cells to lock.")
             return
+        lock_green_applied = True
+        lock_green_locked_count = count
         occ_map.painted_free[green_mask] = True
         occ_map.occ_counts[green_mask] = 0.0
         occ_map.hole_counts[green_mask] = 0.0
@@ -979,10 +987,13 @@ def main():
     def reset_map_memory():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
         nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
+        nonlocal lock_green_applied, lock_green_locked_count
         occ_map.free_counts[:] = 0.0
         occ_map.occ_counts[:] = 0.0
         occ_map.hole_counts[:] = 0.0
         occ_map.painted_free[:] = False
+        lock_green_applied = False
+        lock_green_locked_count = 0
         goal_cell = None
         path_cells = None
         last_path_cells = None
@@ -1049,9 +1060,9 @@ def main():
                 },
                 {
                     "id": "lock_green",
-                    "label": "Lock Green",
+                    "label": "Green Locked" if lock_green_applied else "Lock Green",
                     "command": "lock_green",
-                    "active": False,
+                    "active": bool(lock_green_applied),
                     "enabled": True,
                 },
                 {
@@ -1156,6 +1167,12 @@ def main():
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
             return
+        if event == cv2.EVENT_LBUTTONDOWN and mining.state in (
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+        ):
+            if mining.consume_click(row, col, occ_map):
+                return
         # Helper — compute brush bounding box.
         def _brush(r, c):
             return (
@@ -1291,10 +1308,10 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 if mining_running:
-                    mining.handle_key(ord("t"))   # abort current run
+                    mining.abort()
                     print("Auto Run: ABORTED via button")
                 else:
-                    mining.handle_key(ord("r"))   # start run
+                    mining.start_run()
                     print("Auto Run: START requested via button")
                 return
         rect = status_button_rects.get("localize_scan")
@@ -1329,13 +1346,15 @@ def main():
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                mining.handle_key(ord("e"))
+                set_brush_tool(None)
+                mining.start_draw_excavation()
                 return
         rect = status_button_rects.get("deposit")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                mining.handle_key(ord("d"))
+                set_brush_tool(None)
+                mining.start_draw_deposit()
                 return
         button_enabled = mining_buttons_enabled()
         if not button_enabled:
@@ -1464,10 +1483,12 @@ def main():
             set_main_rover_mode(not args.main_rover_mode)
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
-                mining.handle_key(ord("e"))
+                set_brush_tool(None)
+                mining.start_draw_excavation()
         elif action == "draw_deposit_zone":
             if mining_buttons_enabled():
-                mining.handle_key(ord("d"))
+                set_brush_tool(None)
+                mining.start_draw_deposit()
 
         last_map_command_seq = seq
 
@@ -1860,7 +1881,8 @@ def main():
         draw_control_button(holes_rect, "Disable Holes", button_enabled)
         draw_control_button(clear_paint_rect, "Clear Paint", True)
         draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
-        draw_control_button(lock_green_rect, "Lock Green", True, False, (0, 160, 80), (80, 255, 140))
+        lock_label = "Green Locked" if lock_green_applied else "Lock Green"
+        draw_control_button(lock_green_rect, lock_label, True, lock_green_applied, (0, 160, 80), (80, 255, 140))
         draw_control_button(zoom_in_rect, "+ Zoom", True)
         draw_control_button(zoom_out_rect, "- Zoom", True)
         draw_control_button(
@@ -2405,6 +2427,9 @@ def main():
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                                 min_occ_advantage=args.path_avoid_occ_advantage,
                             )
+                            # Build a soft safety-cost field so A* prefers corridor centers:
+                            # farther from obstacles = lower cost (safer and usually smoother/faster).
+                            path_cost = np.zeros(obs.shape, dtype=np.float32)
                             # Smooth mode: remove isolated noise pixels (morphological opening)
                             if smooth_map_enabled and np.any(obs):
                                 kernel = np.ones((3, 3), np.uint8)
@@ -2422,9 +2447,6 @@ def main():
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
 
-                            # Build a soft safety-cost field so A* prefers corridor centers:
-                            # farther from obstacles = lower cost (safer and usually smoother/faster).
-                            path_cost = np.zeros(obs.shape, dtype=np.float32)
                             if np.any(obs):
                                 near1 = map_utils.inflate_mask(obs, 1)
                                 near2 = map_utils.inflate_mask(obs, 2)
@@ -2670,6 +2692,7 @@ def main():
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             else:
+                                reverse_path_drive = mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
                                 # Pick a waypoint a few steps ahead.
                                 if draw_path is not None and len(draw_path) > 0:
                                     wp_index = min(5, len(draw_path) - 1)
@@ -2718,6 +2741,10 @@ def main():
                                 if args.drive_heading_flip:
                                     heading += math.pi
                                 target = math.atan2(dz, dx)  # dz = target_z - curr_z, dx = target_x - curr_x
+                                if reverse_path_drive:
+                                    # For deposition, point the rover nose away from the waypoint
+                                    # so negative forward backs the rear toward the deposit area.
+                                    target += math.pi
                                 err = target - heading
                                 # Wrap to [-pi, pi].
                                 while err > math.pi:
@@ -2762,7 +2789,8 @@ def main():
                                     turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
 
                                 align_scale = max(0.0, math.cos(err))
-                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+                                fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+                                fwd = -fwd_mag if reverse_path_drive else fwd_mag
 
                                 # DS joystick mix-in: driver can nudge auto commands.
                                 if args.ds_joystick:
@@ -3053,8 +3081,9 @@ def main():
                             if ch in "0123456789.":
                                 map_size_input_text += ch
                     else:
-                        # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
-                        mining.handle_key(key)
+                        # Mining keys: r=run, t=abort. Zone boxes are button-only.
+                        if key in (ord("r"), ord("t")):
+                            mining.handle_key(key)
                     if key == ord("q"):
                         break
                     if key == ord("m"):

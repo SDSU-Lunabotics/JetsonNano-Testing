@@ -5,10 +5,10 @@ Provides MiningAutomation: a state machine that coordinates excavation
 and deposit cycles using the live occupancy map.
 
 Zone setup (on the map window):
-  Press 'e', then click 4 corners  — define excavation zone (orange box)
-  Press 'd', then click 4 corners  — define deposit zone   (cyan box)
-  Press 'r'                         — start automated run
-  Press 't'                         — abort run at any time
+  Use the Draw Excav Zone button, then click 4 corners  - define excavation zone
+  Use the Draw Deposit Zone button, then click 4 corners - define deposit zone
+  Press 'r'                                                - start automated run
+  Press 't'                                                - abort run at any time
 
 Each cycle:
   1. Navigate to next dig strip waypoint    (A* guided, normal speed)
@@ -71,6 +71,7 @@ class MiningAutomation:
           deposit_backup_speed  float  0.35  Motor value during deposit reverse
           deposit_approach_dist float  1.0   Fallback metres outside deposit center
           deposit_boundary_inset_m float 0.05 Rear edge inset into deposit zone
+          continuous_runs       bool   True   Restart sweep after the last strip
           strip_pitch_m         float  0.0   Row spacing (0 = rover_size_m * 0.8)
           goal_tol_m            float  0.4   Goal-reached distance (m)
           rover_size_m          float  0.305 Rover footprint (m, square)
@@ -146,22 +147,35 @@ class MiningAutomation:
             print("[Mining] Both zones set. Press 'r' to start the run.")
         else:
             missing = "excavation" if not self.excav_corners_rc else "deposit"
-            print(f"[Mining] Press '{('e' if not self.excav_corners_rc else 'd')}' "
+            print(f"[Mining] Use the Draw {missing.title()} Zone button "
                   f"and click 4 corners to set the {missing} zone.")
         return True
 
+    def start_draw_excavation(self):
+        """Begin collecting four map clicks for the excavation zone."""
+        self._start_draw(MiningState.DRAW_EXCAV, "excavation")
+
+    def start_draw_deposit(self):
+        """Begin collecting four map clicks for the deposit zone."""
+        self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
+
+    def start_run(self):
+        """Start the automated excavation/deposit run."""
+        self._start_run()
+
+    def abort(self):
+        """Abort the automated run or cancel an in-progress zone draw."""
+        self._abort()
+
     def handle_key(self, key):
         """
-        Called for mining UI button/key actions. Returns True if consumed.
+        Called for mining keyboard actions. Returns True if consumed.
+
+        Zone drawing is intentionally button-only so the driving keys are not
+        overloaded by the mining setup controls.
         """
         if not HAS_CV2:
             return False
-        if key == ord("e"):
-            self._start_draw(MiningState.DRAW_EXCAV, "excavation")
-            return True
-        if key == ord("d"):
-            self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
-            return True
         if key == ord("r"):
             self._start_run()
             return True
@@ -254,7 +268,7 @@ class MiningAutomation:
             bk_dur   = float(self.cfg.get("backup_duration", 2.0))
             elapsed  = now - self.phase_start
             if elapsed >= bk_dur:
-                print("[Mining] Backup done. Heading to deposit zone.")
+                print("[Mining] Backup done. Backing toward deposit zone.")
                 self.state = MiningState.NAVIGATE_DEPOSIT
                 self._deposit_approach_rc = None   # recompute fresh each deposit trip
             return (None, (-bk_speed, 0.0), f"BACKUP {elapsed:.1f}/{bk_dur:.1f}s")
@@ -293,6 +307,14 @@ class MiningAutomation:
                     return (self.dig_points_rc[self.dig_index], None,
                             f"NAV_DIG {self.dig_index + 1}/{total}")
                 else:
+                    continuous = self._cfg_bool("continuous_runs", True)
+                    if continuous:
+                        print("[Mining] All strips done. Restarting excavation/deposit cycle.")
+                        self.state = MiningState.PLAN_SWEEP
+                        self.dig_index = 0
+                        self.visited = set()
+                        self._deposit_approach_rc = None
+                        return None, (0.0, 0.0), "CYCLE_NEXT"
                     print("[Mining] All strips done. DONE.")
                     self.state = MiningState.DONE
                     return None, (0.0, 0.0), "DONE"
@@ -425,7 +447,7 @@ class MiningAutomation:
         if s == MiningState.BACKUP:
             return "TASK: Backing away from dig strip"
         if s == MiningState.NAVIGATE_DEPOSIT:
-            return "TASK: Driving to deposit edge"
+            return "TASK: Backing to deposit edge"
         if s == MiningState.DEPOSITING:
             return "TASK: Depositing - backing into zone"
         if s == MiningState.DONE:
@@ -513,10 +535,10 @@ class MiningAutomation:
 
     def _start_run(self):
         if not self.excav_corners_rc:
-            print("[Mining] Excavation zone not set. Press 'e' then click 4 corners.")
+            print("[Mining] Excavation zone not set. Use Draw Excav Zone, then click 4 corners.")
             return
         if not self.deposit_corners_rc:
-            print("[Mining] Deposit zone not set. Press 'd' then click 4 corners.")
+            print("[Mining] Deposit zone not set. Use Draw Deposit Zone, then click 4 corners.")
             return
         running = (
             MiningState.PLAN_SWEEP,
@@ -551,6 +573,17 @@ class MiningAutomation:
         dr = a_rc[0] - b_rc[0]
         dc = a_rc[1] - b_rc[1]
         return math.hypot(dr, dc) * float(res_m)
+
+    def _cfg_bool(self, key, default=False):
+        """Parse bool-like config values from env/config dictionaries."""
+        value = self.cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() not in ("0", "false", "no", "off", "")
+        return bool(value)
 
     @staticmethod
     def _poly_centroid(corners_rc):
