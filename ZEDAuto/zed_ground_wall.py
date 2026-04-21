@@ -157,6 +157,11 @@ def main():
         help="Auto turn sign multiplier. Use -1 if positive heading error makes the robot turn away from the target.",
     )
     parser.add_argument(
+        "--drive-auto-output-flip",
+        action="store_true",
+        help="Invert both forward and turn outputs for path-following auto drive only.",
+    )
+    parser.add_argument(
         "--drive-lookahead-m",
         type=float,
         default=0.80,
@@ -676,6 +681,7 @@ def main():
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
     auto_turn_sign = -1.0 if float(args.drive_turn_sign) < 0.0 else 1.0
+    auto_output_sign = -1.0 if bool(args.drive_auto_output_flip) else 1.0
     tracking_ok_since = time.time() if tracking_pose_ok else 0.0
     tracking_warmup_notice_time = 0.0
     last_plane_update_time = 0.0
@@ -1185,6 +1191,12 @@ def main():
                     f"dur={float(duration):.2f} pulse={pulse_sec:.2f}"
                 )
                 last_drive_debug_time = now
+
+    def auto_drive_command(fwd, turn):
+        return (
+            max(-1.0, min(1.0, auto_output_sign * float(fwd))),
+            max(-1.0, min(1.0, auto_output_sign * float(turn))),
+        )
 
     def nt_connections_summary():
         if not HAS_NT:
@@ -1970,7 +1982,8 @@ def main():
                                 # Try to back up and turn if stuck for several cycles
                                 if stuck_escape_counter >= 3:
                                     print("Auto escape: backing up and turning to escape red spot.")
-                                    send_nt_command(True, -0.3, 0.5 * auto_turn_sign, 0.5)
+                                    esc_fwd, esc_turn = auto_drive_command(-0.3, 0.5 * auto_turn_sign)
+                                    send_nt_command(True, esc_fwd, esc_turn, 0.5)
                                     stuck_escape_counter = 0
                                     time.sleep(0.5)
                             last_start = cam_row_col
@@ -2279,6 +2292,7 @@ def main():
                                     fwd  = max(-1.0, min(1.0, fwd  + ds_joystick_fwd))
                                     turn = max(-1.0, min(1.0, turn + ds_joystick_turn))
 
+                                fwd, turn = auto_drive_command(fwd, turn)
                                 send_nt_command(
                                     True,
                                     fwd,

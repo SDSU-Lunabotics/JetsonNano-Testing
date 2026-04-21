@@ -112,6 +112,7 @@ Additional settings that can be used (with defaults):
 - `--spatial-filter none`: Mesh filter (none|low|medium|high).
 - `--drive-turn-k 0.5`: Turn gain for heading error.
 - `--drive-turn-sign 1.0`: Auto-drive turn direction multiplier. Use `-1.0` if the robot turns away from the path.
+- `--drive-auto-output-flip`: Invert both forward and turn outputs for path-following auto drive only.
 - `--drive-lookahead-m 0.80`: Distance ahead on the planned path used as the active auto-drive waypoint.
 - `--drive-max-turn-cmd 0.35`: Maximum auto turn command.
 - `--drive-slow-turn-deg 25.0`: Begin reducing forward speed above this heading error.

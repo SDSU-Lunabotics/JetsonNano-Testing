@@ -99,6 +99,7 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
   cmd+=(--drive-turn-k "${DRIVE_TURN_K:-0.5}")
   cmd+=(--drive-turn-sign "${DRIVE_TURN_SIGN:-1.0}")
+  if [[ "${DRIVE_AUTO_OUTPUT_FLIP:-1}" == "1" ]]; then cmd+=(--drive-auto-output-flip); fi
   cmd+=(--drive-lookahead-m "${DRIVE_LOOKAHEAD_M:-0.80}")
   cmd+=(--drive-max-turn-cmd "${DRIVE_MAX_TURN_CMD:-0.35}")
   cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-25.0}")
