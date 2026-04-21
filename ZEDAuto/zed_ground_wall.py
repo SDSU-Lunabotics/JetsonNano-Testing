@@ -153,7 +153,7 @@ def main():
     parser.add_argument(
         "--drive-turn-sign",
         type=float,
-        default=-1.0,
+        default=1.0,
         help="Auto turn sign multiplier. Use -1 if positive heading error makes the robot turn away from the target.",
     )
     parser.add_argument(
@@ -234,7 +234,7 @@ def main():
     parser.add_argument(
         "--drive-tracking-warmup-sec",
         type=float,
-        default=1.5,
+        default=2.5,
         help="Wait this long after tracking locks before auto-drive commands are allowed",
     )
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
@@ -676,8 +676,6 @@ def main():
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
     auto_turn_sign = -1.0 if float(args.drive_turn_sign) < 0.0 else 1.0
-    auto_turn_observe = None
-    last_auto_turn_sign_flip_time = 0.0
     tracking_ok_since = time.time() if tracking_pose_ok else 0.0
     tracking_warmup_notice_time = 0.0
     last_plane_update_time = 0.0
@@ -2238,27 +2236,6 @@ def main():
                                 err_abs = abs(err)
                                 max_turn_cmd = max(0.0, min(1.0, float(args.drive_max_turn_cmd)))
 
-                                if auto_turn_observe is not None:
-                                    prev_time, prev_err_abs, prev_turn = auto_turn_observe
-                                    if (
-                                        abs(prev_turn) >= 0.18
-                                        and (now - prev_time) >= 0.25
-                                        and (now - prev_time) <= 1.0
-                                        and (now - last_auto_turn_sign_flip_time) >= 1.0
-                                        and err_abs > max(prev_err_abs + math.radians(4.0), tol * 1.5)
-                                    ):
-                                        auto_turn_sign *= -1.0
-                                        last_auto_turn_sign_flip_time = now
-                                        last_auto_turn_cmd = 0.0
-                                        auto_turn_observe = None
-                                        print(
-                                            "Auto turn sign flipped: heading error grew while turning "
-                                            f"({math.degrees(prev_err_abs):.1f}deg -> {math.degrees(err_abs):.1f}deg). "
-                                            f"New sign={auto_turn_sign:+.0f}"
-                                        )
-                                    elif (now - prev_time) > 1.0:
-                                        auto_turn_observe = None
-
                                 if err_abs <= tol:
                                     turn_target = 0.0
                                 else:
@@ -2278,7 +2255,6 @@ def main():
                                     turn = turn_target
                                 last_auto_turn_cmd = turn
                                 last_auto_turn_time = now
-                                auto_turn_observe = (now, err_abs, turn)
 
                                 # Reduce forward speed as heading error grows to avoid cutting sharp arcs.
                                 slow_turn_rad = math.radians(max(0.0, float(args.drive_slow_turn_deg)))

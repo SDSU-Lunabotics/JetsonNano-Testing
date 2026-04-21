@@ -111,7 +111,7 @@ Additional settings that can be used (with defaults):
 - `--spatial-viewer`: Show live Open3D mesh viewer.
 - `--spatial-filter none`: Mesh filter (none|low|medium|high).
 - `--drive-turn-k 0.5`: Turn gain for heading error.
-- `--drive-turn-sign -1.0`: Auto-drive turn direction multiplier. Use `1.0` if the robot turns away from the path after this fix.
+- `--drive-turn-sign 1.0`: Auto-drive turn direction multiplier. Use `-1.0` if the robot turns away from the path.
 - `--drive-lookahead-m 0.80`: Distance ahead on the planned path used as the active auto-drive waypoint.
 - `--drive-max-turn-cmd 0.35`: Maximum auto turn command.
 - `--drive-slow-turn-deg 25.0`: Begin reducing forward speed above this heading error.
@@ -119,7 +119,7 @@ Additional settings that can be used (with defaults):
 - `--drive-rate-hz 10.0`: Drive command rate (Hz).
 - `--drive-goal-tol-m 0.3`: Goal tolerance (m).
 - `--drive-heading-tol-deg 18.0`: Heading tolerance (deg).
-- `--drive-tracking-warmup-sec 1.5`: Wait after tracking locks before allowing auto-drive.
+- `--drive-tracking-warmup-sec 2.5`: Wait after tracking locks before allowing auto-drive.
 - `--drive-ready-pulse-sec 0.10`: How long CommandReady stays high per command pulse.
 - `--nt-health-debug`: Print NetworkTables session health plus incoming robot-published `Jetson/*` drive keys.
 - `--nt-health-period-sec 1.0`: Seconds between NT health debug prints.
