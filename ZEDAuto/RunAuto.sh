@@ -50,6 +50,10 @@ if [[ "${AREA_MEMORY_ENABLE:-1}" == "1" ]]; then cmd+=(--area-memory); fi
 if [[ -n "${AREA_LOAD_PATH:-}" ]]; then cmd+=(--area-load-path "${AREA_LOAD_PATH}"); fi
 if [[ -n "${AREA_SAVE_PATH:-}" ]]; then cmd+=(--area-save-path "${AREA_SAVE_PATH}"); fi
 cmd+=(--area-save-every "${AREA_SAVE_EVERY:-30.0}")
+cmd+=(--tracking-max-pose-jump-m "${TRACKING_MAX_POSE_JUMP_M:-0.80}")
+cmd+=(--localize-turn-speed "${LOCALIZE_TURN_SPEED:-0.25}")
+cmd+=(--localize-scan-sec "${LOCALIZE_SCAN_SEC:-8.0}")
+cmd+=(--localize-max-sec "${LOCALIZE_MAX_SEC:-20.0}")
 if [[ "${MAP_CENTER:-1}" == "1" ]]; then cmd+=(--map-center); fi
 if [[ "${MAP_FOLLOW_ROVER:-1}" == "1" ]]; then cmd+=(--map-follow-rover); fi
 cmd+=(--map-scale "${MAP_SCALE:-3}")
@@ -110,6 +114,8 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--nt-command-ack-timeout-sec "${NT_COMMAND_ACK_TIMEOUT_SEC:-0.30}")
   cmd+=(--nt-forward-scale "${NT_FORWARD_SCALE:-1.0}")
   cmd+=(--nt-turn-scale "${NT_TURN_SCALE:-1.0}")
+  if [[ "${MAIN_ROVER_MODE:-0}" == "1" ]]; then cmd+=(--main-rover-mode); fi
+  if [[ "${MAIN_ROVER_DEBUG:-0}" == "1" ]]; then cmd+=(--main-rover-debug); fi
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
   if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
@@ -166,6 +172,15 @@ if [[ -n "${ROCK_MODEL:-}" ]]; then
   cmd+=(--rock-stamp "${ROCK_STAMP:-6.0}")
   cmd+=(--rock-classes "${ROCK_CLASSES:-rock,stone,boulder}")
 fi
+if [[ "${LANDMARK_MEMORY:-1}" == "1" ]]; then
+  cmd+=(--landmark-memory)
+else
+  cmd+=(--no-landmark-memory)
+fi
+cmd+=(--landmark-path "${LANDMARK_PATH:-${SCRIPT_DIR}/zed_landmarks.json}")
+cmd+=(--landmark-assoc-m "${LANDMARK_ASSOC_M:-0.45}")
+cmd+=(--landmark-min-hits "${LANDMARK_MIN_HITS:-2}")
+cmd+=(--landmark-save-every "${LANDMARK_SAVE_EVERY:-5.0}")
 
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"
