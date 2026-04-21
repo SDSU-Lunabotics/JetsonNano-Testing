@@ -640,6 +640,7 @@ def main():
     }
     mining = auto_mining.MiningAutomation(_mining_cfg, occ_map)
 
+    emergency_stop = False
     sd = None
     if args.drive:
         if not HAS_NT:
@@ -669,7 +670,6 @@ def main():
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
     smooth_map_enabled = False
-    emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
@@ -2411,6 +2411,9 @@ def main():
                                 obs = cv2.morphologyEx(
                                     obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
                                 ).astype(bool)
+                            # Build a soft safety-cost field so A* prefers corridor centers:
+                            # farther from obstacles = lower cost (safer and usually smoother/faster).
+                            path_cost = np.zeros(obs.shape, dtype=np.float32)
                             if args.block_unknown:
                                 known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
                                 unknown = np.logical_not(known)
@@ -2422,9 +2425,6 @@ def main():
                             if radius_cells > 0:
                                 obs = map_utils.inflate_mask(obs, radius_cells)
 
-                            # Build a soft safety-cost field so A* prefers corridor centers:
-                            # farther from obstacles = lower cost (safer and usually smoother/faster).
-                            path_cost = np.zeros(obs.shape, dtype=np.float32)
                             if np.any(obs):
                                 near1 = map_utils.inflate_mask(obs, 1)
                                 near2 = map_utils.inflate_mask(obs, 2)
