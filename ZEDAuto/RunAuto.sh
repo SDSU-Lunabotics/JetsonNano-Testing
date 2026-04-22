@@ -76,6 +76,8 @@ cmd+=(--path-connectivity "${PATH_CONNECTIVITY:-8}")
 cmd+=(--rover-size-m "${ROVER_SIZE_M:-0.30}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
+cmd+=(--path-soft-clearance-cells "${PATH_SOFT_CLEARANCE_CELLS:-8}")
+if [[ "${ALLOW_DIRECT_NO_PATH:-0}" == "1" ]]; then cmd+=(--allow-direct-no-path); fi
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
 cmd+=(--plane-ema-alpha "${PLANE_EMA_ALPHA:-0.25}")
@@ -119,6 +121,10 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
   if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  if [[ "${DS_JOYSTICK:-1}" == "1" ]]; then cmd+=(--ds-joystick); fi
+  cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
+  cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")
+  cmd+=(--ds-joystick-scale "${DS_JOYSTICK_SCALE:-0.5}")
 fi
 
 # Optional streaming

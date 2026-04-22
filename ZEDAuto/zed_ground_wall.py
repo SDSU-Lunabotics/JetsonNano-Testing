@@ -154,10 +154,21 @@ def main():
     parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument(
+        "--path-soft-clearance-cells",
+        type=int,
+        default=8,
+        help="Extra soft-cost clearance cells around inflated obstacles so A* prefers wider lanes",
+    )
+    parser.add_argument(
         "--path-max-search-sec",
         type=float,
         default=0.075,
         help="Maximum seconds allowed for a single A* path search",
+    )
+    parser.add_argument(
+        "--allow-direct-no-path",
+        action="store_true",
+        help="Allow direct goal driving when A* has no path. Default is to stop and retry planning.",
     )
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
@@ -662,6 +673,7 @@ def main():
     last_path_cells = None
     last_start = None
     last_goal = None
+    mining_goal_active = False
     map_window_ready = False
     status_window_ready = False
     status_button_rects = {}
@@ -990,7 +1002,7 @@ def main():
     def reset_map_memory():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
         nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
-        nonlocal lock_green_applied, lock_green_locked_count
+        nonlocal lock_green_applied, lock_green_locked_count, mining_goal_active
         occ_map.free_counts[:] = 0.0
         occ_map.occ_counts[:] = 0.0
         occ_map.hole_counts[:] = 0.0
@@ -1003,6 +1015,7 @@ def main():
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        mining_goal_active = False
         emergency_stop = True
         reset_map_confirm = False
         landmark_memory = {"version": 1, "landmarks": []}
@@ -1014,6 +1027,19 @@ def main():
             print(f"Map reset save failed: {exc}")
         save_landmark_memory(force=True)
         print("Map reset: occupancy, painted cells, path, goal, and AI landmarks cleared.")
+
+    def clear_navigation_goal():
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal mining_goal_active, status_target_cell, status_target_world
+        goal_cell = None
+        path_cells = None
+        last_path_cells = None
+        last_start = None
+        last_goal = None
+        last_path_plan_time = 0.0
+        mining_goal_active = False
+        status_target_cell = None
+        status_target_world = None
 
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
@@ -1167,6 +1193,7 @@ def main():
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
+        nonlocal mining_goal_active
         if event == cv2.EVENT_RBUTTONDOWN:
             emergency_stop = True
             print("EMERGENCY STOP")
@@ -1228,6 +1255,7 @@ def main():
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        mining_goal_active = False
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
 
@@ -1235,6 +1263,7 @@ def main():
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
         nonlocal reset_map_confirm
+        nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
         if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
             try:
                 wheel_delta = cv2.getMouseWheelDelta(flags)
@@ -1322,8 +1351,17 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 if mining_running:
                     mining.abort()
+                    clear_navigation_goal()
+                    manual_mode = False
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
                     print("Auto Run: ABORTED via button")
                 else:
+                    clear_navigation_goal()
+                    emergency_stop = False
+                    manual_mode = False
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
                     mining.start_run()
                     print("Auto Run: START requested via button")
                 return
@@ -1594,6 +1632,13 @@ def main():
                     f"dur={float(duration):.2f} pulse={pulse_sec:.2f}"
                 )
                 last_drive_debug_time = now
+
+    def mix_ds_drive(fwd, turn):
+        if not args.ds_joystick:
+            return float(fwd), float(turn)
+        mixed_fwd = max(-1.0, min(1.0, float(fwd) + float(ds_joystick_fwd)))
+        mixed_turn = max(-1.0, min(1.0, float(turn) + float(ds_joystick_turn)))
+        return mixed_fwd, mixed_turn
 
     def nt_connections_summary():
         if not HAS_NT:
@@ -2381,6 +2426,13 @@ def main():
                         goal_cell = _mine_goal
                         path_cells = None
                         last_path_plan_time = 0.0
+                        mining_goal_active = True
+                    elif mining_goal_active and mining.state in (
+                        auto_mining.MiningState.IDLE,
+                        auto_mining.MiningState.DONE,
+                        auto_mining.MiningState.ABORTED,
+                    ):
+                        clear_navigation_goal()
                     if cam_row_col is not None:
                         r0, c0 = cam_row_col
                         half = max(1, int(args.map_camera_size) // 2)
@@ -2488,12 +2540,11 @@ def main():
                                 obs = map_utils.inflate_mask(obs, radius_cells)
 
                             if np.any(obs):
-                                near1 = map_utils.inflate_mask(obs, 1)
-                                near2 = map_utils.inflate_mask(obs, 2)
-                                near3 = map_utils.inflate_mask(obs, 3)
-                                path_cost[near3] += 0.20
-                                path_cost[near2] += 0.35
-                                path_cost[near1] += 0.55
+                                soft_clearance = max(1, int(args.path_soft_clearance_cells))
+                                for ring in range(soft_clearance, 0, -1):
+                                    near = map_utils.inflate_mask(obs, ring)
+                                    cost = 0.12 * float(soft_clearance - ring + 1)
+                                    path_cost[near] = np.maximum(path_cost[near], cost)
                             # Prefer cleaner lanes when obstacle evidence is weak/ambiguous.
                             path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
 
@@ -2519,16 +2570,13 @@ def main():
                                 # Do not keep stale path to an old goal.
                                 last_path_cells = None
                                 print("No path to selected goal yet; retrying...")
-                                # --- Begin Escape Maneuver ---
                                 if 'stuck_escape_counter' not in locals():
                                     stuck_escape_counter = 0
                                 stuck_escape_counter += 1
-                                # Try to back up and turn if stuck for several cycles
                                 if stuck_escape_counter >= 3:
                                     print("Auto escape: backing up and turning to escape red spot.")
-                                    send_nt_command(True, -0.3, 0.5, 0.5)
+                                    backup_hold_until = max(backup_hold_until, time.time() + 0.5)
                                     stuck_escape_counter = 0
-                                    time.sleep(0.5)
                             last_start = cam_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
@@ -2700,11 +2748,8 @@ def main():
                             elif manual_mode:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
-                                # DS joystick overrides keyboard in manual mode when connected.
-                                _man_fwd  = manual_fwd  + ds_joystick_fwd
-                                _man_turn = manual_turn + ds_joystick_turn
-                                _man_fwd  = max(-1.0, min(1.0, _man_fwd))
-                                _man_turn = max(-1.0, min(1.0, _man_turn))
+                                # Driver Station joystick blends with ZED keyboard manual commands.
+                                _man_fwd, _man_turn = mix_ds_drive(manual_fwd, manual_turn)
                                 send_nt_command(
                                     True,
                                     _man_fwd,
@@ -2725,10 +2770,11 @@ def main():
                                 last_auto_turn_time = now
                                 # Mining automation has direct drive control
                                 # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
+                                mine_fwd, mine_turn = mix_ds_drive(_mine_drive[0], _mine_drive[1])
                                 send_nt_command(
                                     True,
-                                    _mine_drive[0],
-                                    _mine_drive[1],
+                                    mine_fwd,
+                                    mine_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             else:
@@ -2743,7 +2789,7 @@ def main():
                                     tx, tz = wp_world
                                     status_target_cell = wp_rc
                                     status_target_world = (float(tx), float(tz))
-                                elif goal_cell is not None:
+                                elif goal_cell is not None and args.allow_direct_no_path:
                                     # Fallback: drive directly toward clicked goal if path is not ready yet.
                                     goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
                                     if goal_world_fallback is None:
@@ -2752,6 +2798,11 @@ def main():
                                     tx, tz = goal_world_fallback
                                     status_target_cell = goal_cell
                                     status_target_world = (float(tx), float(tz))
+                                elif goal_cell is not None:
+                                    last_auto_turn_cmd = 0.0
+                                    last_auto_turn_time = now
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
+                                    continue
                                 else:
                                     last_auto_turn_cmd = 0.0
                                     last_auto_turn_time = now
@@ -2832,10 +2883,8 @@ def main():
                                 fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
                                 fwd = -fwd_mag if reverse_path_drive else fwd_mag
 
-                                # DS joystick mix-in: driver can nudge auto commands.
-                                if args.ds_joystick:
-                                    fwd  = max(-1.0, min(1.0, fwd  + ds_joystick_fwd))
-                                    turn = max(-1.0, min(1.0, turn + ds_joystick_turn))
+                                # Driver Station joystick can nudge auto commands.
+                                fwd, turn = mix_ds_drive(fwd, turn)
 
                                 send_nt_command(
                                     True,
@@ -3122,8 +3171,19 @@ def main():
                                 map_size_input_text += ch
                     else:
                         # Mining keys: r=run, t=abort. Zone boxes are button-only.
-                        if key in (ord("r"), ord("t")):
+                        if key == ord("r"):
+                            clear_navigation_goal()
+                            emergency_stop = False
+                            manual_mode = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
                             mining.handle_key(key)
+                        elif key == ord("t"):
+                            mining.handle_key(key)
+                            clear_navigation_goal()
+                            manual_mode = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
                     if key == ord("q"):
                         break
                     if key == ord("m"):
