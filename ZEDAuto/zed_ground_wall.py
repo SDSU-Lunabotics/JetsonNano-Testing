@@ -641,6 +641,7 @@ def main():
     }
     mining = auto_mining.MiningAutomation(_mining_cfg, occ_map)
 
+    emergency_stop = False
     sd = None
     if args.drive:
         if not HAS_NT:
@@ -670,7 +671,6 @@ def main():
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
     smooth_map_enabled = False
-    emergency_stop = False
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
