@@ -160,6 +160,13 @@ def main():
         help="Extra soft-cost clearance cells around inflated obstacles so A* prefers wider lanes",
     )
     parser.add_argument(
+        "--no-path-relax-on-fail",
+        action="store_false",
+        dest="path_relax_on_fail",
+        help="Disable staged relaxed/noise-filtered path retries when normal A* fails",
+    )
+    parser.set_defaults(path_relax_on_fail=True)
+    parser.add_argument(
         "--path-max-search-sec",
         type=float,
         default=0.075,
@@ -673,6 +680,7 @@ def main():
     last_path_cells = None
     last_start = None
     last_goal = None
+    path_plan_mode = "none"
     mining_goal_active = False
     map_window_ready = False
     status_window_ready = False
@@ -1001,6 +1009,7 @@ def main():
 
     def reset_map_memory():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal path_plan_mode
         nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
         nonlocal lock_green_applied, lock_green_locked_count, mining_goal_active
         occ_map.free_counts[:] = 0.0
@@ -1015,6 +1024,7 @@ def main():
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        path_plan_mode = "none"
         mining_goal_active = False
         emergency_stop = True
         reset_map_confirm = False
@@ -1030,13 +1040,14 @@ def main():
 
     def clear_navigation_goal():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
-        nonlocal mining_goal_active, status_target_cell, status_target_world
+        nonlocal path_plan_mode, mining_goal_active, status_target_cell, status_target_world
         goal_cell = None
         path_cells = None
         last_path_cells = None
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        path_plan_mode = "none"
         mining_goal_active = False
         status_target_cell = None
         status_target_world = None
@@ -1193,7 +1204,7 @@ def main():
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
-        nonlocal mining_goal_active
+        nonlocal path_plan_mode, mining_goal_active
         if event == cv2.EVENT_RBUTTONDOWN:
             emergency_stop = True
             print("EMERGENCY STOP")
@@ -1255,6 +1266,7 @@ def main():
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        path_plan_mode = "none"
         mining_goal_active = False
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
@@ -2425,6 +2437,7 @@ def main():
                     if _mine_goal is not None and _mine_goal != goal_cell:
                         goal_cell = _mine_goal
                         path_cells = None
+                        path_plan_mode = "none"
                         last_path_plan_time = 0.0
                         mining_goal_active = True
                     elif mining_goal_active and mining.state in (
@@ -2514,55 +2527,99 @@ def main():
                             or (now - last_path_plan_time) >= args.path_replan_sec
                         )
                         if should_replan:
-                            obs = occ_map.obstacle_mask(
+                            base_obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                                 min_occ_advantage=args.path_avoid_occ_advantage,
                             )
-                            # Build a soft safety-cost field so A* prefers corridor centers:
-                            # farther from obstacles = lower cost (safer and usually smoother/faster).
-                            path_cost = np.zeros(obs.shape, dtype=np.float32)
                             # Smooth mode: remove isolated noise pixels (morphological opening)
-                            if smooth_map_enabled and np.any(obs):
+                            if smooth_map_enabled and np.any(base_obs):
                                 kernel = np.ones((3, 3), np.uint8)
-                                obs = cv2.morphologyEx(
-                                    obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                base_obs = cv2.morphologyEx(
+                                    base_obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
                                 ).astype(bool)
-                            if args.block_unknown:
-                                known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
-                                unknown = np.logical_not(known)
-                                if np.any(unknown):
-                                    # Allow exploration of empty/unknown cells without
-                                    # treating them as a hard blockage.
-                                    path_cost[unknown] += 0.75
                             radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
-                            if radius_cells > 0:
-                                obs = map_utils.inflate_mask(obs, radius_cells)
 
-                            if np.any(obs):
-                                soft_clearance = max(1, int(args.path_soft_clearance_cells))
-                                for ring in range(soft_clearance, 0, -1):
-                                    near = map_utils.inflate_mask(obs, ring)
-                                    cost = 0.12 * float(soft_clearance - ring + 1)
-                                    path_cost[near] = np.maximum(path_cost[near], cost)
-                            # Prefer cleaner lanes when obstacle evidence is weak/ambiguous.
-                            path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
+                            def _try_plan(obs_src, inflate_radius, soft_clearance, search_sec):
+                                obs_try = obs_src.copy()
+                                if inflate_radius > 0 and np.any(obs_try):
+                                    obs_try = map_utils.inflate_mask(obs_try, inflate_radius)
 
-                            clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
-                            if clear_cells > 0:
-                                obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
-                                keep_cost = map_utils.clear_mask_circle(
-                                    np.ones(obs.shape, dtype=bool), cam_row_col, clear_cells
+                                path_cost = np.zeros(obs_try.shape, dtype=np.float32)
+                                if args.block_unknown:
+                                    known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
+                                    unknown = np.logical_not(known)
+                                    if np.any(unknown):
+                                        path_cost[unknown] += 0.75
+
+                                if np.any(obs_try) and soft_clearance > 0:
+                                    for ring in range(soft_clearance, 0, -1):
+                                        near = map_utils.inflate_mask(obs_try, ring)
+                                        cost = 0.12 * float(soft_clearance - ring + 1)
+                                        path_cost[near] = np.maximum(path_cost[near], cost)
+
+                                path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
+
+                                clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+                                if clear_cells > 0:
+                                    obs_try = map_utils.clear_mask_circle(obs_try, cam_row_col, clear_cells)
+                                    keep_cost = map_utils.clear_mask_circle(
+                                        np.ones(obs_try.shape, dtype=bool), cam_row_col, clear_cells
+                                    )
+                                    path_cost[~keep_cost] = 0.0
+
+                                return map_utils.astar_path(
+                                    cam_row_col,
+                                    goal_cell,
+                                    obs_try,
+                                    connectivity=args.path_connectivity,
+                                    traversal_cost_map=path_cost,
+                                    max_search_sec=search_sec,
                                 )
-                                path_cost[~keep_cost] = 0.0
-                            path_cells = map_utils.astar_path(
-                                cam_row_col,
-                                goal_cell,
-                                obs,
-                                connectivity=args.path_connectivity,
-                                traversal_cost_map=path_cost,
-                                max_search_sec=args.path_max_search_sec,
-                            )
+
+                            attempts = [
+                                (
+                                    "normal",
+                                    base_obs,
+                                    max(0, radius_cells),
+                                    max(1, int(args.path_soft_clearance_cells)),
+                                    float(args.path_max_search_sec),
+                                ),
+                            ]
+                            if args.path_relax_on_fail:
+                                relaxed_radius = max(0, radius_cells // 2)
+                                relaxed_clearance = max(1, int(args.path_soft_clearance_cells) // 2)
+                                attempts.append((
+                                    "relaxed",
+                                    base_obs,
+                                    relaxed_radius,
+                                    relaxed_clearance,
+                                    float(args.path_max_search_sec) * 1.5,
+                                ))
+                                noise_obs = base_obs
+                                if np.any(noise_obs):
+                                    kernel = np.ones((3, 3), np.uint8)
+                                    noise_obs = cv2.morphologyEx(
+                                        noise_obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                    ).astype(bool)
+                                attempts.append((
+                                    "orange-noise-point",
+                                    noise_obs,
+                                    0,
+                                    1,
+                                    float(args.path_max_search_sec) * 2.0,
+                                ))
+
+                            path_cells = None
+                            path_plan_mode = "none"
+                            for mode_name, obs_try, inflate_radius, soft_clearance, search_sec in attempts:
+                                candidate = _try_plan(obs_try, inflate_radius, soft_clearance, search_sec)
+                                if candidate:
+                                    path_cells = candidate
+                                    path_plan_mode = mode_name
+                                    if mode_name != "normal":
+                                        print(f"Path fallback: using {mode_name} path.")
+                                    break
                             if path_cells:
                                 last_path_cells = path_cells
                                 stuck_escape_counter = 0
@@ -2586,7 +2643,24 @@ def main():
                     if draw_path:
                         pts = np.array([[c, r] for r, c in draw_path], dtype=np.int32)
                         if pts.shape[0] >= 2:
-                            cv2.polylines(map_vis, [pts], False, (255, 255, 0), 1)
+                            if path_plan_mode == "normal":
+                                path_color = (255, 255, 0)
+                            elif path_plan_mode == "relaxed":
+                                path_color = (0, 190, 255)
+                            else:
+                                path_color = (0, 120, 255)
+                            cv2.polylines(map_vis, [pts], False, path_color, 2 if path_plan_mode != "normal" else 1)
+                            if path_plan_mode != "normal":
+                                cv2.putText(
+                                    map_vis,
+                                    f"PATH:{path_plan_mode}",
+                                    (8, 36),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.42,
+                                    path_color,
+                                    1,
+                                    cv2.LINE_AA,
+                                )
                     # Draw goal marker.
                     if goal_cell is not None:
                         gr, gc = goal_cell

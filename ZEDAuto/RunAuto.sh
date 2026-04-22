@@ -77,6 +77,7 @@ cmd+=(--rover-size-m "${ROVER_SIZE_M:-0.30}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--path-soft-clearance-cells "${PATH_SOFT_CLEARANCE_CELLS:-8}")
+if [[ "${PATH_RELAX_ON_FAIL:-1}" != "1" ]]; then cmd+=(--no-path-relax-on-fail); fi
 if [[ "${ALLOW_DIRECT_NO_PATH:-0}" == "1" ]]; then cmd+=(--allow-direct-no-path); fi
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
