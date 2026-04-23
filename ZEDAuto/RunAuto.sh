@@ -78,6 +78,10 @@ cmd+=(--camera-mount "${CAMERA_MOUNT:-front}")
 if [[ -n "${CAMERA_MOUNT_YAW_DEG:-}" ]]; then cmd+=(--camera-mount-yaw-deg "${CAMERA_MOUNT_YAW_DEG}"); fi
 if [[ -n "${CAMERA_FORWARD_OFFSET_M:-}" ]]; then cmd+=(--camera-forward-offset-m "${CAMERA_FORWARD_OFFSET_M}"); fi
 if [[ -n "${CAMERA_RIGHT_OFFSET_M:-}" ]]; then cmd+=(--camera-right-offset-m "${CAMERA_RIGHT_OFFSET_M}"); fi
+if [[ "${CAMERA_SERVO_TRACK:-0}" == "1" ]]; then cmd+=(--camera-servo-track); fi
+cmd+=(--camera-map-angle-deg "${CAMERA_MAP_ANGLE_DEG:-180.0}")
+cmd+=(--camera-deposit-angle-deg "${CAMERA_DEPOSIT_ANGLE_DEG:-0.0}")
+cmd+=(--camera-servo-map-tol-deg "${CAMERA_SERVO_MAP_TOL_DEG:-8.0}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
 cmd+=(--path-soft-clearance-cells "${PATH_SOFT_CLEARANCE_CELLS:-8}")

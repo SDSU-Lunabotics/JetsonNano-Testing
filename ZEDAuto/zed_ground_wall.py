@@ -205,6 +205,29 @@ def main():
         default=0.0,
         help="Camera position relative to rover center; positive is rover right.",
     )
+    parser.add_argument(
+        "--camera-servo-track",
+        action="store_true",
+        help="Read camera servo angle from RoboRIO and use it as the live camera yaw relative to the rover.",
+    )
+    parser.add_argument(
+        "--camera-map-angle-deg",
+        type=float,
+        default=180.0,
+        help="Servo angle used for outward map/navigation view.",
+    )
+    parser.add_argument(
+        "--camera-deposit-angle-deg",
+        type=float,
+        default=0.0,
+        help="Servo angle used to look into the deposition bin/material.",
+    )
+    parser.add_argument(
+        "--camera-servo-map-tol-deg",
+        type=float,
+        default=8.0,
+        help="Allowed error from map-view servo angle before map integration pauses.",
+    )
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
@@ -658,24 +681,49 @@ def main():
     camera_mount_yaw_deg = args.camera_mount_yaw_deg
     if camera_mount_yaw_deg is None:
         camera_mount_yaw_deg = 180.0 if args.camera_mount == "rear" else 0.0
-    camera_mount_yaw_rad = math.radians(float(camera_mount_yaw_deg))
 
     camera_forward_offset_m = args.camera_forward_offset_m
     if camera_forward_offset_m is None:
         camera_forward_offset_m = -0.5 * float(args.rover_size_m) if args.camera_mount == "rear" else 0.0
     camera_right_offset_m = float(args.camera_right_offset_m)
 
-    robot_forward_cam = np.array(
-        [math.sin(camera_mount_yaw_rad), 0.0, math.cos(camera_mount_yaw_rad)],
-        dtype=np.float32,
-    )
-    robot_right_cam = np.array(
-        [math.cos(camera_mount_yaw_rad), 0.0, -math.sin(camera_mount_yaw_rad)],
-        dtype=np.float32,
-    )
-    close_obstacle_escape_sign = -1.0 if math.cos(camera_mount_yaw_rad) >= 0.0 else 1.0
+    def angle_error_deg(angle_a, angle_b):
+        err = float(angle_a) - float(angle_b)
+        while err > 180.0:
+            err -= 360.0
+        while err < -180.0:
+            err += 360.0
+        return err
 
-    def rover_pose_from_camera(R_world_cam, camera_pos_world):
+    def camera_mount_axes(yaw_deg):
+        yaw_rad = math.radians(float(yaw_deg))
+        robot_forward_cam = np.array(
+            [math.sin(yaw_rad), 0.0, math.cos(yaw_rad)],
+            dtype=np.float32,
+        )
+        robot_right_cam = np.array(
+            [math.cos(yaw_rad), 0.0, -math.sin(yaw_rad)],
+            dtype=np.float32,
+        )
+        close_obstacle_escape_sign = -1.0 if math.cos(yaw_rad) >= 0.0 else 1.0
+        return robot_forward_cam, robot_right_cam, close_obstacle_escape_sign
+
+    servo_angle_deg = float(args.camera_map_angle_deg if args.camera_servo_track else camera_mount_yaw_deg)
+    servo_target_angle_deg = float(servo_angle_deg)
+    servo_command_angle_deg = float(servo_angle_deg)
+    servo_settled = True
+    servo_turning = False
+    servo_map_view = True
+    servo_deposit_view = False
+    servo_manual_override = False
+
+    def current_camera_mount_yaw_deg():
+        return float(servo_angle_deg if args.camera_servo_track else camera_mount_yaw_deg)
+
+    def rover_pose_from_camera(R_world_cam, camera_pos_world, mount_yaw_deg=None):
+        if mount_yaw_deg is None:
+            mount_yaw_deg = current_camera_mount_yaw_deg()
+        robot_forward_cam, robot_right_cam, _ = camera_mount_axes(mount_yaw_deg)
         rover_forward_world = (R_world_cam @ robot_forward_cam.reshape(3, 1)).reshape(3,)
         rover_right_world = (R_world_cam @ robot_right_cam.reshape(3, 1)).reshape(3,)
         if args.drive_heading_flip:
@@ -693,6 +741,7 @@ def main():
         f"{args.camera_mount} yaw={float(camera_mount_yaw_deg):+.1f}deg "
         f"forward_offset={float(camera_forward_offset_m):+.2f}m "
         f"right_offset={float(camera_right_offset_m):+.2f}m "
+        f"servo_track={'on' if args.camera_servo_track else 'off'} "
         f"heading_flip={'on' if args.drive_heading_flip else 'off'}"
     )
 
@@ -738,6 +787,8 @@ def main():
             sd.putString("Jetson/MiningState", mining.state.value)
             sd.putBoolean("Jetson/ExcavatorEnabled", False)
             sd.putBoolean("Jetson/ConveyorEnabled", False)
+            sd.putNumber("Jetson/ServoCommandAngleDeg", float(args.camera_map_angle_deg))
+            sd.putNumber("Jetson/ServoCommandSeq", 0.0)
             print(
                 f"Drive enabled: NetworkTables to {args.roborio_ip} "
                 f"main_rover_mode={'on' if args.main_rover_mode else 'off'}"
@@ -1042,6 +1093,59 @@ def main():
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
+    def refresh_camera_servo_state():
+        nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
+        nonlocal servo_settled, servo_turning, servo_map_view, servo_deposit_view
+        nonlocal servo_manual_override
+        if (not args.camera_servo_track) or (sd is None):
+            servo_angle_deg = float(camera_mount_yaw_deg)
+            servo_target_angle_deg = float(camera_mount_yaw_deg)
+            servo_command_angle_deg = float(camera_mount_yaw_deg)
+            servo_settled = True
+            servo_turning = False
+            servo_map_view = True
+            servo_deposit_view = False
+            servo_manual_override = False
+            return
+
+        servo_angle_deg = float(sd.getNumber("Jetson/ServoAngleDeg", servo_angle_deg))
+        servo_target_angle_deg = float(sd.getNumber("Jetson/ServoTargetAngleDeg", servo_target_angle_deg))
+        servo_command_angle_deg = float(sd.getNumber("Jetson/ServoCommandAngleDeg", servo_command_angle_deg))
+        servo_settled = bool(sd.getBoolean("Jetson/ServoSettled", True))
+        servo_manual_override = bool(sd.getBoolean("Jetson/ServoManualOverride", False))
+        servo_manual_moving = bool(sd.getBoolean("Jetson/ServoManualMoving", False))
+        servo_turning = (not servo_settled) or servo_manual_moving
+        servo_map_view = abs(angle_error_deg(servo_angle_deg, args.camera_map_angle_deg)) <= float(args.camera_servo_map_tol_deg)
+        servo_deposit_view = abs(angle_error_deg(servo_angle_deg, args.camera_deposit_angle_deg)) <= float(args.camera_servo_map_tol_deg)
+
+    def request_camera_servo_angle(angle_deg, reason="manual"):
+        nonlocal servo_command_angle_deg
+        if (not args.camera_servo_track) or (sd is None):
+            return False
+        angle_deg = max(0.0, min(180.0, float(angle_deg)))
+        if abs(servo_command_angle_deg - angle_deg) < 0.5:
+            return False
+        next_seq = float(sd.getNumber("Jetson/ServoCommandSeq", 0.0)) + 1.0
+        sd.putNumber("Jetson/ServoCommandAngleDeg", angle_deg)
+        sd.putNumber("Jetson/ServoCommandSeq", next_seq)
+        servo_command_angle_deg = angle_deg
+        print(f"Camera servo -> {angle_deg:.0f} deg ({reason})")
+        return True
+
+    def request_camera_map_view(reason="manual"):
+        return request_camera_servo_angle(args.camera_map_angle_deg, reason)
+
+    def request_camera_deposit_view(reason="manual"):
+        return request_camera_servo_angle(args.camera_deposit_angle_deg, reason)
+
+    def toggle_camera_view():
+        refresh_camera_servo_state()
+        target_is_map = abs(angle_error_deg(servo_command_angle_deg, args.camera_map_angle_deg)) <= 2.0
+        if servo_map_view or target_is_map:
+            request_camera_deposit_view("button")
+        else:
+            request_camera_map_view("button")
+
     def lock_green_zones_permanent():
         nonlocal last_save, lock_green_applied, lock_green_locked_count
         strong_occ = occ_map.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
@@ -1122,6 +1226,7 @@ def main():
 
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
+        refresh_camera_servo_state()
         now = time.time()
         if (not force) and (now - last_map_ui_state_write) < 0.20:
             return
@@ -1193,6 +1298,17 @@ def main():
                     "command": "main_rover_mode",
                     "active": bool(args.main_rover_mode),
                     "enabled": True,
+                },
+                {
+                    "id": "camera_view",
+                    "label": (
+                        "Camera: Deposit"
+                        if (servo_deposit_view or abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0)
+                        else "Camera: Map"
+                    ),
+                    "command": "camera_view",
+                    "active": bool(servo_deposit_view),
+                    "enabled": bool(args.camera_servo_track and sd is not None),
                 },
                 {
                     "id": "draw_excav_zone",
@@ -1473,6 +1589,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_main_rover_mode(not args.main_rover_mode)
                 return
+        rect = status_button_rects.get("camera_view")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                toggle_camera_view()
+                return
         rect = status_button_rects.get("excav")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1620,6 +1742,8 @@ def main():
                 start_localization_scan("external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
+        elif action == "camera_view":
+            toggle_camera_view()
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
                 set_brush_tool(None)
@@ -1844,64 +1968,82 @@ def main():
             (255, 220, 170) if localization_scan_active else (190, 190, 190),
             0.45,
         )
+        servo_state_txt = "OFF"
+        servo_state_color = (190, 190, 190)
+        if args.camera_servo_track:
+            if servo_turning:
+                servo_state_txt = "TURNING"
+                servo_state_color = (0, 200, 255)
+            elif servo_deposit_view:
+                servo_state_txt = "DEPOSIT"
+                servo_state_color = (255, 200, 120)
+            else:
+                servo_state_txt = "MAP"
+                servo_state_color = (170, 255, 170)
+        put_line(
+            f"Camera servo: {servo_state_txt} | angle {servo_angle_deg:.0f} | target {servo_command_angle_deg:.0f}",
+            186,
+            servo_state_color,
+            0.46,
+        )
 
         excav_set = bool(mining.excav_corners_rc)
         deposit_set = bool(mining.deposit_corners_rc)
-        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 194, (170, 255, 170) if excav_set else (190, 190, 190))
-        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 218, (170, 255, 170) if deposit_set else (190, 190, 190))
-        put_line("Click a button below, then define 4 corners on the map.", 242, (210, 210, 210), 0.48)
+        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 210, (170, 255, 170) if excav_set else (190, 190, 190))
+        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 234, (170, 255, 170) if deposit_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", 258, (210, 210, 210), 0.48)
 
         if goal_cell is None:
-            put_line("Goal cell: none", 264, (190, 190, 190))
-            put_line("Goal world: none", 288, (190, 190, 190))
+            put_line("Goal cell: none", 280, (190, 190, 190))
+            put_line("Goal world: none", 304, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 264, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 280, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 288, (190, 190, 190))
+                put_line("Goal world: unavailable", 304, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 288, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 304, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 302, (190, 190, 190))
+            put_line("Active target: none", 318, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    302,
+                    318,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    302,
+                    318,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 326, (190, 190, 190))
+            put_line("Robot cell: unavailable", 342, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 326, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 342, (180, 255, 220))
 
-        put_line(f"Map zoom: x{map_scale_live}", 350, (220, 240, 255))
+        put_line(f"Map zoom: x{map_scale_live}", 366, (220, 240, 255))
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            374,
+            390,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 398)
-        draw_axis("Turn", status_cmd_turn, 420)
+        draw_axis("Forward", status_cmd_fwd, 414)
+        draw_axis("Turn", status_cmd_turn, 436)
 
         # --- Rover size input field (placed between axis bars and the zone buttons) ---
         cur_rover_ft = args.rover_size_m / 0.3048
         put_line(
             "Rover size (ft, square) — click field, type e.g. 2.5, press Enter",
-            424,
+            440,
             (170, 200, 230),
             0.44,
         )
-        input_rect = (16, 434, panel_w - 16, 474)
+        input_rect = (16, 450, panel_w - 16, 490)
         status_button_rects["map_size_input"] = input_rect
         border_color = (100, 220, 255) if map_size_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), (40, 40, 40), -1)
@@ -1920,15 +2062,15 @@ def main():
         )
         put_line(
             f"Current rover size: {cur_rover_ft:.2f} ft  ({args.rover_size_m:.3f} m)",
-            488,
+            504,
             (200, 240, 255),
             0.48,
         )
 
-        controls_top = 506
+        controls_top = 522
         controls_bottom = panel_h - 16
         controls_h = max(1, controls_bottom - controls_top)
-        content_h = 420
+        content_h = 500
         controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
         controls[:] = (28, 28, 28)
 
@@ -1943,7 +2085,8 @@ def main():
         row3 = row2 + button_h + 10
         row4 = row3 + button_h + 10
         row5 = row4 + button_h + 10
-        slider_y = row5 + button_h + 20
+        row6 = row5 + button_h + 10
+        slider_y = row6 + button_h + 20
 
         def put_control_line(text, y, color=(235, 235, 235), scale=0.48):
             cv2.putText(controls, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
@@ -2019,6 +2162,7 @@ def main():
         zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
+        camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -2062,6 +2206,19 @@ def main():
             args.main_rover_mode,
             (0, 120, 200),
             (80, 220, 255),
+        )
+        camera_label = "Camera: Deposit 0" if (
+            servo_deposit_view
+            or abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0
+        ) else "Camera: Map 180"
+        camera_active = servo_deposit_view or (servo_turning and abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0)
+        draw_control_button(
+            camera_view_rect,
+            camera_label,
+            bool(args.camera_servo_track and sd is not None),
+            camera_active,
+            (150, 90, 0),
+            (255, 220, 120),
         )
 
         btn_sm = 36
@@ -2109,6 +2266,7 @@ def main():
             ("zoom_in", zoom_in_rect),
             ("zoom_out", zoom_out_rect),
             ("main_rover_mode", main_rover_rect),
+            ("camera_view", camera_view_rect),
             ("brush_minus", brush_minus_rect),
             ("brush_plus", brush_plus_rect),
             ("brush_slider", brush_slider_rect),
@@ -2218,6 +2376,18 @@ def main():
                 tracking_pose_ok = True
                 tracking_prev_ok = True
             update_localization_scan_state()
+            refresh_camera_servo_state()
+            auto_camera_map_required = localization_scan_active or goal_cell is not None or mining.state in (
+                auto_mining.MiningState.PLAN_SWEEP,
+                auto_mining.MiningState.NAVIGATE_DIG,
+                auto_mining.MiningState.DIGGING,
+                auto_mining.MiningState.BACKUP,
+                auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                auto_mining.MiningState.DEPOSITING,
+            )
+            if auto_camera_map_required:
+                request_camera_map_view("auto navigation")
+                refresh_camera_servo_state()
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -2417,9 +2587,18 @@ def main():
                 heatmap_vis = None
                 cam_row_col = None
                 rover_row_col = None
+                camera_map_pause_reason = ""
+                current_mount_yaw_deg = current_camera_mount_yaw_deg()
+                _, _, close_obstacle_escape_sign = camera_mount_axes(current_mount_yaw_deg)
                 # Never integrate new points while tracking is lost or a pose
                 # jump was rejected; otherwise one bad pose can drag the map.
                 map_integration_ok = (not tracking_enabled) or tracking_pose_ok
+                if args.camera_servo_track and (servo_turning or not servo_map_view):
+                    map_integration_ok = False
+                    if servo_turning:
+                        camera_map_pause_reason = "CAMERA TURNING"
+                    else:
+                        camera_map_pause_reason = "CAMERA DEPOSIT VIEW"
                 # Compute map-local translation for simple mode
                 if not args.complex and map_origin_set:
                     t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
@@ -2428,6 +2607,7 @@ def main():
                 rover_pos_map, rover_forward_world, rover_right_world = rover_pose_from_camera(
                     R_world_cam,
                     t_map,
+                    current_mount_yaw_deg,
                 )
                 cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                 rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
@@ -2587,13 +2767,18 @@ def main():
                             end_pt = (int(c0 + np.cos(ang) * size), int(r0 - np.sin(ang) * size))
                             cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
                     if (not map_integration_ok) and HAS_CV2:
+                        pause_text = "TRACKING LOST - MAP PAUSED"
+                        pause_color = (0, 140, 255)
+                        if camera_map_pause_reason:
+                            pause_text = f"{camera_map_pause_reason} - MAP PAUSED"
+                            pause_color = (0, 200, 255)
                         cv2.putText(
                             map_vis,
-                            "TRACKING LOST - MAP PAUSED",
+                            pause_text,
                             (8, 20),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
-                            (0, 140, 255),
+                            pause_color,
                             1,
                             cv2.LINE_AA,
                         )
