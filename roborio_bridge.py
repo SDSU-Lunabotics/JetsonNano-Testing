@@ -175,6 +175,13 @@ def write_value(key, value_type, value):
     return parsed
 
 
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def torque_warnings(values):
     warnings = []
 
@@ -182,7 +189,9 @@ def torque_warnings(values):
         if not key.endswith("/TorqueCurrentA"):
             continue
 
-        value = values.get(key, 0.0)
+        value = _safe_float(values.get(key))
+        if value is None:
+            continue
 
         if value_type == "number" and value > TORQUE_CURRENT_LIMIT_AMPS:
             warnings.append(
