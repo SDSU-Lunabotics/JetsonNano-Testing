@@ -909,6 +909,7 @@ def main():
     localization_scan_started_lost = False
     localization_scan_reason = ""
     last_localization_log = 0.0
+    localization_scan_autostart_blocked_until = 0.0
     landmark_memory = {"version": 1, "landmarks": []}
     landmark_dirty = False
     last_landmark_save = time.time()
@@ -1060,6 +1061,32 @@ def main():
             print(f"Localize Scan stopped ({reason}).")
         localization_scan_active = False
         localization_scan_reason = ""
+
+    def block_localization_autostart(seconds=5.0, source="manual"):
+        nonlocal localization_scan_autostart_blocked_until
+        seconds = max(0.0, float(seconds))
+        if seconds <= 0.0:
+            return
+        localization_scan_autostart_blocked_until = max(
+            localization_scan_autostart_blocked_until,
+            time.time() + seconds,
+        )
+        print(f"Localize auto-start blocked for {seconds:.1f}s ({source}).")
+
+    def set_manual_drive_mode(enabled, source="key"):
+        nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
+        enabled = bool(enabled)
+        if localization_scan_active:
+            block_localization_autostart(5.0, f"{source} manual override")
+            stop_localization_scan(f"{source} manual override")
+        manual_mode = enabled
+        manual_fwd = 0.0
+        manual_turn = 0.0
+        emergency_stop = False
+        if manual_mode:
+            print("Manual drive mode: ON (localization canceled, auto paused)")
+        else:
+            print("Manual drive mode: OFF (auto resumed)")
 
     def update_localization_scan_state():
         if not localization_scan_active:
@@ -1744,6 +1771,7 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 if localization_scan_active:
+                    block_localization_autostart(5.0, "button")
                     stop_localization_scan("button")
                 else:
                     start_localization_scan("button")
@@ -1928,6 +1956,7 @@ def main():
                 print("Map reset canceled.")
         elif action == "localize_scan":
             if localization_scan_active:
+                block_localization_autostart(5.0, "external command")
                 stop_localization_scan("external command")
             else:
                 start_localization_scan("external command")
@@ -2588,8 +2617,13 @@ def main():
                         tracking_recover_stable_count = 0
                         R_world_cam = last_valid_R_world_cam
                         t_world_cam = last_valid_t_world_cam
-                        if not localization_scan_active:
+                        if (not localization_scan_active) and time.time() >= localization_scan_autostart_blocked_until:
                             start_localization_scan(jump_reason)
+                        elif time.time() < localization_scan_autostart_blocked_until:
+                            print(
+                                "Tracking jump rejected, but localize auto-start is temporarily blocked; "
+                                "holding last pose."
+                            )
                         print(f"Tracking jump rejected ({jump_reason}); holding last pose.")
                 if tracking_pose_ok and have_valid_tracking_pose and not tracking_prev_ok:
                     tracking_recover_stable_count += 1
@@ -3813,15 +3847,7 @@ def main():
                     if key == ord("q"):
                         break
                     if key == ord("m"):
-                        manual_mode = not manual_mode
-                        if manual_mode:
-                            # Entering manual mode pauses auto navigation but keeps the last goal.
-                            emergency_stop = False
-                            manual_fwd = 0.0
-                            manual_turn = 0.0
-                            print("Manual drive mode: ON (auto paused)")
-                        else:
-                            print("Manual drive mode: OFF (auto resumed)")
+                        set_manual_drive_mode(not manual_mode, "key")
                     if key == ord("c"):
                         follow_rover_map = not follow_rover_map
                         state = "ON" if follow_rover_map else "OFF"
@@ -3832,6 +3858,7 @@ def main():
                         print(f"Map red-only mode: {state}")
                     if key == ord("l"):
                         if localization_scan_active:
+                            block_localization_autostart(5.0, "key")
                             stop_localization_scan("key")
                         else:
                             start_localization_scan("key")
