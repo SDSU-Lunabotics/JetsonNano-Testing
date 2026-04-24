@@ -42,12 +42,26 @@ class RoboRIOBridgeService:
         return payload.get("values", {}).get(key, default)
 
     def get_motors_status(self) -> Dict[str, Any]:
+        status_payload = self.get_status()
+        values = status_payload.get("values") or {}
+        warnings = status_payload.get("warnings") or []
+
+        if values:
+            return {
+                "timestamp_ms": status_payload.get("timestamp_ms", 0),
+                "motors": [],
+                "values": values,
+                "warnings": warnings,
+            }
+
         try:
             return self._get("/motors/status")
         except requests.RequestException:
             return {
                 "timestamp_ms": 0,
                 "motors": [],
+                "values": {},
+                "warnings": [],
             }
 
     def set_value(self, key: str, value: Any) -> Dict[str, Any]:
