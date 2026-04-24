@@ -199,7 +199,11 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--nt-command-ack-timeout-sec "${NT_COMMAND_ACK_TIMEOUT_SEC:-0.30}")
   cmd+=(--nt-forward-scale "${NT_FORWARD_SCALE:-1.0}")
   cmd+=(--nt-turn-scale "${NT_TURN_SCALE:-1.0}")
-  if [[ "${MAIN_ROVER_MODE:-0}" == "1" ]]; then cmd+=(--main-rover-mode); fi
+  if [[ "${MAIN_ROVER_MODE:-1}" == "1" ]]; then
+    cmd+=(--main-rover-mode)
+  else
+    cmd+=(--no-main-rover-mode)
+  fi
   if [[ "${MAIN_ROVER_DEBUG:-0}" == "1" ]]; then cmd+=(--main-rover-debug); fi
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
