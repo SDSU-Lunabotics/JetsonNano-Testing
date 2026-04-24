@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import requests
 from typing import Any, Dict
 from app.core.settings import settings
@@ -8,6 +9,8 @@ from app.core.settings import settings
 class RoboRIOBridgeService:
     def __init__(self) -> None:
         self._base_url = settings.roborio_bridge_url
+        self._status_cache: Dict[str, Any] | None = None
+        self._status_cache_expires_at: float = 0.0
 
     def _get(self, path: str) -> Dict[str, Any]:
         r = requests.get(f"{self._base_url}{path}", timeout=2)
@@ -19,11 +22,15 @@ class RoboRIOBridgeService:
         r.raise_for_status()
         return r.json()
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.monotonic()
+        if not force_refresh and self._status_cache is not None and now < self._status_cache_expires_at:
+            return dict(self._status_cache)
+
         try:
-            return self._get("/status")
+            payload = self._get("/status")
         except requests.RequestException as exc:
-            return {
+            payload = {
                 "status": "error",
                 "timestamp_ms": 0,
                 "connected": False,
@@ -32,6 +39,10 @@ class RoboRIOBridgeService:
                 "error": str(exc),
                 "bridge_url": self._base_url,
             }
+
+        self._status_cache = dict(payload)
+        self._status_cache_expires_at = time.monotonic() + 0.2
+        return dict(payload)
 
     def is_connected(self) -> bool:
         payload = self.get_status()
