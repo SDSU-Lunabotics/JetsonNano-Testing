@@ -69,6 +69,18 @@ def main():
         help="Reject tracking pose jumps larger than this between frames. Set <=0 to disable.",
     )
     parser.add_argument(
+        "--tracking-max-heading-jump-deg",
+        type=float,
+        default=55.0,
+        help="Reject tracking heading jumps larger than this between accepted poses. Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--tracking-recover-stable-frames",
+        type=int,
+        default=6,
+        help="Require this many consecutive stable tracking frames before relocking after tracking loss.",
+    )
+    parser.add_argument(
         "--localize-turn-speed",
         type=float,
         default=0.25,
@@ -262,6 +274,12 @@ def main():
         type=float,
         default=2.5,
         help="Max change rate of turn command (command units per second)",
+    )
+    parser.add_argument(
+        "--drive-direct-lookahead-cells",
+        type=int,
+        default=24,
+        help="When Direct Nav is enabled, target the farthest visible path cell up to this many cells ahead.",
     )
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
     parser.add_argument(
@@ -500,6 +518,8 @@ def main():
     tracking_pose_ok = False
     tracking_prev_ok = False
     tracking_loss_warned = False
+    have_valid_tracking_pose = False
+    tracking_recover_stable_count = 0
     pose = None
     if args.tracking:
         tracking_enabled, pose = zed_utils.enable_tracking(
@@ -684,7 +704,14 @@ def main():
 
     camera_forward_offset_m = args.camera_forward_offset_m
     if camera_forward_offset_m is None:
-        camera_forward_offset_m = -0.5 * float(args.rover_size_m) if args.camera_mount == "rear" else 0.0
+        # Default mount presets place the camera on the leading edge of the
+        # rover footprint so planning starts from the rover body center, not
+        # from the camera lens itself.
+        camera_forward_offset_m = (
+            -0.5 * float(args.rover_size_m)
+            if args.camera_mount == "rear"
+            else 0.5 * float(args.rover_size_m)
+        )
     camera_right_offset_m = float(args.camera_right_offset_m)
 
     def angle_error_deg(angle_a, angle_b):
@@ -735,6 +762,23 @@ def main():
             - rover_right_world * float(camera_right_offset_m)
         )
         return rover_pos_world, rover_forward_world, rover_right_world
+
+    def world_forward_from_rotation(R_world_cam):
+        forward = (np.array(R_world_cam, dtype=np.float32) @ np.array([0.0, 0.0, 1.0], dtype=np.float32)).reshape(3,)
+        norm = float(np.linalg.norm(forward))
+        if norm <= 1e-6:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return forward / norm
+
+    def angle_between_vec_deg(vec_a, vec_b):
+        a = np.array(vec_a, dtype=np.float32).reshape(3,)
+        b = np.array(vec_b, dtype=np.float32).reshape(3,)
+        an = float(np.linalg.norm(a))
+        bn = float(np.linalg.norm(b))
+        if an <= 1e-6 or bn <= 1e-6:
+            return 0.0
+        dot = float(np.clip(np.dot(a / an, b / bn), -1.0, 1.0))
+        return float(np.degrees(np.arccos(dot)))
 
     print(
         "Camera mount: "
@@ -843,6 +887,7 @@ def main():
     status_cmd_duration = 0.0
     status_target_cell = None
     status_target_world = None
+    direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
@@ -1224,6 +1269,104 @@ def main():
         status_target_cell = None
         status_target_world = None
 
+    def set_direct_nav_enabled(enabled, source="button"):
+        nonlocal direct_nav_enabled
+        enabled = bool(enabled)
+        if direct_nav_enabled == enabled:
+            return
+        direct_nav_enabled = enabled
+        state = "ENABLED" if direct_nav_enabled else "DISABLED"
+        detail = (
+            "straighter visible targets"
+            if direct_nav_enabled
+            else "normal short-lookahead path following"
+        )
+        print(f"Direct Nav {state} via {source} ({detail}).")
+        publish_map_ui_state(force=True)
+
+    def build_direct_nav_obstacle_mask(rover_rc):
+        obs = occ_map.obstacle_mask(
+            min_occ_count=args.path_avoid_occ_min,
+            min_occ_ratio=args.path_avoid_occ_ratio,
+            min_occ_advantage=args.path_avoid_occ_advantage,
+        )
+        if smooth_map_enabled and np.any(obs):
+            kernel = np.ones((3, 3), np.uint8)
+            obs = cv2.morphologyEx(obs.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(bool)
+        radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
+        if radius_cells > 0 and np.any(obs):
+            obs = map_utils.inflate_mask(obs, radius_cells)
+        clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+        if clear_cells > 0:
+            obs = map_utils.clear_mask_circle(obs, rover_rc, clear_cells)
+        return obs
+
+    def iter_grid_line_cells(start_rc, end_rc):
+        r0, c0 = int(start_rc[0]), int(start_rc[1])
+        r1, c1 = int(end_rc[0]), int(end_rc[1])
+        dr = abs(r1 - r0)
+        dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        err = dc - dr
+
+        while True:
+            yield r0, c0
+            if r0 == r1 and c0 == c1:
+                break
+            e2 = err * 2
+            if e2 > -dr:
+                err -= dr
+                c0 += sc
+            if e2 < dc:
+                err += dc
+                r0 += sr
+
+    def grid_segment_is_clear(start_rc, end_rc, obstacle_mask):
+        if start_rc is None or end_rc is None or obstacle_mask is None:
+            return False
+        h, w = obstacle_mask.shape
+        prev = None
+        for rr, cc in iter_grid_line_cells(start_rc, end_rc):
+            if rr < 0 or rr >= h or cc < 0 or cc >= w:
+                return False
+            if obstacle_mask[rr, cc]:
+                return False
+            if prev is not None:
+                pr, pc = prev
+                if abs(rr - pr) == 1 and abs(cc - pc) == 1:
+                    if obstacle_mask[pr, cc] or obstacle_mask[rr, pc]:
+                        return False
+            prev = (rr, cc)
+        return True
+
+    def pick_drive_target(draw_path, rover_rc, goal_rc):
+        if goal_rc is None:
+            return None
+
+        direct_obs = None
+        if direct_nav_enabled and rover_rc is not None:
+            direct_obs = build_direct_nav_obstacle_mask(rover_rc)
+            if grid_segment_is_clear(rover_rc, goal_rc, direct_obs):
+                return goal_rc
+
+        if draw_path is not None and len(draw_path) > 0:
+            wp_index = min(5, len(draw_path) - 1)
+            if direct_nav_enabled and rover_rc is not None and len(draw_path) > 1:
+                max_index = min(
+                    len(draw_path) - 1,
+                    max(wp_index, int(max(1, args.drive_direct_lookahead_cells))),
+                )
+                for idx in range(max_index, wp_index, -1):
+                    if grid_segment_is_clear(rover_rc, draw_path[idx], direct_obs):
+                        return draw_path[idx]
+            return draw_path[wp_index]
+
+        if direct_nav_enabled and rover_rc is not None and grid_segment_is_clear(rover_rc, goal_rc, direct_obs):
+            return goal_rc
+
+        return None
+
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
         refresh_camera_servo_state()
@@ -1290,6 +1433,13 @@ def main():
                     "label": "Localize Scan",
                     "command": "localize_scan",
                     "active": bool(localization_scan_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "direct_nav",
+                    "label": "Direct Nav",
+                    "command": "direct_nav",
+                    "active": bool(direct_nav_enabled),
                     "enabled": True,
                 },
                 {
@@ -1570,6 +1720,12 @@ def main():
                 else:
                     start_localization_scan("button")
                 return
+        rect = status_button_rects.get("direct_nav")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_direct_nav_enabled(not direct_nav_enabled, "button")
+                return
         rect = status_button_rects.get("reset_map")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1740,6 +1896,8 @@ def main():
                 stop_localization_scan("external command")
             else:
                 start_localization_scan("external command")
+        elif action == "direct_nav":
+            set_direct_nav_enabled(not direct_nav_enabled, "external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
         elif action == "camera_view":
@@ -1935,7 +2093,12 @@ def main():
             mode_color = (180, 180, 180)
 
         put_line("ZED DRIVE STATUS", 30, (255, 255, 255), 0.72)
-        put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
+        put_line(
+            f"Mode: {mode_label} | Direct Nav: {'ON' if direct_nav_enabled else 'OFF'}",
+            62,
+            mode_color,
+            0.56,
+        )
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
         _nt_status_color = (170, 255, 170) if nt_connected_cached else (0, 60, 255)
         _nt_watchdog_txt = " [WATCHDOG TRIPPED]" if nt_watchdog_tripped else ""
@@ -2070,10 +2233,6 @@ def main():
         controls_top = 522
         controls_bottom = panel_h - 16
         controls_h = max(1, controls_bottom - controls_top)
-        content_h = 500
-        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
-        controls[:] = (28, 28, 28)
-
         button_h = 42
         button_w = 160
         gap = 20
@@ -2086,7 +2245,11 @@ def main():
         row4 = row3 + button_h + 10
         row5 = row4 + button_h + 10
         row6 = row5 + button_h + 10
-        slider_y = row6 + button_h + 20
+        row7 = row6 + button_h + 10
+        slider_y = row7 + button_h + 20
+        content_h = slider_y + 72
+        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
+        controls[:] = (28, 28, 28)
 
         def put_control_line(text, y, color=(235, 235, 235), scale=0.48):
             cv2.putText(controls, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
@@ -2163,6 +2326,7 @@ def main():
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
         camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
+        direct_nav_rect = (16, row7, panel_w - 16, row7 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -2220,6 +2384,14 @@ def main():
             (150, 90, 0),
             (255, 220, 120),
         )
+        draw_control_button(
+            direct_nav_rect,
+            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
+            True,
+            direct_nav_enabled,
+            (0, 150, 90),
+            (100, 255, 180),
+        )
 
         btn_sm = 36
         brush_minus_rect = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
@@ -2251,6 +2423,7 @@ def main():
         for name, rect in (
             ("auto_run", auto_run_rect),
             ("localize_scan", localize_rect),
+            ("direct_nav", direct_nav_rect),
             ("excav", excav_rect),
             ("deposit", deposit_rect),
             ("whole", whole_rect),
@@ -2337,21 +2510,58 @@ def main():
                 R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
-                if tracking_pose_ok and tracking_prev_ok and float(args.tracking_max_pose_jump_m) > 0.0:
-                    pose_jump_m = float(np.linalg.norm(np.array(t_world_cam, dtype=np.float32) - last_valid_t_world_cam))
-                    if pose_jump_m > float(args.tracking_max_pose_jump_m):
+                if tracking_pose_ok and have_valid_tracking_pose:
+                    pose_jump_m = float(
+                        np.linalg.norm(np.array(t_world_cam, dtype=np.float32) - last_valid_t_world_cam)
+                    )
+                    heading_jump_deg = angle_between_vec_deg(
+                        world_forward_from_rotation(R_world_cam),
+                        world_forward_from_rotation(last_valid_R_world_cam),
+                    )
+                    jump_reason = None
+                    if (
+                        float(args.tracking_max_pose_jump_m) > 0.0
+                        and pose_jump_m > float(args.tracking_max_pose_jump_m)
+                    ):
+                        jump_reason = (
+                            f"pose jump {pose_jump_m:.2f}m > {float(args.tracking_max_pose_jump_m):.2f}m"
+                        )
+                    elif (
+                        float(args.tracking_max_heading_jump_deg) > 0.0
+                        and heading_jump_deg > float(args.tracking_max_heading_jump_deg)
+                    ):
+                        jump_reason = (
+                            f"heading jump {heading_jump_deg:.1f}deg > "
+                            f"{float(args.tracking_max_heading_jump_deg):.1f}deg"
+                        )
+                    if jump_reason is not None:
                         tracking_pose_ok = False
+                        tracking_recover_stable_count = 0
                         R_world_cam = last_valid_R_world_cam
                         t_world_cam = last_valid_t_world_cam
                         if not localization_scan_active:
-                            start_localization_scan(f"pose jump {pose_jump_m:.2f}m")
-                        print(
-                            f"Tracking pose jump rejected ({pose_jump_m:.2f}m > "
-                            f"{float(args.tracking_max_pose_jump_m):.2f}m); holding last pose."
-                        )
+                            start_localization_scan(jump_reason)
+                        print(f"Tracking jump rejected ({jump_reason}); holding last pose.")
+                if tracking_pose_ok and have_valid_tracking_pose and not tracking_prev_ok:
+                    tracking_recover_stable_count += 1
+                    recover_needed = max(1, int(args.tracking_recover_stable_frames))
+                    if tracking_recover_stable_count < recover_needed:
+                        tracking_pose_ok = False
+                        R_world_cam = last_valid_R_world_cam
+                        t_world_cam = last_valid_t_world_cam
+                        if tracking_recover_stable_count == 1:
+                            print(
+                                "Tracking candidate recovered; waiting for "
+                                f"{recover_needed} stable frame(s) before relocking."
+                            )
+                    else:
+                        print("Tracking recovered: relocalized/locked.")
+                elif not tracking_pose_ok:
+                    tracking_recover_stable_count = 0
                 if tracking_pose_ok:
                     last_valid_R_world_cam = R_world_cam
                     last_valid_t_world_cam = t_world_cam
+                    have_valid_tracking_pose = True
                     tracking_loss_warned = False
                     if not args.complex and not map_origin_set:
                         map_origin_t = np.array(t_world_cam, dtype=np.float32)
@@ -2362,13 +2572,12 @@ def main():
                         )
                 else:
                     # Hold last known pose and pause map integration until tracking recovers.
-                    R_world_cam = last_valid_R_world_cam
-                    t_world_cam = last_valid_t_world_cam
+                    if have_valid_tracking_pose:
+                        R_world_cam = last_valid_R_world_cam
+                        t_world_cam = last_valid_t_world_cam
                     if not tracking_loss_warned:
                         print("Tracking lost: holding last pose and pausing map integration.")
                         tracking_loss_warned = True
-                if tracking_pose_ok and not tracking_prev_ok:
-                    print("Tracking recovered: relocalized/locked.")
                 tracking_prev_ok = tracking_pose_ok
             else:
                 R_world_cam = np.eye(3, dtype=np.float32)
@@ -3121,15 +3330,14 @@ def main():
                                 )
                             else:
                                 reverse_path_drive = mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
-                                # Pick a waypoint a few steps ahead.
-                                if draw_path is not None and len(draw_path) > 0:
-                                    wp_index = min(5, len(draw_path) - 1)
-                                    wp_rc = draw_path[wp_index]
-                                    wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
-                                    if wp_world is None:
+                                target_rc = pick_drive_target(draw_path, rover_row_col, goal_cell)
+                                if target_rc is not None:
+                                    target_world = occ_map.grid_to_world(target_rc[0], target_rc[1])
+                                    if target_world is None:
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
-                                    tx, tz = wp_world
-                                    status_target_cell = wp_rc
+                                    tx, tz = target_world
+                                    status_target_cell = target_rc
                                     status_target_world = (float(tx), float(tz))
                                 elif goal_cell is not None and args.allow_direct_no_path:
                                     # Fallback: drive directly toward clicked goal if path is not ready yet.
