@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from .common import LinkStats, BatteryStatus
 from .camera import CameraStatus
+from .motors import MotorsStatusResponse
 from .status import RoverStatus, ControlStatus
 from .wireless import WirelessStatusResponse
 
@@ -26,5 +27,6 @@ class StatusResponse(BaseModel):
     link: LinkStats
     battery: BatteryStatus
     control: ControlStatus
+    motors: MotorsStatusResponse
     camera: CameraStatus
     wireless: WirelessStatusResponse

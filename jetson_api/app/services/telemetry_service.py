@@ -10,6 +10,7 @@ from app.services.wireless_service import wireless_service
 from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.camera_service import camera_service
 from app.services.lidar_service import lidar_service
+from app.services.motor_service import motor_service
 from app.services.nt_service import nt_service
 
 
@@ -148,6 +149,7 @@ class TelemetryService:
             link=network_service.get_link_stats(),
             battery=battery_service.get_battery_status(),
             control=control,
+            motors=motor_service.get_status(),
             camera=camera_service.get_status(),
             wireless=wireless_service.get_status(),
         )

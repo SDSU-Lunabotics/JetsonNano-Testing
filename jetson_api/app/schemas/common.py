@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
 
@@ -41,6 +41,9 @@ class LinkStats(BaseModel):
 class BatteryStatus(BaseModel):
     voltage_v: Optional[float] = None
     low: Optional[bool] = None
+    source_key: Optional[str] = None
+    raw_value: Optional[Any] = None
+    bridge_connected: Optional[bool] = None
 
 
 class ControllerInput(str, Enum):
