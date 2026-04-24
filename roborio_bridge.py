@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,7 @@ DATA_KEYS = {
     "Jetson/EStop": "boolean",
     "Jetson/ExcavatorEnabled": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
+    "Jetson/DepositionEnabled": "boolean",
     "NavX/YawDeg": "number",
     "Rover/HeartbeatSec": "number",
     "Rover/Connected": "boolean",
@@ -81,6 +83,39 @@ DATA_KEYS = {
     "Kraken/LeftRear/AppliedOutput": "number",
     "Kraken/RightFront/AppliedOutput": "number",
     "Kraken/RightRear/AppliedOutput": "number",
+    "Jetson/DriveLeftOutput": "number",
+    "Jetson/DriveRightOutput": "number",
+    "Jetson/DriveActive": "boolean",
+    "Kraken/WheelTestStep": "number",
+    "Kraken/WheelTestMode": "string",
+    "Excav/BeltRunning": "boolean",
+    "Excav/BeltOutput": "number",
+    "Excav/BeltLeaderTorqueCurrentA": "number",
+    "Excav/BeltFollowerTorqueCurrentA": "number",
+    "Excav/BotLeftCounts": "number",
+    "Excav/BotRightCounts": "number",
+    "Excav/BottomDiffCounts": "number",
+    "Excav/SyncFault": "boolean",
+    "Excav/ManualBypassSync": "boolean",
+    "Excav/BottomPositionCalibrated": "boolean",
+    "Excav/PositionReference": "string",
+    "Excav/State": "string",
+    "Excav/Targets/StowBottomCounts": "number",
+    "Excav/Targets/DigZoneBottomCounts": "number",
+    "Deposit/Running": "boolean",
+    "Deposit/Output": "number",
+    "Deposit/CollectingAssist": "boolean",
+    "Deposit/Depositing": "boolean",
+    "Deposit/DoorState": "string",
+    "Deposit/TorqueCurrentA": "number",
+    "MainRover/CurrentLimitEnabled": "boolean",
+    "MainRover/DriveCurrentLimitA": "number",
+    "MainRover/ExcavCurrentLimitA": "number",
+    "MainRover/DepositCurrentLimitA": "number",
+    "MainRover/CurrentLimitApplied": "boolean",
+    "MainRover/DriveCurrentLimitAppliedA": "number",
+    "MainRover/ExcavCurrentLimitAppliedA": "number",
+    "MainRover/DepositCurrentLimitAppliedA": "number",
 }
 
 
@@ -90,6 +125,7 @@ WRITE_KEYS = {
     "Jetson/EStop": "boolean",
     "Jetson/ExcavatorEnabled": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
+    "Jetson/DepositionEnabled": "boolean",
     "Jetson/AutomationEnabled": "boolean",
     "Jetson/CommandReady": "boolean",
     "Jetson/CommandDuration": "number",
@@ -390,6 +426,61 @@ def _bool_arg(data, key, default):
     return parse_value("boolean", data.get(key, default))
 
 
+def _str_arg(data, key, default=""):
+    value = data.get(key, default)
+    if value is None:
+        return str(default)
+    return str(value).strip()
+
+
+def _set_deposition_enabled(enabled):
+    write_value("Jetson/ConveyorEnabled", "boolean", enabled)
+    write_value("Jetson/DepositionEnabled", "boolean", enabled)
+
+
+def _handle_motor_command(motor_id, data):
+    normalized_motor_id = str(motor_id).strip().lower().replace("-", "_").replace(" ", "_")
+    mode = _str_arg(data, "mode", "stop").lower()
+    value = data.get("value")
+    duration_ms = data.get("duration_ms")
+    timestamp_ms = now_ms()
+
+    if mode not in {"percent", "rpm", "stop"}:
+        return 400, {
+            "status": "error",
+            "message": f"Unsupported motor mode: {mode}",
+        }
+
+    if not wait_for_connection():
+        return 503, {
+            "status": "error",
+            "message": "RoboRIO not connected",
+        }
+
+    if normalized_motor_id == "excavator":
+        enabled = mode != "stop" and parse_value("number", value) != 0.0
+        write_value("Jetson/ExcavatorEnabled", "boolean", enabled)
+    elif normalized_motor_id in {"deposition", "conveyor"}:
+        enabled = mode != "stop" and parse_value("number", value) != 0.0
+        _set_deposition_enabled(enabled)
+        normalized_motor_id = "deposition"
+    else:
+        return 400, {
+            "status": "error",
+            "message": f"Unsupported motor id: {motor_id}",
+        }
+
+    return 200, {
+        "ok": True,
+        "status": "ok",
+        "timestamp_ms": timestamp_ms,
+        "motor_id": normalized_motor_id,
+        "mode": mode,
+        "value": None if value is None else parse_value("number", value),
+        "duration_ms": duration_ms,
+    }
+
+
 def stop_all_motion():
     write_value("Jetson/AutomationEnabled", "boolean", False)
     write_value("Jetson/CommandForward", "number", 0.0)
@@ -490,6 +581,12 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
             data = {}
+
+        motor_match = re.fullmatch(r"/motors/([^/]+)/command", self.path)
+        if motor_match:
+            status, payload = _handle_motor_command(motor_match.group(1), data)
+            self._send_json(status, payload)
+            return
 
         if self.path == "/set":
 
@@ -712,7 +809,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"status": "error", "message": "RoboRIO not connected"},
                 )
                 return
-            write_value("Jetson/ConveyorEnabled", "boolean", True)
+            _set_deposition_enabled(True)
             self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": True})
             return
 
@@ -723,8 +820,30 @@ class Handler(BaseHTTPRequestHandler):
                     {"status": "error", "message": "RoboRIO not connected"},
                 )
                 return
-            write_value("Jetson/ConveyorEnabled", "boolean", False)
+            _set_deposition_enabled(False)
             self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": False})
+            return
+
+        if self.path == "/actuators/deposition/start":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            _set_deposition_enabled(True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "deposition": True})
+            return
+
+        if self.path == "/actuators/deposition/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            _set_deposition_enabled(False)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "deposition": False})
             return
 
         self._send_json(404, {"status": "error", "message": "Not found"})
