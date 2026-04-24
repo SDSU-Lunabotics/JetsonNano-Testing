@@ -155,7 +155,7 @@ class TelemetryService:
             battery=battery_service.get_battery_status(),
             control=control,
             motors=motor_service.get_status(),
-            camera=camera_service.get_status(),
+            camera=camera_service.get_cached_status(),
             wireless=wireless_service.get_status(),
         )
 
