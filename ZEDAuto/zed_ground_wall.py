@@ -69,6 +69,18 @@ def main():
         help="Reject tracking pose jumps larger than this between frames. Set <=0 to disable.",
     )
     parser.add_argument(
+        "--tracking-max-heading-jump-deg",
+        type=float,
+        default=55.0,
+        help="Reject tracking heading jumps larger than this between accepted poses. Set <=0 to disable.",
+    )
+    parser.add_argument(
+        "--tracking-recover-stable-frames",
+        type=int,
+        default=6,
+        help="Require this many consecutive stable tracking frames before relocking after tracking loss.",
+    )
+    parser.add_argument(
         "--localize-turn-speed",
         type=float,
         default=0.25,
@@ -154,15 +166,80 @@ def main():
     parser.add_argument("--path-connectivity", type=int, default=8, choices=[4, 8], help="A* grid connectivity")
     parser.add_argument("--path-replan-sec", type=float, default=0.5, help="How often to retry path planning")
     parser.add_argument(
+        "--path-soft-clearance-cells",
+        type=int,
+        default=8,
+        help="Extra soft-cost clearance cells around inflated obstacles so A* prefers wider lanes",
+    )
+    parser.add_argument(
+        "--no-path-relax-on-fail",
+        action="store_false",
+        dest="path_relax_on_fail",
+        help="Disable staged relaxed/noise-filtered path retries when normal A* fails",
+    )
+    parser.set_defaults(path_relax_on_fail=True)
+    parser.add_argument(
         "--path-max-search-sec",
         type=float,
         default=0.075,
         help="Maximum seconds allowed for a single A* path search",
     )
+    parser.add_argument(
+        "--allow-direct-no-path",
+        action="store_true",
+        help="Allow direct goal driving when A* has no path. Default is to stop and retry planning.",
+    )
     parser.add_argument("--block-unknown", action="store_true", help="Treat unknown (black) cells as blocked")
     parser.add_argument("--unknown-min-evidence", type=float, default=1.0, help="Evidence threshold to mark a cell as known")
     parser.add_argument("--start-clear-radius-m", type=float, default=0.35, help="Clear blocked cells near rover start/blind spot")
     parser.add_argument("--rover-size-m", type=float, default=0.305, help="Rover footprint size (m, square)")
+    parser.add_argument(
+        "--camera-mount",
+        choices=["front", "rear", "custom"],
+        default="front",
+        help="Camera mounting preset. rear assumes the ZED is on the rear looking backward.",
+    )
+    parser.add_argument(
+        "--camera-mount-yaw-deg",
+        type=float,
+        default=None,
+        help="Camera yaw relative to rover forward. 0=looks forward, 180=looks backward.",
+    )
+    parser.add_argument(
+        "--camera-forward-offset-m",
+        type=float,
+        default=None,
+        help="Camera position relative to rover center; positive is toward the dig/front side.",
+    )
+    parser.add_argument(
+        "--camera-right-offset-m",
+        type=float,
+        default=0.0,
+        help="Camera position relative to rover center; positive is rover right.",
+    )
+    parser.add_argument(
+        "--camera-servo-track",
+        action="store_true",
+        help="Read camera servo angle from RoboRIO and use it as the live camera yaw relative to the rover.",
+    )
+    parser.add_argument(
+        "--camera-map-angle-deg",
+        type=float,
+        default=180.0,
+        help="Servo angle used for outward map/navigation view.",
+    )
+    parser.add_argument(
+        "--camera-deposit-angle-deg",
+        type=float,
+        default=0.0,
+        help="Servo angle used to look into the deposition bin/material.",
+    )
+    parser.add_argument(
+        "--camera-servo-map-tol-deg",
+        type=float,
+        default=8.0,
+        help="Allowed error from map-view servo angle before map integration pauses.",
+    )
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
@@ -197,6 +274,12 @@ def main():
         type=float,
         default=2.5,
         help="Max change rate of turn command (command units per second)",
+    )
+    parser.add_argument(
+        "--drive-direct-lookahead-cells",
+        type=int,
+        default=24,
+        help="When Direct Nav is enabled, target the farthest visible path cell up to this many cells ahead.",
     )
     parser.add_argument("--drive-rate-hz", type=float, default=10.0, help="Drive command rate (Hz)")
     parser.add_argument(
@@ -435,6 +518,8 @@ def main():
     tracking_pose_ok = False
     tracking_prev_ok = False
     tracking_loss_warned = False
+    have_valid_tracking_pose = False
+    tracking_recover_stable_count = 0
     pose = None
     if args.tracking:
         tracking_enabled, pose = zed_utils.enable_tracking(
@@ -613,6 +698,97 @@ def main():
     def zed_x_from_map(x):
         return -float(x)
 
+    camera_mount_yaw_deg = args.camera_mount_yaw_deg
+    if camera_mount_yaw_deg is None:
+        camera_mount_yaw_deg = 180.0 if args.camera_mount == "rear" else 0.0
+
+    camera_forward_offset_m = args.camera_forward_offset_m
+    if camera_forward_offset_m is None:
+        # Default mount presets place the camera on the leading edge of the
+        # rover footprint so planning starts from the rover body center, not
+        # from the camera lens itself.
+        camera_forward_offset_m = (
+            -0.5 * float(args.rover_size_m)
+            if args.camera_mount == "rear"
+            else 0.5 * float(args.rover_size_m)
+        )
+    camera_right_offset_m = float(args.camera_right_offset_m)
+
+    def angle_error_deg(angle_a, angle_b):
+        err = float(angle_a) - float(angle_b)
+        while err > 180.0:
+            err -= 360.0
+        while err < -180.0:
+            err += 360.0
+        return err
+
+    def camera_mount_axes(yaw_deg):
+        yaw_rad = math.radians(float(yaw_deg))
+        robot_forward_cam = np.array(
+            [math.sin(yaw_rad), 0.0, math.cos(yaw_rad)],
+            dtype=np.float32,
+        )
+        robot_right_cam = np.array(
+            [math.cos(yaw_rad), 0.0, -math.sin(yaw_rad)],
+            dtype=np.float32,
+        )
+        close_obstacle_escape_sign = -1.0 if math.cos(yaw_rad) >= 0.0 else 1.0
+        return robot_forward_cam, robot_right_cam, close_obstacle_escape_sign
+
+    servo_angle_deg = float(args.camera_map_angle_deg if args.camera_servo_track else camera_mount_yaw_deg)
+    servo_target_angle_deg = float(servo_angle_deg)
+    servo_command_angle_deg = float(servo_angle_deg)
+    servo_settled = True
+    servo_turning = False
+    servo_map_view = True
+    servo_deposit_view = False
+    servo_manual_override = False
+
+    def current_camera_mount_yaw_deg():
+        return float(servo_angle_deg if args.camera_servo_track else camera_mount_yaw_deg)
+
+    def rover_pose_from_camera(R_world_cam, camera_pos_world, mount_yaw_deg=None):
+        if mount_yaw_deg is None:
+            mount_yaw_deg = current_camera_mount_yaw_deg()
+        robot_forward_cam, robot_right_cam, _ = camera_mount_axes(mount_yaw_deg)
+        rover_forward_world = (R_world_cam @ robot_forward_cam.reshape(3, 1)).reshape(3,)
+        rover_right_world = (R_world_cam @ robot_right_cam.reshape(3, 1)).reshape(3,)
+        if args.drive_heading_flip:
+            rover_forward_world = -rover_forward_world
+            rover_right_world = -rover_right_world
+        rover_pos_world = (
+            np.array(camera_pos_world, dtype=np.float32)
+            - rover_forward_world * float(camera_forward_offset_m)
+            - rover_right_world * float(camera_right_offset_m)
+        )
+        return rover_pos_world, rover_forward_world, rover_right_world
+
+    def world_forward_from_rotation(R_world_cam):
+        forward = (np.array(R_world_cam, dtype=np.float32) @ np.array([0.0, 0.0, 1.0], dtype=np.float32)).reshape(3,)
+        norm = float(np.linalg.norm(forward))
+        if norm <= 1e-6:
+            return np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        return forward / norm
+
+    def angle_between_vec_deg(vec_a, vec_b):
+        a = np.array(vec_a, dtype=np.float32).reshape(3,)
+        b = np.array(vec_b, dtype=np.float32).reshape(3,)
+        an = float(np.linalg.norm(a))
+        bn = float(np.linalg.norm(b))
+        if an <= 1e-6 or bn <= 1e-6:
+            return 0.0
+        dot = float(np.clip(np.dot(a / an, b / bn), -1.0, 1.0))
+        return float(np.degrees(np.arccos(dot)))
+
+    print(
+        "Camera mount: "
+        f"{args.camera_mount} yaw={float(camera_mount_yaw_deg):+.1f}deg "
+        f"forward_offset={float(camera_forward_offset_m):+.2f}m "
+        f"right_offset={float(camera_right_offset_m):+.2f}m "
+        f"servo_track={'on' if args.camera_servo_track else 'off'} "
+        f"heading_flip={'on' if args.drive_heading_flip else 'off'}"
+    )
+
     if args.map_load and os.path.exists(args.map_save_path):
         try:
             ok, msg = occ_map.load(args.map_save_path)
@@ -632,6 +808,7 @@ def main():
         "deposit_boundary_inset_m": float(os.getenv(
             "MINING_DEPOSIT_BOUNDARY_INSET_M", "0.05"
         )),
+        "continuous_runs":      os.getenv("MINING_CONTINUOUS_RUNS", "1"),
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
         "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
         "rover_size_m":          float(args.rover_size_m),
@@ -651,6 +828,11 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", bool(emergency_stop))
+            sd.putString("Jetson/MiningState", mining.state.value)
+            sd.putBoolean("Jetson/ExcavatorEnabled", False)
+            sd.putBoolean("Jetson/ConveyorEnabled", False)
+            sd.putNumber("Jetson/ServoCommandAngleDeg", float(args.camera_map_angle_deg))
+            sd.putNumber("Jetson/ServoCommandSeq", 0.0)
             print(
                 f"Drive enabled: NetworkTables to {args.roborio_ip} "
                 f"main_rover_mode={'on' if args.main_rover_mode else 'off'}"
@@ -661,6 +843,8 @@ def main():
     last_path_cells = None
     last_start = None
     last_goal = None
+    path_plan_mode = "none"
+    mining_goal_active = False
     map_window_ready = False
     status_window_ready = False
     status_button_rects = {}
@@ -703,6 +887,7 @@ def main():
     status_cmd_duration = 0.0
     status_target_cell = None
     status_target_world = None
+    direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
@@ -733,6 +918,8 @@ def main():
     erase_safe_mode = False      # when True, map clicks erase painted cells
     paint_obstacle_mode = False  # when True, map clicks paint cells as obstacles
     paint_brush_radius = 2       # radius in cells for all brush tools (1–15)
+    lock_green_applied = False
+    lock_green_locked_count = 0
     last_map_command_seq = 0
     last_map_ui_state_write = 0.0
 
@@ -913,6 +1100,7 @@ def main():
             auto_mining.MiningState.DEPOSITING,
             auto_mining.MiningState.DRAW_EXCAV,
             auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
         )
 
     def set_brush_tool(tool_name):
@@ -932,10 +1120,15 @@ def main():
             return "draw_excav_zone"
         if mining.state == auto_mining.MiningState.DRAW_DEPOSIT:
             return "draw_deposit_zone"
+        if mining.state == auto_mining.MiningState.PICK_DIG_START:
+            return "pick_dig_start"
         return None
 
     def clear_manual_paint():
+        nonlocal lock_green_applied, lock_green_locked_count
         occ_map.painted_free[:] = False
+        lock_green_applied = False
+        lock_green_locked_count = 0
         print("Cleared all painted-safe cells")
 
     def set_main_rover_mode(enabled):
@@ -945,8 +1138,61 @@ def main():
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
+    def refresh_camera_servo_state():
+        nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
+        nonlocal servo_settled, servo_turning, servo_map_view, servo_deposit_view
+        nonlocal servo_manual_override
+        if (not args.camera_servo_track) or (sd is None):
+            servo_angle_deg = float(camera_mount_yaw_deg)
+            servo_target_angle_deg = float(camera_mount_yaw_deg)
+            servo_command_angle_deg = float(camera_mount_yaw_deg)
+            servo_settled = True
+            servo_turning = False
+            servo_map_view = True
+            servo_deposit_view = False
+            servo_manual_override = False
+            return
+
+        servo_angle_deg = float(sd.getNumber("Jetson/ServoAngleDeg", servo_angle_deg))
+        servo_target_angle_deg = float(sd.getNumber("Jetson/ServoTargetAngleDeg", servo_target_angle_deg))
+        servo_command_angle_deg = float(sd.getNumber("Jetson/ServoCommandAngleDeg", servo_command_angle_deg))
+        servo_settled = bool(sd.getBoolean("Jetson/ServoSettled", True))
+        servo_manual_override = bool(sd.getBoolean("Jetson/ServoManualOverride", False))
+        servo_manual_moving = bool(sd.getBoolean("Jetson/ServoManualMoving", False))
+        servo_turning = (not servo_settled) or servo_manual_moving
+        servo_map_view = abs(angle_error_deg(servo_angle_deg, args.camera_map_angle_deg)) <= float(args.camera_servo_map_tol_deg)
+        servo_deposit_view = abs(angle_error_deg(servo_angle_deg, args.camera_deposit_angle_deg)) <= float(args.camera_servo_map_tol_deg)
+
+    def request_camera_servo_angle(angle_deg, reason="manual"):
+        nonlocal servo_command_angle_deg
+        if (not args.camera_servo_track) or (sd is None):
+            return False
+        angle_deg = max(0.0, min(180.0, float(angle_deg)))
+        if abs(servo_command_angle_deg - angle_deg) < 0.5:
+            return False
+        next_seq = float(sd.getNumber("Jetson/ServoCommandSeq", 0.0)) + 1.0
+        sd.putNumber("Jetson/ServoCommandAngleDeg", angle_deg)
+        sd.putNumber("Jetson/ServoCommandSeq", next_seq)
+        servo_command_angle_deg = angle_deg
+        print(f"Camera servo -> {angle_deg:.0f} deg ({reason})")
+        return True
+
+    def request_camera_map_view(reason="manual"):
+        return request_camera_servo_angle(args.camera_map_angle_deg, reason)
+
+    def request_camera_deposit_view(reason="manual"):
+        return request_camera_servo_angle(args.camera_deposit_angle_deg, reason)
+
+    def toggle_camera_view():
+        refresh_camera_servo_state()
+        target_is_map = abs(angle_error_deg(servo_command_angle_deg, args.camera_map_angle_deg)) <= 2.0
+        if servo_map_view or target_is_map:
+            request_camera_deposit_view("button")
+        else:
+            request_camera_map_view("button")
+
     def lock_green_zones_permanent():
-        nonlocal last_save
+        nonlocal last_save, lock_green_applied, lock_green_locked_count
         strong_occ = occ_map.obstacle_mask(min_occ_count=3.0, min_occ_ratio=2.0, min_occ_advantage=1.0)
         green_mask = (
             (occ_map.free_counts >= 1.0)
@@ -958,6 +1204,8 @@ def main():
         if count <= 0:
             print("Lock Green: no green/safe cells to lock.")
             return
+        lock_green_applied = True
+        lock_green_locked_count = count
         occ_map.painted_free[green_mask] = True
         occ_map.occ_counts[green_mask] = 0.0
         occ_map.hole_counts[green_mask] = 0.0
@@ -978,17 +1226,23 @@ def main():
 
     def reset_map_memory():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal path_plan_mode
         nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
+        nonlocal lock_green_applied, lock_green_locked_count, mining_goal_active
         occ_map.free_counts[:] = 0.0
         occ_map.occ_counts[:] = 0.0
         occ_map.hole_counts[:] = 0.0
         occ_map.painted_free[:] = False
+        lock_green_applied = False
+        lock_green_locked_count = 0
         goal_cell = None
         path_cells = None
         last_path_cells = None
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        path_plan_mode = "none"
+        mining_goal_active = False
         emergency_stop = True
         reset_map_confirm = False
         landmark_memory = {"version": 1, "landmarks": []}
@@ -1001,8 +1255,121 @@ def main():
         save_landmark_memory(force=True)
         print("Map reset: occupancy, painted cells, path, goal, and AI landmarks cleared.")
 
+    def clear_navigation_goal():
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal path_plan_mode, mining_goal_active, status_target_cell, status_target_world
+        goal_cell = None
+        path_cells = None
+        last_path_cells = None
+        last_start = None
+        last_goal = None
+        last_path_plan_time = 0.0
+        path_plan_mode = "none"
+        mining_goal_active = False
+        status_target_cell = None
+        status_target_world = None
+
+    def set_direct_nav_enabled(enabled, source="button"):
+        nonlocal direct_nav_enabled
+        enabled = bool(enabled)
+        if direct_nav_enabled == enabled:
+            return
+        direct_nav_enabled = enabled
+        state = "ENABLED" if direct_nav_enabled else "DISABLED"
+        detail = (
+            "straighter visible targets"
+            if direct_nav_enabled
+            else "normal short-lookahead path following"
+        )
+        print(f"Direct Nav {state} via {source} ({detail}).")
+        publish_map_ui_state(force=True)
+
+    def build_direct_nav_obstacle_mask(rover_rc):
+        obs = occ_map.obstacle_mask(
+            min_occ_count=args.path_avoid_occ_min,
+            min_occ_ratio=args.path_avoid_occ_ratio,
+            min_occ_advantage=args.path_avoid_occ_advantage,
+        )
+        if smooth_map_enabled and np.any(obs):
+            kernel = np.ones((3, 3), np.uint8)
+            obs = cv2.morphologyEx(obs.astype(np.uint8), cv2.MORPH_OPEN, kernel).astype(bool)
+        radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
+        if radius_cells > 0 and np.any(obs):
+            obs = map_utils.inflate_mask(obs, radius_cells)
+        clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+        if clear_cells > 0:
+            obs = map_utils.clear_mask_circle(obs, rover_rc, clear_cells)
+        return obs
+
+    def iter_grid_line_cells(start_rc, end_rc):
+        r0, c0 = int(start_rc[0]), int(start_rc[1])
+        r1, c1 = int(end_rc[0]), int(end_rc[1])
+        dr = abs(r1 - r0)
+        dc = abs(c1 - c0)
+        sr = 1 if r0 < r1 else -1
+        sc = 1 if c0 < c1 else -1
+        err = dc - dr
+
+        while True:
+            yield r0, c0
+            if r0 == r1 and c0 == c1:
+                break
+            e2 = err * 2
+            if e2 > -dr:
+                err -= dr
+                c0 += sc
+            if e2 < dc:
+                err += dc
+                r0 += sr
+
+    def grid_segment_is_clear(start_rc, end_rc, obstacle_mask):
+        if start_rc is None or end_rc is None or obstacle_mask is None:
+            return False
+        h, w = obstacle_mask.shape
+        prev = None
+        for rr, cc in iter_grid_line_cells(start_rc, end_rc):
+            if rr < 0 or rr >= h or cc < 0 or cc >= w:
+                return False
+            if obstacle_mask[rr, cc]:
+                return False
+            if prev is not None:
+                pr, pc = prev
+                if abs(rr - pr) == 1 and abs(cc - pc) == 1:
+                    if obstacle_mask[pr, cc] or obstacle_mask[rr, pc]:
+                        return False
+            prev = (rr, cc)
+        return True
+
+    def pick_drive_target(draw_path, rover_rc, goal_rc):
+        if goal_rc is None:
+            return None
+
+        direct_obs = None
+        if direct_nav_enabled and rover_rc is not None:
+            direct_obs = build_direct_nav_obstacle_mask(rover_rc)
+            if grid_segment_is_clear(rover_rc, goal_rc, direct_obs):
+                return goal_rc
+
+        if draw_path is not None and len(draw_path) > 0:
+            wp_index = min(5, len(draw_path) - 1)
+            if direct_nav_enabled and rover_rc is not None and len(draw_path) > 1:
+                max_index = min(
+                    len(draw_path) - 1,
+                    max(wp_index, int(max(1, args.drive_direct_lookahead_cells))),
+                )
+                for idx in range(max_index, wp_index, -1):
+                    if grid_segment_is_clear(rover_rc, draw_path[idx], direct_obs):
+                        return draw_path[idx]
+            return draw_path[wp_index]
+
+        if direct_nav_enabled and rover_rc is not None and grid_segment_is_clear(rover_rc, goal_rc, direct_obs):
+            return goal_rc
+
+        return None
+
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
+        refresh_camera_servo_state()
         now = time.time()
         if (not force) and (now - last_map_ui_state_write) < 0.20:
             return
@@ -1051,9 +1418,9 @@ def main():
                 },
                 {
                     "id": "lock_green",
-                    "label": "Lock Green",
+                    "label": "Green Locked" if lock_green_applied else "Lock Green",
                     "command": "lock_green",
-                    "active": False,
+                    "active": bool(lock_green_applied),
                     "enabled": True,
                 },
                 {
@@ -1085,11 +1452,29 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "direct_nav",
+                    "label": "Direct Nav",
+                    "command": "direct_nav",
+                    "active": bool(direct_nav_enabled),
+                    "enabled": True,
+                },
+                {
                     "id": "main_rover_mode",
                     "label": "Main Rover Mode",
                     "command": "main_rover_mode",
                     "active": bool(args.main_rover_mode),
                     "enabled": True,
+                },
+                {
+                    "id": "camera_view",
+                    "label": (
+                        "Camera: Deposit"
+                        if (servo_deposit_view or abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0)
+                        else "Camera: Map"
+                    ),
+                    "command": "camera_view",
+                    "active": bool(servo_deposit_view),
+                    "enabled": bool(args.camera_servo_track and sd is not None),
                 },
                 {
                     "id": "draw_excav_zone",
@@ -1106,6 +1491,13 @@ def main():
                     "enabled": bool(button_enabled),
                 },
                 {
+                    "id": "pick_dig_start",
+                    "label": "Pick Dig Start",
+                    "command": "pick_dig_start",
+                    "active": mining.state == auto_mining.MiningState.PICK_DIG_START
+                              or mining.preferred_start_rc is not None,
+                    "enabled": bool((not button_enabled and mining.state == auto_mining.MiningState.PICK_DIG_START)
+                                    or (button_enabled and bool(mining.excav_corners_rc))),
                     "id": "brush_minus",
                     "label": "Brush -",
                     "command": "brush_minus",
@@ -1174,6 +1566,7 @@ def main():
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
+        nonlocal path_plan_mode, mining_goal_active
         if event == cv2.EVENT_RBUTTONDOWN:
             emergency_stop = True
             print("EMERGENCY STOP")
@@ -1186,6 +1579,13 @@ def main():
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
             return
+        if event == cv2.EVENT_LBUTTONDOWN and mining.state in (
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
+        ):
+            if mining.consume_click(row, col, occ_map):
+                return
         # Helper — compute brush bounding box.
         def _brush(r, c):
             return (
@@ -1228,6 +1628,8 @@ def main():
         last_start = None
         last_goal = None
         last_path_plan_time = 0.0
+        path_plan_mode = "none"
+        mining_goal_active = False
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
 
@@ -1235,6 +1637,7 @@ def main():
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
         nonlocal reset_map_confirm
+        nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
         if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
             try:
                 wheel_delta = cv2.getMouseWheelDelta(flags)
@@ -1321,10 +1724,19 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 if mining_running:
-                    mining.handle_key(ord("t"))   # abort current run
+                    mining.abort()
+                    clear_navigation_goal()
+                    manual_mode = False
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
                     print("Auto Run: ABORTED via button")
                 else:
-                    mining.handle_key(ord("r"))   # start run
+                    clear_navigation_goal()
+                    emergency_stop = False
+                    manual_mode = False
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                    mining.start_run()
                     print("Auto Run: START requested via button")
                 return
         rect = status_button_rects.get("localize_scan")
@@ -1335,6 +1747,12 @@ def main():
                     stop_localization_scan("button")
                 else:
                     start_localization_scan("button")
+                return
+        rect = status_button_rects.get("direct_nav")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_direct_nav_enabled(not direct_nav_enabled, "button")
                 return
         rect = status_button_rects.get("reset_map")
         if rect is not None:
@@ -1355,17 +1773,33 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_main_rover_mode(not args.main_rover_mode)
                 return
+        rect = status_button_rects.get("camera_view")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                toggle_camera_view()
+                return
         rect = status_button_rects.get("excav")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                mining.handle_key(ord("e"))
+                set_brush_tool(None)
+                mining.start_draw_excavation()
                 return
         rect = status_button_rects.get("deposit")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                mining.handle_key(ord("d"))
+                set_brush_tool(None)
+                mining.start_draw_deposit()
+                return
+        rect = status_button_rects.get("pick_dig_start")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if not mining_running and mining.excav_corners_rc:
+                    set_brush_tool(None)
+                    mining.start_pick_dig_start()
                 return
         button_enabled = mining_buttons_enabled()
         if not button_enabled:
@@ -1497,13 +1931,24 @@ def main():
                 stop_localization_scan("external command")
             else:
                 start_localization_scan("external command")
+        elif action == "direct_nav":
+            set_direct_nav_enabled(not direct_nav_enabled, "external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
+        elif action == "camera_view":
+            toggle_camera_view()
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
-                mining.handle_key(ord("e"))
+                set_brush_tool(None)
+                mining.start_draw_excavation()
         elif action == "draw_deposit_zone":
             if mining_buttons_enabled():
+                set_brush_tool(None)
+                mining.start_draw_deposit()
+        elif action == "pick_dig_start":
+            if mining_buttons_enabled() and mining.excav_corners_rc:
+                set_brush_tool(None)
+                mining.start_pick_dig_start()
                 mining.handle_key(ord("d"))
         elif action == "brush_minus":
             paint_brush_radius = max(1, paint_brush_radius - 1)
@@ -1538,10 +1983,16 @@ def main():
             nonlocal nt_last_auto_push
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
+            mining_state_value = mining.state.value
+            excavator_enabled = enabled and mining.state == auto_mining.MiningState.DIGGING
+            conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
             sd.putBoolean("Jetson/AutomationEnabled", enabled)
+            sd.putString("Jetson/MiningState", mining_state_value)
+            sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
+            sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
             # Robot-side code may scale command by these keys.
             if enabled:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
@@ -1598,6 +2049,13 @@ def main():
                     f"dur={float(duration):.2f} pulse={pulse_sec:.2f}"
                 )
                 last_drive_debug_time = now
+
+    def mix_ds_drive(fwd, turn):
+        if not args.ds_joystick:
+            return float(fwd), float(turn)
+        mixed_fwd = max(-1.0, min(1.0, float(fwd) + float(ds_joystick_fwd)))
+        mixed_turn = max(-1.0, min(1.0, float(turn) + float(ds_joystick_turn)))
+        return mixed_fwd, mixed_turn
 
     def nt_connections_summary():
         if not HAS_NT:
@@ -1684,7 +2142,12 @@ def main():
             mode_color = (180, 180, 180)
 
         put_line("ZED DRIVE STATUS", 30, (255, 255, 255), 0.72)
-        put_line(f"Mode: {mode_label}", 62, mode_color, 0.62)
+        put_line(
+            f"Mode: {mode_label} | Direct Nav: {'ON' if direct_nav_enabled else 'OFF'}",
+            62,
+            mode_color,
+            0.56,
+        )
         put_line(f"E-stop: {'ON' if emergency_stop else 'OFF'}", 88, (0, 80, 255) if emergency_stop else (170, 255, 170))
         _nt_status_color = (170, 255, 170) if nt_connected_cached else (0, 60, 255)
         _nt_watchdog_txt = " [WATCHDOG TRIPPED]" if nt_watchdog_tripped else ""
@@ -1717,64 +2180,82 @@ def main():
             (255, 220, 170) if localization_scan_active else (190, 190, 190),
             0.45,
         )
+        servo_state_txt = "OFF"
+        servo_state_color = (190, 190, 190)
+        if args.camera_servo_track:
+            if servo_turning:
+                servo_state_txt = "TURNING"
+                servo_state_color = (0, 200, 255)
+            elif servo_deposit_view:
+                servo_state_txt = "DEPOSIT"
+                servo_state_color = (255, 200, 120)
+            else:
+                servo_state_txt = "MAP"
+                servo_state_color = (170, 255, 170)
+        put_line(
+            f"Camera servo: {servo_state_txt} | angle {servo_angle_deg:.0f} | target {servo_command_angle_deg:.0f}",
+            186,
+            servo_state_color,
+            0.46,
+        )
 
         excav_set = bool(mining.excav_corners_rc)
         deposit_set = bool(mining.deposit_corners_rc)
-        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 194, (170, 255, 170) if excav_set else (190, 190, 190))
-        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 218, (170, 255, 170) if deposit_set else (190, 190, 190))
-        put_line("Click a button below, then define 4 corners on the map.", 242, (210, 210, 210), 0.48)
+        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 210, (170, 255, 170) if excav_set else (190, 190, 190))
+        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 234, (170, 255, 170) if deposit_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", 258, (210, 210, 210), 0.48)
 
         if goal_cell is None:
-            put_line("Goal cell: none", 264, (190, 190, 190))
-            put_line("Goal world: none", 288, (190, 190, 190))
+            put_line("Goal cell: none", 280, (190, 190, 190))
+            put_line("Goal world: none", 304, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 264, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 280, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 288, (190, 190, 190))
+                put_line("Goal world: unavailable", 304, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 288, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 304, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 302, (190, 190, 190))
+            put_line("Active target: none", 318, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    302,
+                    318,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    302,
+                    318,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 326, (190, 190, 190))
+            put_line("Robot cell: unavailable", 342, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 326, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 342, (180, 255, 220))
 
-        put_line(f"Map zoom: x{map_scale_live}", 350, (220, 240, 255))
+        put_line(f"Map zoom: x{map_scale_live}", 366, (220, 240, 255))
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            374,
+            390,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 398)
-        draw_axis("Turn", status_cmd_turn, 420)
+        draw_axis("Forward", status_cmd_fwd, 414)
+        draw_axis("Turn", status_cmd_turn, 436)
 
         # --- Rover size input field (placed between axis bars and the zone buttons) ---
         cur_rover_ft = args.rover_size_m / 0.3048
         put_line(
             "Rover size (ft, square) — click field, type e.g. 2.5, press Enter",
-            424,
+            440,
             (170, 200, 230),
             0.44,
         )
-        input_rect = (16, 434, panel_w - 16, 474)
+        input_rect = (16, 450, panel_w - 16, 490)
         status_button_rects["map_size_input"] = input_rect
         border_color = (100, 220, 255) if map_size_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), (40, 40, 40), -1)
@@ -1793,18 +2274,14 @@ def main():
         )
         put_line(
             f"Current rover size: {cur_rover_ft:.2f} ft  ({args.rover_size_m:.3f} m)",
-            488,
+            504,
             (200, 240, 255),
             0.48,
         )
 
-        controls_top = 506
+        controls_top = 522
         controls_bottom = panel_h - 16
         controls_h = max(1, controls_bottom - controls_top)
-        content_h = 420
-        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
-        controls[:] = (28, 28, 28)
-
         button_h = 42
         button_w = 160
         gap = 20
@@ -1816,7 +2293,12 @@ def main():
         row3 = row2 + button_h + 10
         row4 = row3 + button_h + 10
         row5 = row4 + button_h + 10
-        slider_y = row5 + button_h + 20
+        row6 = row5 + button_h + 10
+        row7 = row6 + button_h + 10
+        slider_y = row7 + button_h + 20
+        content_h = slider_y + 72
+        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
+        controls[:] = (28, 28, 28)
 
         def put_control_line(text, y, color=(235, 235, 235), scale=0.48):
             cv2.putText(controls, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
@@ -1864,11 +2346,13 @@ def main():
         )
         excav_drawing = mining.state == auto_mining.MiningState.DRAW_EXCAV
         deposit_drawing = mining.state == auto_mining.MiningState.DRAW_DEPOSIT
+        picking_dig_start = mining.state == auto_mining.MiningState.PICK_DIG_START
         zone_buttons_enabled = not mining_running
         _mining_active = mining.state not in (
             auto_mining.MiningState.IDLE,
             auto_mining.MiningState.DRAW_EXCAV,
             auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
             auto_mining.MiningState.DONE,
             auto_mining.MiningState.ABORTED,
         )
@@ -1886,9 +2370,12 @@ def main():
         clear_paint_rect = (x2, row3, x2 + button_w, row3 + button_h)
         reset_map_rect = (16, row4, 16 + button_w, row4 + button_h)
         lock_green_rect = (x1, row4, x1 + button_w, row4 + button_h)
+        pick_dig_start_rect = (x2, row4, x2 + button_w, row4 + button_h)
         zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
+        camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
+        direct_nav_rect = (16, row7, panel_w - 16, row7 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -1910,7 +2397,19 @@ def main():
         draw_control_button(holes_rect, "Disable Holes", button_enabled)
         draw_control_button(clear_paint_rect, "Clear Paint", True)
         draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
-        draw_control_button(lock_green_rect, "Lock Green", True, False, (0, 160, 80), (80, 255, 140))
+        lock_label = "Green Locked" if lock_green_applied else "Lock Green"
+        draw_control_button(lock_green_rect, lock_label, True, lock_green_applied, (0, 160, 80), (80, 255, 140))
+        pick_label = "Picking Start..." if picking_dig_start else (
+            "Dig Start Set" if mining.preferred_start_rc is not None else "Pick Dig Start"
+        )
+        draw_control_button(
+            pick_dig_start_rect,
+            pick_label,
+            zone_buttons_enabled and excav_set,
+            picking_dig_start or mining.preferred_start_rc is not None,
+            (0, 170, 70),
+            (100, 255, 160),
+        )
         draw_control_button(zoom_in_rect, "+ Zoom", True)
         draw_control_button(zoom_out_rect, "- Zoom", True)
         draw_control_button(
@@ -1920,6 +2419,27 @@ def main():
             args.main_rover_mode,
             (0, 120, 200),
             (80, 220, 255),
+        )
+        camera_label = "Camera: Deposit 0" if (
+            servo_deposit_view
+            or abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0
+        ) else "Camera: Map 180"
+        camera_active = servo_deposit_view or (servo_turning and abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0)
+        draw_control_button(
+            camera_view_rect,
+            camera_label,
+            bool(args.camera_servo_track and sd is not None),
+            camera_active,
+            (150, 90, 0),
+            (255, 220, 120),
+        )
+        draw_control_button(
+            direct_nav_rect,
+            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
+            True,
+            direct_nav_enabled,
+            (0, 150, 90),
+            (100, 255, 180),
         )
 
         btn_sm = 36
@@ -1952,6 +2472,7 @@ def main():
         for name, rect in (
             ("auto_run", auto_run_rect),
             ("localize_scan", localize_rect),
+            ("direct_nav", direct_nav_rect),
             ("excav", excav_rect),
             ("deposit", deposit_rect),
             ("whole", whole_rect),
@@ -1963,9 +2484,11 @@ def main():
             ("clear_paint", clear_paint_rect),
             ("reset_map", reset_map_rect),
             ("lock_green", lock_green_rect),
+            ("pick_dig_start", pick_dig_start_rect),
             ("zoom_in", zoom_in_rect),
             ("zoom_out", zoom_out_rect),
             ("main_rover_mode", main_rover_rect),
+            ("camera_view", camera_view_rect),
             ("brush_minus", brush_minus_rect),
             ("brush_plus", brush_plus_rect),
             ("brush_slider", brush_slider_rect),
@@ -2036,21 +2559,58 @@ def main():
                 R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
-                if tracking_pose_ok and tracking_prev_ok and float(args.tracking_max_pose_jump_m) > 0.0:
-                    pose_jump_m = float(np.linalg.norm(np.array(t_world_cam, dtype=np.float32) - last_valid_t_world_cam))
-                    if pose_jump_m > float(args.tracking_max_pose_jump_m):
+                if tracking_pose_ok and have_valid_tracking_pose:
+                    pose_jump_m = float(
+                        np.linalg.norm(np.array(t_world_cam, dtype=np.float32) - last_valid_t_world_cam)
+                    )
+                    heading_jump_deg = angle_between_vec_deg(
+                        world_forward_from_rotation(R_world_cam),
+                        world_forward_from_rotation(last_valid_R_world_cam),
+                    )
+                    jump_reason = None
+                    if (
+                        float(args.tracking_max_pose_jump_m) > 0.0
+                        and pose_jump_m > float(args.tracking_max_pose_jump_m)
+                    ):
+                        jump_reason = (
+                            f"pose jump {pose_jump_m:.2f}m > {float(args.tracking_max_pose_jump_m):.2f}m"
+                        )
+                    elif (
+                        float(args.tracking_max_heading_jump_deg) > 0.0
+                        and heading_jump_deg > float(args.tracking_max_heading_jump_deg)
+                    ):
+                        jump_reason = (
+                            f"heading jump {heading_jump_deg:.1f}deg > "
+                            f"{float(args.tracking_max_heading_jump_deg):.1f}deg"
+                        )
+                    if jump_reason is not None:
                         tracking_pose_ok = False
+                        tracking_recover_stable_count = 0
                         R_world_cam = last_valid_R_world_cam
                         t_world_cam = last_valid_t_world_cam
                         if not localization_scan_active:
-                            start_localization_scan(f"pose jump {pose_jump_m:.2f}m")
-                        print(
-                            f"Tracking pose jump rejected ({pose_jump_m:.2f}m > "
-                            f"{float(args.tracking_max_pose_jump_m):.2f}m); holding last pose."
-                        )
+                            start_localization_scan(jump_reason)
+                        print(f"Tracking jump rejected ({jump_reason}); holding last pose.")
+                if tracking_pose_ok and have_valid_tracking_pose and not tracking_prev_ok:
+                    tracking_recover_stable_count += 1
+                    recover_needed = max(1, int(args.tracking_recover_stable_frames))
+                    if tracking_recover_stable_count < recover_needed:
+                        tracking_pose_ok = False
+                        R_world_cam = last_valid_R_world_cam
+                        t_world_cam = last_valid_t_world_cam
+                        if tracking_recover_stable_count == 1:
+                            print(
+                                "Tracking candidate recovered; waiting for "
+                                f"{recover_needed} stable frame(s) before relocking."
+                            )
+                    else:
+                        print("Tracking recovered: relocalized/locked.")
+                elif not tracking_pose_ok:
+                    tracking_recover_stable_count = 0
                 if tracking_pose_ok:
                     last_valid_R_world_cam = R_world_cam
                     last_valid_t_world_cam = t_world_cam
+                    have_valid_tracking_pose = True
                     tracking_loss_warned = False
                     if not args.complex and not map_origin_set:
                         map_origin_t = np.array(t_world_cam, dtype=np.float32)
@@ -2061,13 +2621,12 @@ def main():
                         )
                 else:
                     # Hold last known pose and pause map integration until tracking recovers.
-                    R_world_cam = last_valid_R_world_cam
-                    t_world_cam = last_valid_t_world_cam
+                    if have_valid_tracking_pose:
+                        R_world_cam = last_valid_R_world_cam
+                        t_world_cam = last_valid_t_world_cam
                     if not tracking_loss_warned:
                         print("Tracking lost: holding last pose and pausing map integration.")
                         tracking_loss_warned = True
-                if tracking_pose_ok and not tracking_prev_ok:
-                    print("Tracking recovered: relocalized/locked.")
                 tracking_prev_ok = tracking_pose_ok
             else:
                 R_world_cam = np.eye(3, dtype=np.float32)
@@ -2075,6 +2634,18 @@ def main():
                 tracking_pose_ok = True
                 tracking_prev_ok = True
             update_localization_scan_state()
+            refresh_camera_servo_state()
+            auto_camera_map_required = localization_scan_active or goal_cell is not None or mining.state in (
+                auto_mining.MiningState.PLAN_SWEEP,
+                auto_mining.MiningState.NAVIGATE_DIG,
+                auto_mining.MiningState.DIGGING,
+                auto_mining.MiningState.BACKUP,
+                auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                auto_mining.MiningState.DEPOSITING,
+            )
+            if auto_camera_map_required:
+                request_camera_map_view("auto navigation")
+                refresh_camera_servo_state()
 
             # Retrieve point cloud
             zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
@@ -2273,14 +2844,31 @@ def main():
                 map_vis = None
                 heatmap_vis = None
                 cam_row_col = None
+                rover_row_col = None
+                camera_map_pause_reason = ""
+                current_mount_yaw_deg = current_camera_mount_yaw_deg()
+                _, _, close_obstacle_escape_sign = camera_mount_axes(current_mount_yaw_deg)
                 # Never integrate new points while tracking is lost or a pose
                 # jump was rejected; otherwise one bad pose can drag the map.
                 map_integration_ok = (not tracking_enabled) or tracking_pose_ok
+                if args.camera_servo_track and (servo_turning or not servo_map_view):
+                    map_integration_ok = False
+                    if servo_turning:
+                        camera_map_pause_reason = "CAMERA TURNING"
+                    else:
+                        camera_map_pause_reason = "CAMERA DEPOSIT VIEW"
                 # Compute map-local translation for simple mode
                 if not args.complex and map_origin_set:
                     t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
                 else:
                     t_map = np.array(t_world_cam, dtype=np.float32)
+                rover_pos_map, rover_forward_world, rover_right_world = rover_pose_from_camera(
+                    R_world_cam,
+                    t_map,
+                    current_mount_yaw_deg,
+                )
+                cam_row_col = map_world_to_grid(t_map[0], t_map[2])
+                rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
                 if xyz.size > 0:
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
@@ -2360,15 +2948,22 @@ def main():
                         map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
                         map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
                     # Draw camera position marker (blue square).
-                    cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                     # Mining tick: may override goal_cell or supply a direct drive command.
                     _mine_goal, _mine_drive, _mine_status = mining.tick(
-                        cam_row_col, occ_map, time.time()
+                        rover_row_col, occ_map, time.time()
                     )
                     if _mine_goal is not None and _mine_goal != goal_cell:
                         goal_cell = _mine_goal
                         path_cells = None
+                        path_plan_mode = "none"
                         last_path_plan_time = 0.0
+                        mining_goal_active = True
+                    elif mining_goal_active and mining.state in (
+                        auto_mining.MiningState.IDLE,
+                        auto_mining.MiningState.DONE,
+                        auto_mining.MiningState.ABORTED,
+                    ):
+                        clear_navigation_goal()
                     if cam_row_col is not None:
                         r0, c0 = cam_row_col
                         half = max(1, int(args.map_camera_size) // 2)
@@ -2377,13 +2972,14 @@ def main():
                         c1 = max(0, c0 - half)
                         c2 = min(occ_map.grid_w, c0 + half + 1)
                         map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
+                    if rover_row_col is not None:
+                        r0, c0 = rover_row_col
+                        cv2.circle(map_vis, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
                         heading_ang = None
                         if tracking_enabled:
-                            forward = R_world_cam[:, 2]
+                            forward = rover_forward_world
                             fx, fz = map_x_from_zed(forward[0]), float(forward[2])
                             heading_ang = np.arctan2(fz, fx)
-                            if args.drive_heading_flip:
-                                heading_ang += np.pi
                         # Draw rover footprint (orange outline), scaled by rover size.
                         rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
                         if heading_ang is None:
@@ -2429,38 +3025,80 @@ def main():
                             end_pt = (int(c0 + np.cos(ang) * size), int(r0 - np.sin(ang) * size))
                             cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
                     if (not map_integration_ok) and HAS_CV2:
+                        pause_text = "TRACKING LOST - MAP PAUSED"
+                        pause_color = (0, 140, 255)
+                        if camera_map_pause_reason:
+                            pause_text = f"{camera_map_pause_reason} - MAP PAUSED"
+                            pause_color = (0, 200, 255)
                         cv2.putText(
                             map_vis,
-                            "TRACKING LOST - MAP PAUSED",
+                            pause_text,
                             (8, 20),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
-                            (0, 140, 255),
+                            pause_color,
                             1,
                             cv2.LINE_AA,
                         )
 
                     # Compute/update path to goal (avoid red obstacles only).
-                    if goal_cell is not None and cam_row_col is not None:
+                    if goal_cell is not None and rover_row_col is not None:
                         now = time.time()
                         should_replan = (
-                            cam_row_col != last_start
+                            rover_row_col != last_start
                             or goal_cell != last_goal
                             or path_cells is None
                             or (now - last_path_plan_time) >= args.path_replan_sec
                         )
                         if should_replan:
-                            obs = occ_map.obstacle_mask(
+                            base_obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
                                 min_occ_advantage=args.path_avoid_occ_advantage,
                             )
                             # Smooth mode: remove isolated noise pixels (morphological opening)
-                            if smooth_map_enabled and np.any(obs):
+                            if smooth_map_enabled and np.any(base_obs):
                                 kernel = np.ones((3, 3), np.uint8)
-                                obs = cv2.morphologyEx(
-                                    obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                base_obs = cv2.morphologyEx(
+                                    base_obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
                                 ).astype(bool)
+                            radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
+
+                            def _try_plan(obs_src, inflate_radius, soft_clearance, search_sec):
+                                obs_try = obs_src.copy()
+                                if inflate_radius > 0 and np.any(obs_try):
+                                    obs_try = map_utils.inflate_mask(obs_try, inflate_radius)
+
+                                path_cost = np.zeros(obs_try.shape, dtype=np.float32)
+                                if args.block_unknown:
+                                    known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
+                                    unknown = np.logical_not(known)
+                                    if np.any(unknown):
+                                        path_cost[unknown] += 0.75
+
+                                if np.any(obs_try) and soft_clearance > 0:
+                                    for ring in range(soft_clearance, 0, -1):
+                                        near = map_utils.inflate_mask(obs_try, ring)
+                                        cost = 0.12 * float(soft_clearance - ring + 1)
+                                        path_cost[near] = np.maximum(path_cost[near], cost)
+
+                                path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
+
+                                clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
+                                if clear_cells > 0:
+                                    obs_try = map_utils.clear_mask_circle(obs_try, rover_row_col, clear_cells)
+                                    keep_cost = map_utils.clear_mask_circle(
+                                        np.ones(obs_try.shape, dtype=bool), rover_row_col, clear_cells
+                                    )
+                                    path_cost[~keep_cost] = 0.0
+
+                                return map_utils.astar_path(
+                                    rover_row_col,
+                                    goal_cell,
+                                    obs_try,
+                                    connectivity=args.path_connectivity,
+                                    traversal_cost_map=path_cost,
+                                    max_search_sec=search_sec,
                             # Build a soft safety-cost field so A* prefers corridor centers:
                             # farther from obstacles = lower cost (safer and usually smoother/faster).
                             path_cost = np.zeros(obs.shape, dtype=np.float32)
@@ -2491,15 +3129,50 @@ def main():
                                 keep_cost = map_utils.clear_mask_circle(
                                     np.ones(obs.shape, dtype=bool), cam_row_col, clear_cells
                                 )
-                                path_cost[~keep_cost] = 0.0
-                            path_cells = map_utils.astar_path(
-                                cam_row_col,
-                                goal_cell,
-                                obs,
-                                connectivity=args.path_connectivity,
-                                traversal_cost_map=path_cost,
-                                max_search_sec=args.path_max_search_sec,
-                            )
+
+                            attempts = [
+                                (
+                                    "normal",
+                                    base_obs,
+                                    max(0, radius_cells),
+                                    max(1, int(args.path_soft_clearance_cells)),
+                                    float(args.path_max_search_sec),
+                                ),
+                            ]
+                            if args.path_relax_on_fail:
+                                relaxed_radius = max(0, radius_cells // 2)
+                                relaxed_clearance = max(1, int(args.path_soft_clearance_cells) // 2)
+                                attempts.append((
+                                    "relaxed",
+                                    base_obs,
+                                    relaxed_radius,
+                                    relaxed_clearance,
+                                    float(args.path_max_search_sec) * 1.5,
+                                ))
+                                noise_obs = base_obs
+                                if np.any(noise_obs):
+                                    kernel = np.ones((3, 3), np.uint8)
+                                    noise_obs = cv2.morphologyEx(
+                                        noise_obs.astype(np.uint8), cv2.MORPH_OPEN, kernel
+                                    ).astype(bool)
+                                attempts.append((
+                                    "orange-noise-point",
+                                    noise_obs,
+                                    0,
+                                    1,
+                                    float(args.path_max_search_sec) * 2.0,
+                                ))
+
+                            path_cells = None
+                            path_plan_mode = "none"
+                            for mode_name, obs_try, inflate_radius, soft_clearance, search_sec in attempts:
+                                candidate = _try_plan(obs_try, inflate_radius, soft_clearance, search_sec)
+                                if candidate:
+                                    path_cells = candidate
+                                    path_plan_mode = mode_name
+                                    if mode_name != "normal":
+                                        print(f"Path fallback: using {mode_name} path.")
+                                    break
                             if path_cells:
                                 last_path_cells = path_cells
                                 stuck_escape_counter = 0
@@ -2507,17 +3180,14 @@ def main():
                                 # Do not keep stale path to an old goal.
                                 last_path_cells = None
                                 print("No path to selected goal yet; retrying...")
-                                # --- Begin Escape Maneuver ---
                                 if 'stuck_escape_counter' not in locals():
                                     stuck_escape_counter = 0
                                 stuck_escape_counter += 1
-                                # Try to back up and turn if stuck for several cycles
                                 if stuck_escape_counter >= 3:
                                     print("Auto escape: backing up and turning to escape red spot.")
-                                    send_nt_command(True, -0.3, 0.5, 0.5)
+                                    backup_hold_until = max(backup_hold_until, time.time() + 0.5)
                                     stuck_escape_counter = 0
-                                    time.sleep(0.5)
-                            last_start = cam_row_col
+                            last_start = rover_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
 
@@ -2526,7 +3196,24 @@ def main():
                     if draw_path:
                         pts = np.array([[c, r] for r, c in draw_path], dtype=np.int32)
                         if pts.shape[0] >= 2:
-                            cv2.polylines(map_vis, [pts], False, (255, 255, 0), 1)
+                            if path_plan_mode == "normal":
+                                path_color = (255, 255, 0)
+                            elif path_plan_mode == "relaxed":
+                                path_color = (0, 190, 255)
+                            else:
+                                path_color = (0, 120, 255)
+                            cv2.polylines(map_vis, [pts], False, path_color, 2 if path_plan_mode != "normal" else 1)
+                            if path_plan_mode != "normal":
+                                cv2.putText(
+                                    map_vis,
+                                    f"PATH:{path_plan_mode}",
+                                    (8, 36),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.42,
+                                    path_color,
+                                    1,
+                                    cv2.LINE_AA,
+                                )
                     # Draw goal marker.
                     if goal_cell is not None:
                         gr, gc = goal_cell
@@ -2564,11 +3251,11 @@ def main():
                             )
 
                     # Optional display-only map recentering around rover.
-                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
-                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
                     # Drive output to RoboRIO (optional).
                     if sd is not None:
@@ -2657,15 +3344,17 @@ def main():
                             elif now < backup_hold_until:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
+                                escape_fwd = close_obstacle_escape_sign * max(0.0, min(1.0, float(args.backup_speed)))
+                                escape_label = "driving forward" if escape_fwd > 0.0 else "backing up"
                                 if (now - last_backup_log_time) >= 0.5:
                                     if close_obstacle_min_z is not None:
-                                        print(f"Close obstacle {close_obstacle_min_z:.2f}m ahead: backing up.")
+                                        print(f"Close obstacle {close_obstacle_min_z:.2f}m in camera lane: {escape_label}.")
                                     else:
-                                        print("Close obstacle ahead: backing up.")
+                                        print(f"Close obstacle in camera lane: {escape_label}.")
                                     last_backup_log_time = now
                                 send_nt_command(
                                     True,
-                                    -max(0.0, min(1.0, float(args.backup_speed))),
+                                    escape_fwd,
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
@@ -2688,11 +3377,8 @@ def main():
                             elif manual_mode:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
-                                # DS joystick overrides keyboard in manual mode when connected.
-                                _man_fwd  = manual_fwd  + ds_joystick_fwd
-                                _man_turn = manual_turn + ds_joystick_turn
-                                _man_fwd  = max(-1.0, min(1.0, _man_fwd))
-                                _man_turn = max(-1.0, min(1.0, _man_turn))
+                                # Driver Station joystick blends with ZED keyboard manual commands.
+                                _man_fwd, _man_turn = mix_ds_drive(manual_fwd, manual_turn)
                                 send_nt_command(
                                     True,
                                     _man_fwd,
@@ -2704,7 +3390,7 @@ def main():
                                 last_auto_turn_time = now
                                 # Keep robot safe while localization is uncertain.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
-                            elif cam_row_col is None:
+                            elif rover_row_col is None:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
                                 send_nt_command(False, 0.0, 0.0, 0.1)
@@ -2713,24 +3399,25 @@ def main():
                                 last_auto_turn_time = now
                                 # Mining automation has direct drive control
                                 # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
+                                mine_fwd, mine_turn = mix_ds_drive(_mine_drive[0], _mine_drive[1])
                                 send_nt_command(
                                     True,
-                                    _mine_drive[0],
-                                    _mine_drive[1],
+                                    mine_fwd,
+                                    mine_turn,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             else:
-                                # Pick a waypoint a few steps ahead.
-                                if draw_path is not None and len(draw_path) > 0:
-                                    wp_index = min(5, len(draw_path) - 1)
-                                    wp_rc = draw_path[wp_index]
-                                    wp_world = occ_map.grid_to_world(wp_rc[0], wp_rc[1])
-                                    if wp_world is None:
+                                reverse_path_drive = mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
+                                target_rc = pick_drive_target(draw_path, rover_row_col, goal_cell)
+                                if target_rc is not None:
+                                    target_world = occ_map.grid_to_world(target_rc[0], target_rc[1])
+                                    if target_world is None:
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
-                                    tx, tz = wp_world
-                                    status_target_cell = wp_rc
+                                    tx, tz = target_world
+                                    status_target_cell = target_rc
                                     status_target_world = (float(tx), float(tz))
-                                elif goal_cell is not None:
+                                elif goal_cell is not None and args.allow_direct_no_path:
                                     # Fallback: drive directly toward clicked goal if path is not ready yet.
                                     goal_world_fallback = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
                                     if goal_world_fallback is None:
@@ -2739,6 +3426,11 @@ def main():
                                     tx, tz = goal_world_fallback
                                     status_target_cell = goal_cell
                                     status_target_world = (float(tx), float(tz))
+                                elif goal_cell is not None:
+                                    last_auto_turn_cmd = 0.0
+                                    last_auto_turn_time = now
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
+                                    continue
                                 else:
                                     last_auto_turn_cmd = 0.0
                                     last_auto_turn_time = now
@@ -2746,7 +3438,7 @@ def main():
                                     continue
                                 # Auto-drive uses the robot/ZED physical X axis.
                                 # The map view is mirrored for display, so convert map targets back.
-                                cx, cz = float(t_map[0]), float(t_map[2])
+                                cx, cz = float(rover_pos_map[0]), float(rover_pos_map[2])
                                 tx_drive = zed_x_from_map(tx)
                                 dx = tx_drive - cx
                                 dz = tz - cz
@@ -2763,11 +3455,13 @@ def main():
                                         continue
 
                                 # Heading error in the physical X/Z frame, not the mirrored display frame.
-                                forward = R_world_cam[:, 2]
+                                forward = rover_forward_world
                                 heading = math.atan2(float(forward[2]), float(forward[0]))
-                                if args.drive_heading_flip:
-                                    heading += math.pi
                                 target = math.atan2(dz, dx)  # dz = target_z - curr_z, dx = target_x - curr_x
+                                if reverse_path_drive:
+                                    # For deposition, point the rover nose away from the waypoint
+                                    # so negative forward backs the rear toward the deposit area.
+                                    target += math.pi
                                 err = target - heading
                                 # Wrap to [-pi, pi].
                                 while err > math.pi:
@@ -2812,12 +3506,11 @@ def main():
                                     turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
 
                                 align_scale = max(0.0, math.cos(err))
-                                fwd = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+                                fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+                                fwd = -fwd_mag if reverse_path_drive else fwd_mag
 
-                                # DS joystick mix-in: driver can nudge auto commands.
-                                if args.ds_joystick:
-                                    fwd  = max(-1.0, min(1.0, fwd  + ds_joystick_fwd))
-                                    turn = max(-1.0, min(1.0, turn + ds_joystick_turn))
+                                # Driver Station joystick can nudge auto commands.
+                                fwd, turn = mix_ds_drive(fwd, turn)
 
                                 send_nt_command(
                                     True,
@@ -2866,11 +3559,11 @@ def main():
                                 heatmap_vis,
                                 alpha=args.heatmap_alpha,
                             )
-                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, cam_row_col)
+                    map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
-                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, cam_row_col)
+                        heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
             # Live visualization (optional)
             if HAS_CV2:
@@ -3071,7 +3764,7 @@ def main():
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 if not args.no_gui:
-                    status_panel = render_status_panel(cam_row_col)
+                    status_panel = render_status_panel(rover_row_col)
                     cv2.imshow("ZED Drive Status", status_panel)
                     if not status_window_ready:
                         cv2.setMouseCallback("ZED Drive Status", on_status_click)
@@ -3103,8 +3796,20 @@ def main():
                             if ch in "0123456789.":
                                 map_size_input_text += ch
                     else:
-                        # Mining keys: e=draw excav, d=draw deposit, r=run, t=abort
-                        mining.handle_key(key)
+                        # Mining keys: r=run, t=abort. Zone boxes are button-only.
+                        if key == ord("r"):
+                            clear_navigation_goal()
+                            emergency_stop = False
+                            manual_mode = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                            mining.handle_key(key)
+                        elif key == ord("t"):
+                            mining.handle_key(key)
+                            clear_navigation_goal()
+                            manual_mode = False
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
                     if key == ord("q"):
                         break
                     if key == ord("m"):

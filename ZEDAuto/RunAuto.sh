@@ -148,8 +148,19 @@ cmd+=(--path-avoid-occ-ratio "${PATH_AVOID_OCC_RATIO:-1.8}")
 cmd+=(--path-avoid-occ-advantage "${PATH_AVOID_OCC_ADVANTAGE:-3.0}")
 cmd+=(--path-connectivity "${PATH_CONNECTIVITY:-8}")
 cmd+=(--rover-size-m "${ROVER_SIZE_M:-0.30}")
+cmd+=(--camera-mount "${CAMERA_MOUNT:-front}")
+if [[ -n "${CAMERA_MOUNT_YAW_DEG:-}" ]]; then cmd+=(--camera-mount-yaw-deg "${CAMERA_MOUNT_YAW_DEG}"); fi
+if [[ -n "${CAMERA_FORWARD_OFFSET_M:-}" ]]; then cmd+=(--camera-forward-offset-m "${CAMERA_FORWARD_OFFSET_M}"); fi
+if [[ -n "${CAMERA_RIGHT_OFFSET_M:-}" ]]; then cmd+=(--camera-right-offset-m "${CAMERA_RIGHT_OFFSET_M}"); fi
+if [[ "${CAMERA_SERVO_TRACK:-0}" == "1" ]]; then cmd+=(--camera-servo-track); fi
+cmd+=(--camera-map-angle-deg "${CAMERA_MAP_ANGLE_DEG:-180.0}")
+cmd+=(--camera-deposit-angle-deg "${CAMERA_DEPOSIT_ANGLE_DEG:-0.0}")
+cmd+=(--camera-servo-map-tol-deg "${CAMERA_SERVO_MAP_TOL_DEG:-8.0}")
 cmd+=(--start-clear-radius-m "${START_CLEAR_RADIUS_M:-0.35}")
 cmd+=(--path-replan-sec "${PATH_REPLAN_SEC:-0.5}")
+cmd+=(--path-soft-clearance-cells "${PATH_SOFT_CLEARANCE_CELLS:-8}")
+if [[ "${PATH_RELAX_ON_FAIL:-1}" != "1" ]]; then cmd+=(--no-path-relax-on-fail); fi
+if [[ "${ALLOW_DIRECT_NO_PATH:-0}" == "1" ]]; then cmd+=(--allow-direct-no-path); fi
 cmd+=(--floor-update-sec "${FLOOR_UPDATE_SEC:-0.5}")
 cmd+=(--floor-min-normal-y "${FLOOR_MIN_NORMAL_Y:-0.5}")
 cmd+=(--plane-ema-alpha "${PLANE_EMA_ALPHA:-0.25}")
@@ -192,7 +203,15 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   if [[ "${MAIN_ROVER_DEBUG:-0}" == "1" ]]; then cmd+=(--main-rover-debug); fi
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
-  if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  if [[ -n "${DRIVE_HEADING_FLIP:-}" ]]; then
+    if [[ "${DRIVE_HEADING_FLIP}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  elif [[ "${CAMERA_MOUNT:-front}" != "rear" ]]; then
+    cmd+=(--drive-heading-flip)
+  fi
+  if [[ "${DS_JOYSTICK:-1}" == "1" ]]; then cmd+=(--ds-joystick); fi
+  cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
+  cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")
+  cmd+=(--ds-joystick-scale "${DS_JOYSTICK_SCALE:-0.5}")
 fi
 
 # Optional streaming
