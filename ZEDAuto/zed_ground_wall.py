@@ -1636,6 +1636,8 @@ def main():
         mining_goal_active = False
         emergency_stop = False
         print(f"New goal set at row={row}, col={col}")
+        if tracking_enabled and (not tracking_pose_ok):
+            print("Goal queued, but tracking is lost. Rover will wait here until tracking recovers.")
 
     def on_status_click(event, x, y, flags, param):
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text

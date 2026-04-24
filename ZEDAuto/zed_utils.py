@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 
 
@@ -9,11 +10,34 @@ def open_zed_camera(sl):
     init.coordinate_units = sl.UNIT.METER
     init.coordinate_system = sl.COORDINATE_SYSTEM.RIGHT_HANDED_Y_UP
 
-    zed = sl.Camera()
-    err = zed.open(init)
-    if err != sl.ERROR_CODE.SUCCESS:
-        raise RuntimeError(f"Failed to open ZED camera: {err}")
-    return zed
+    last_err = None
+    max_attempts = 4
+
+    for attempt in range(1, max_attempts + 1):
+        zed = sl.Camera()
+        try:
+            # Best-effort cleanup in case the SDK object was left half-open.
+            zed.close()
+        except Exception:
+            pass
+
+        err = zed.open(init)
+        if err == sl.ERROR_CODE.SUCCESS:
+            if attempt > 1:
+                print(f"ZED camera opened after retry {attempt}/{max_attempts}.")
+            return zed
+
+        last_err = err
+        try:
+            zed.close()
+        except Exception:
+            pass
+
+        if attempt < max_attempts:
+            print(f"ZED open attempt {attempt}/{max_attempts} failed: {err}. Retrying...")
+            time.sleep(1.0)
+
+    raise RuntimeError(f"Failed to open ZED camera after {max_attempts} attempts: {last_err}")
 
 
 def enable_tracking(zed, sl, area_memory=False, area_load_path=None):
