@@ -327,7 +327,19 @@ def main():
     parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
-    parser.add_argument("--main-rover-mode", action="store_true", help="Enable main-rover controls on the RoboRIO")
+    parser.add_argument(
+        "--main-rover-mode",
+        action="store_true",
+        dest="main_rover_mode",
+        help="Enable main-rover controls on the RoboRIO (default: on)",
+    )
+    parser.add_argument(
+        "--no-main-rover-mode",
+        action="store_false",
+        dest="main_rover_mode",
+        help="Disable main-rover controls on the RoboRIO",
+    )
+    parser.set_defaults(main_rover_mode=True)
     parser.add_argument("--main-rover-debug", action="store_true", help="Enable Drive/MainRoverDebugMode on the RoboRIO")
     parser.add_argument(
         "--drive-ready-pulse-sec",
