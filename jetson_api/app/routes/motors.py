@@ -1,6 +1,5 @@
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.common import MotorId
 from app.schemas.motors import MotorsStatusResponse, MotorCommandRequest, MotorCommandResponse
 from app.services.motor_service import motor_service
 
@@ -13,8 +12,9 @@ def get_motors_status() -> MotorsStatusResponse:
 
 
 @router.post("/{motor_id}/command", response_model=MotorCommandResponse)
-def motor_command(motor_id: MotorId, req: MotorCommandRequest) -> MotorCommandResponse:
+def motor_command(motor_id: str, req: MotorCommandRequest) -> MotorCommandResponse:
     try:
-        return motor_service.command_motor(motor_id, req)
+        resolved_motor_id = motor_service.resolve_motor_id(motor_id)
+        return motor_service.command_motor(resolved_motor_id, req)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

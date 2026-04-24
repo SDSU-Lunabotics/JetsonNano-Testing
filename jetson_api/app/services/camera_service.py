@@ -206,8 +206,9 @@ class CameraService:
                 self._backend = req.backend
                 self._streaming = bool(req.streaming)
                 self._last_frame_ms = req.timestamp_ms or seen_ms
-                source = f" by {req.source}" if req.source else ""
-                self._last_error = f"Camera is active{source}; API does not own the device"
+                # External ownership is expected when zed_ground_wall is publishing
+                # frames into the API; avoid surfacing it as an error banner in the UI.
+                self._last_error = None
             self._frame_condition.notify_all()
 
     def ingest_external_frame(
@@ -337,8 +338,7 @@ class CameraService:
                     self._last_frame_ms = self._external_timestamp_ms
                 elif self._external_last_seen_ms is not None:
                     self._last_frame_ms = self._external_last_seen_ms
-                source = f" by {self._external_source}" if self._external_source else ""
-                self._last_error = f"Camera is active{source}; API does not own the device"
+                self._last_error = None
             return
 
         backend = settings.camera_backend.lower()
@@ -455,13 +455,12 @@ class CameraService:
                 with self._state_lock:
                     self._connected = True
                     self._backend = self._external_backend
-                    self._streaming = False
+                    self._streaming = bool(self._external_streaming)
                     if self._external_timestamp_ms is not None:
                         self._last_frame_ms = self._external_timestamp_ms
                     elif self._external_last_seen_ms is not None:
                         self._last_frame_ms = self._external_last_seen_ms
-                    source = f" by {self._external_source}" if self._external_source else ""
-                    self._last_error = f"Camera is active{source}; API does not own the device"
+                    self._last_error = None
                 time.sleep(max(settings.camera_worker_retry_ms, 100) / 1000.0)
                 continue
 

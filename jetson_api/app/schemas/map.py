@@ -46,19 +46,26 @@ class MapUiStateResponse(BaseModel):
     source: Optional[str] = None
     timestamp_ms: Optional[int] = None
     mining_state: Optional[str] = None
+    localization_scan_active: Optional[bool] = None
+    landmark_count: Optional[int] = None
     selected_tool: Optional[str] = None
     brush_radius: Optional[int] = None
+    brush_radius_min: Optional[int] = None
+    brush_radius_max: Optional[int] = None
     controls: List[MapUiControl] = Field(default_factory=list)
 
 
 class MapUiCommandRequest(BaseModel):
     command: str = Field(
         description=(
-            "UI map action. Supported values: paint_obstacle, paint_safe, erase_safe, "
-            "clear_all, draw_excav_zone, draw_deposit_zone."
+            "UI map action. Supported values include paint_obstacle, paint_safe, erase_safe, "
+            "clear_all, lock_green, reset_map, reset_confirm, reset_cancel, localize_scan, "
+            "main_rover_mode, draw_excav_zone, draw_deposit_zone, brush_minus, brush_plus, "
+            "set_brush_radius."
         )
     )
     source: Optional[str] = None
+    value: Optional[int] = None
 
 
 class MapUiCommandResponse(BaseModel):
