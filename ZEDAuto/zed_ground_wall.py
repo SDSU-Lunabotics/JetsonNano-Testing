@@ -3099,35 +3099,6 @@ def main():
                                     connectivity=args.path_connectivity,
                                     traversal_cost_map=path_cost,
                                     max_search_sec=search_sec,
-                            # Build a soft safety-cost field so A* prefers corridor centers:
-                            # farther from obstacles = lower cost (safer and usually smoother/faster).
-                            path_cost = np.zeros(obs.shape, dtype=np.float32)
-                            if args.block_unknown:
-                                known = occ_map.known_mask(min_evidence=args.unknown_min_evidence)
-                                unknown = np.logical_not(known)
-                                if np.any(unknown):
-                                    # Allow exploration of empty/unknown cells without
-                                    # treating them as a hard blockage.
-                                    path_cost[unknown] += 0.75
-                            radius_cells = int(np.ceil((args.rover_size_m / 2.0) / occ_map.map_res_m))
-                            if radius_cells > 0:
-                                obs = map_utils.inflate_mask(obs, radius_cells)
-
-                            if np.any(obs):
-                                near1 = map_utils.inflate_mask(obs, 1)
-                                near2 = map_utils.inflate_mask(obs, 2)
-                                near3 = map_utils.inflate_mask(obs, 3)
-                                path_cost[near3] += 0.20
-                                path_cost[near2] += 0.35
-                                path_cost[near1] += 0.55
-                            # Prefer cleaner lanes when obstacle evidence is weak/ambiguous.
-                            path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
-
-                            clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
-                            if clear_cells > 0:
-                                obs = map_utils.clear_mask_circle(obs, cam_row_col, clear_cells)
-                                keep_cost = map_utils.clear_mask_circle(
-                                    np.ones(obs.shape, dtype=bool), cam_row_col, clear_cells
                                 )
 
                             attempts = [
