@@ -67,6 +67,14 @@ class NTService:
         self.initialize()
         self._table.putBoolean("Jetson/ExcavatorLoweringSim", bool(enabled))
 
+    def set_excavator_left_extend(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorLeftExtend", bool(enabled))
+
+    def set_excavator_right_extend(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorRightExtend", bool(enabled))
+
     def set_deposition(self, enabled: bool) -> None:
         self.initialize()
         self._table.putBoolean("Jetson/ConveyorEnabled", bool(enabled))
@@ -85,6 +93,8 @@ class NTService:
 
         self._table.putBoolean("Jetson/ExcavatorEnabled", False)
         self._table.putBoolean("Jetson/ExcavatorLoweringSim", False)
+        self._table.putBoolean("Jetson/ExcavatorLeftExtend", False)
+        self._table.putBoolean("Jetson/ExcavatorRightExtend", False)
         self._table.putBoolean("Jetson/ConveyorEnabled", False)
 
     def run_async(self, fn, *args) -> None:

@@ -900,7 +900,10 @@ def main():
     status_cmd_duration = 0.0
     status_target_cell = None
     status_target_world = None
+    camera_overlay_enabled = True
     auto_digger_enabled = False
+    test_excavation_left_extend_active = False
+    test_excavation_right_extend_active = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
     direct_nav_enabled = False
@@ -1154,13 +1157,25 @@ def main():
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
     def set_excavation_test_mode(mode_name, enabled, source="button"):
-        nonlocal auto_digger_enabled, test_excavation_dig_active, test_excavation_lower_active
+        nonlocal auto_digger_enabled
+        nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
+        nonlocal test_excavation_dig_active, test_excavation_lower_active
         enabled = bool(enabled)
         if mode_name == "auto_digger":
             if auto_digger_enabled == enabled:
                 return
             auto_digger_enabled = enabled
             print(f"Auto digger {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        elif mode_name == "left_extend":
+            if test_excavation_left_extend_active == enabled:
+                return
+            test_excavation_left_extend_active = enabled
+            print(f"Left actuator extend {'ON' if enabled else 'OFF'} via {source}.")
+        elif mode_name == "right_extend":
+            if test_excavation_right_extend_active == enabled:
+                return
+            test_excavation_right_extend_active = enabled
+            print(f"Right actuator extend {'ON' if enabled else 'OFF'} via {source}.")
         elif mode_name == "dig":
             if test_excavation_dig_active == enabled:
                 return
@@ -1227,6 +1242,23 @@ def main():
             request_camera_deposit_view("button")
         else:
             request_camera_map_view("button")
+
+    def set_camera_overlay_enabled(enabled, source="button"):
+        nonlocal camera_overlay_enabled
+        enabled = bool(enabled)
+        if camera_overlay_enabled == enabled:
+            return
+        camera_overlay_enabled = enabled
+        print(f"Camera overlay {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_drive_heading_flip(enabled, source="button"):
+        enabled = bool(enabled)
+        if bool(args.drive_heading_flip) == enabled:
+            return
+        args.drive_heading_flip = enabled
+        print(f"Drive heading flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
 
     def lock_green_zones_permanent():
         nonlocal last_save, lock_green_applied, lock_green_locked_count
@@ -1489,6 +1521,20 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "camera_overlay",
+                    "label": "Camera Overlay",
+                    "command": "camera_overlay",
+                    "active": bool(camera_overlay_enabled),
+                    "enabled": True,
+                },
+                {
+                    "id": "drive_heading_flip",
+                    "label": "Flip Drive",
+                    "command": "drive_heading_flip",
+                    "active": bool(args.drive_heading_flip),
+                    "enabled": True,
+                },
+                {
                     "id": "direct_nav",
                     "label": "Direct Nav",
                     "command": "direct_nav",
@@ -1500,6 +1546,20 @@ def main():
                     "label": "Test Digger",
                     "command": "test_excavation_dig",
                     "active": bool(test_excavation_dig_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "test_excavation_left_extend",
+                    "label": "Left Extend",
+                    "command": "test_excavation_left_extend",
+                    "active": bool(test_excavation_left_extend_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "test_excavation_right_extend",
+                    "label": "Right Extend",
+                    "command": "test_excavation_right_extend",
+                    "active": bool(test_excavation_right_extend_active),
                     "enabled": True,
                 },
                 {
@@ -1812,6 +1872,18 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_excavation_test_mode("dig", not test_excavation_dig_active, "button")
                 return
+        rect = status_button_rects.get("test_excavation_left_extend")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("left_extend", not test_excavation_left_extend_active, "button")
+                return
+        rect = status_button_rects.get("test_excavation_right_extend")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "button")
+                return
         rect = status_button_rects.get("test_excavation_lower")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1842,6 +1914,18 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 toggle_camera_view()
+                return
+        rect = status_button_rects.get("camera_overlay")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_camera_overlay_enabled(not camera_overlay_enabled, "button")
+                return
+        rect = status_button_rects.get("drive_heading_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_drive_heading_flip(not args.drive_heading_flip, "button")
                 return
         rect = status_button_rects.get("excav")
         if rect is not None:
@@ -1998,12 +2082,20 @@ def main():
             set_excavation_test_mode("auto_digger", not auto_digger_enabled, "external command")
         elif action == "test_excavation_dig":
             set_excavation_test_mode("dig", not test_excavation_dig_active, "external command")
+        elif action == "test_excavation_left_extend":
+            set_excavation_test_mode("left_extend", not test_excavation_left_extend_active, "external command")
+        elif action == "test_excavation_right_extend":
+            set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "external command")
         elif action == "test_excavation_lower":
             set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
         elif action == "camera_view":
             toggle_camera_view()
+        elif action == "camera_overlay":
+            set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
+        elif action == "drive_heading_flip":
+            set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
                 set_brush_tool(None)
@@ -2065,6 +2157,8 @@ def main():
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
             sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(excavator_lower_requested))
+            sd.putBoolean("Jetson/ExcavatorLeftExtend", bool(test_excavation_left_extend_active))
+            sd.putBoolean("Jetson/ExcavatorRightExtend", bool(test_excavation_right_extend_active))
             # Robot-side code may scale command by these keys.
             if enabled:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
@@ -2365,7 +2459,8 @@ def main():
         row6 = row5 + button_h + 10
         row7 = row6 + button_h + 10
         row8 = row7 + button_h + 10
-        slider_y = row8 + button_h + 20
+        row9 = row8 + button_h + 10
+        slider_y = row9 + button_h + 20
         content_h = slider_y + 72
         controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
         controls[:] = (28, 28, 28)
@@ -2443,11 +2538,15 @@ def main():
         zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
-        camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
+        camera_view_rect = (16, row6, 16 + button_w, row6 + button_h)
+        camera_overlay_rect = (x1, row6, x1 + button_w, row6 + button_h)
+        drive_heading_flip_rect = (x2, row6, x2 + button_w, row6 + button_h)
         auto_digger_rect = (16, row7, 16 + button_w, row7 + button_h)
         direct_nav_rect = (x1, row7, x1 + button_w, row7 + button_h)
         test_excavation_lower_rect = (x2, row7, x2 + button_w, row7 + button_h)
-        test_excavation_dig_rect = (16, row8, 16 + button_w, row8 + button_h)
+        test_excavation_left_extend_rect = (16, row8, 16 + button_w, row8 + button_h)
+        test_excavation_right_extend_rect = (x1, row8, x1 + button_w, row8 + button_h)
+        test_excavation_dig_rect = (x2, row8, x2 + button_w, row8 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -2504,6 +2603,22 @@ def main():
             (255, 220, 120),
         )
         draw_control_button(
+            camera_overlay_rect,
+            "Cam Overlay: ON" if camera_overlay_enabled else "Cam Overlay",
+            True,
+            camera_overlay_enabled,
+            (0, 120, 180),
+            (120, 220, 255),
+        )
+        draw_control_button(
+            drive_heading_flip_rect,
+            "Flip Drive: ON" if args.drive_heading_flip else "Flip Drive",
+            True,
+            bool(args.drive_heading_flip),
+            (180, 80, 0),
+            (255, 190, 110),
+        )
+        draw_control_button(
             auto_digger_rect,
             "Enable Digger: ON" if auto_digger_enabled else "Enable Digger",
             True,
@@ -2526,6 +2641,22 @@ def main():
             test_excavation_lower_active,
             (140, 70, 140),
             (235, 150, 235),
+        )
+        draw_control_button(
+            test_excavation_left_extend_rect,
+            "Left Extend: ON" if test_excavation_left_extend_active else "Left Extend",
+            True,
+            test_excavation_left_extend_active,
+            (0, 115, 215),
+            (120, 205, 255),
+        )
+        draw_control_button(
+            test_excavation_right_extend_rect,
+            "Right Extend: ON" if test_excavation_right_extend_active else "Right Extend",
+            True,
+            test_excavation_right_extend_active,
+            (215, 120, 0),
+            (255, 205, 120),
         )
         draw_control_button(
             test_excavation_dig_rect,
@@ -2566,6 +2697,8 @@ def main():
         for name, rect in (
             ("auto_run", auto_run_rect),
             ("auto_digger", auto_digger_rect),
+            ("test_excavation_left_extend", test_excavation_left_extend_rect),
+            ("test_excavation_right_extend", test_excavation_right_extend_rect),
             ("test_excavation_dig", test_excavation_dig_rect),
             ("test_excavation_lower", test_excavation_lower_rect),
             ("direct_nav", direct_nav_rect),
@@ -2585,6 +2718,8 @@ def main():
             ("zoom_out", zoom_out_rect),
             ("main_rover_mode", main_rover_rect),
             ("camera_view", camera_view_rect),
+            ("camera_overlay", camera_overlay_rect),
+            ("drive_heading_flip", drive_heading_flip_rect),
             ("brush_minus", brush_minus_rect),
             ("brush_plus", brush_plus_rect),
             ("brush_slider", brush_slider_rect),
@@ -3661,14 +3796,17 @@ def main():
                     ground_full = cv2.resize(ground.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
                     obstacle_full = cv2.resize(obstacle.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
 
-                    overlay = img.copy()
-                    # Green for ground (skip if red-only mode)
-                    if not args.overlay_red_only:
-                        overlay[ground_full == 1] = (0, 200, 0)
-                    # Red for obstacles/walls
-                    overlay[obstacle_full == 1] = (0, 0, 255)
-                    # Blend
-                    vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+                    if camera_overlay_enabled:
+                        overlay = img.copy()
+                        # Green for ground (skip if red-only mode)
+                        if not args.overlay_red_only:
+                            overlay[ground_full == 1] = (0, 200, 0)
+                        # Red for obstacles/walls
+                        overlay[obstacle_full == 1] = (0, 0, 255)
+                        # Blend
+                        vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
+                    else:
+                        vis = img.copy()
 
                     # Human detection overlay
                     human_person_map_points = []
