@@ -900,6 +900,7 @@ def main():
     status_cmd_duration = 0.0
     status_target_cell = None
     status_target_world = None
+    auto_digger_enabled = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
     direct_nav_enabled = False
@@ -1153,13 +1154,18 @@ def main():
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
     def set_excavation_test_mode(mode_name, enabled, source="button"):
-        nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal auto_digger_enabled, test_excavation_dig_active, test_excavation_lower_active
         enabled = bool(enabled)
-        if mode_name == "dig":
+        if mode_name == "auto_digger":
+            if auto_digger_enabled == enabled:
+                return
+            auto_digger_enabled = enabled
+            print(f"Auto digger {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        elif mode_name == "dig":
             if test_excavation_dig_active == enabled:
                 return
             test_excavation_dig_active = enabled
-            print(f"Excavation test dig {'ON' if enabled else 'OFF'} via {source}.")
+            print(f"Excavation test digger {'ON' if enabled else 'OFF'} via {source}.")
         elif mode_name == "lower":
             if test_excavation_lower_active == enabled:
                 return
@@ -1476,6 +1482,13 @@ def main():
                     "enabled": bool(reset_map_confirm),
                 },
                 {
+                    "id": "auto_digger",
+                    "label": "Enable Digger",
+                    "command": "auto_digger",
+                    "active": bool(auto_digger_enabled),
+                    "enabled": True,
+                },
+                {
                     "id": "direct_nav",
                     "label": "Direct Nav",
                     "command": "direct_nav",
@@ -1484,7 +1497,7 @@ def main():
                 },
                 {
                     "id": "test_excavation_dig",
-                    "label": "Test Dig",
+                    "label": "Test Digger",
                     "command": "test_excavation_dig",
                     "active": bool(test_excavation_dig_active),
                     "enabled": True,
@@ -1787,6 +1800,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_direct_nav_enabled(not direct_nav_enabled, "button")
                 return
+        rect = status_button_rects.get("auto_digger")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("auto_digger", not auto_digger_enabled, "button")
+                return
         rect = status_button_rects.get("test_excavation_dig")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1975,6 +1994,8 @@ def main():
             print("Localization scan has been removed; ignoring external command.")
         elif action == "direct_nav":
             set_direct_nav_enabled(not direct_nav_enabled, "external command")
+        elif action == "auto_digger":
+            set_excavation_test_mode("auto_digger", not auto_digger_enabled, "external command")
         elif action == "test_excavation_dig":
             set_excavation_test_mode("dig", not test_excavation_dig_active, "external command")
         elif action == "test_excavation_lower":
@@ -2030,9 +2051,11 @@ def main():
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
             mining_state_value = mining.state.value
+            auto_dig_active = auto_digger_enabled and enabled and mining.state == auto_mining.MiningState.DIGGING
             excavator_enabled = test_excavation_dig_active or (
-                enabled and mining.state == auto_mining.MiningState.DIGGING
+                auto_dig_active
             )
+            excavator_lower_requested = test_excavation_lower_active or auto_dig_active
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
@@ -2041,7 +2064,7 @@ def main():
             sd.putString("Jetson/MiningState", mining_state_value)
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
-            sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active))
+            sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(excavator_lower_requested))
             # Robot-side code may scale command by these keys.
             if enabled:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
@@ -2341,7 +2364,8 @@ def main():
         row5 = row4 + button_h + 10
         row6 = row5 + button_h + 10
         row7 = row6 + button_h + 10
-        slider_y = row7 + button_h + 20
+        row8 = row7 + button_h + 10
+        slider_y = row8 + button_h + 20
         content_h = slider_y + 72
         controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
         controls[:] = (28, 28, 28)
@@ -2420,9 +2444,10 @@ def main():
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
         camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
-        test_excavation_dig_rect = (16, row7, 16 + button_w, row7 + button_h)
-        test_excavation_lower_rect = (x1, row7, x1 + button_w, row7 + button_h)
-        direct_nav_rect = (x2, row7, x2 + button_w, row7 + button_h)
+        auto_digger_rect = (16, row7, 16 + button_w, row7 + button_h)
+        direct_nav_rect = (x1, row7, x1 + button_w, row7 + button_h)
+        test_excavation_lower_rect = (x2, row7, x2 + button_w, row7 + button_h)
+        test_excavation_dig_rect = (16, row8, 16 + button_w, row8 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -2479,12 +2504,20 @@ def main():
             (255, 220, 120),
         )
         draw_control_button(
-            test_excavation_dig_rect,
-            "Test Dig: ON" if test_excavation_dig_active else "Test Dig",
+            auto_digger_rect,
+            "Enable Digger: ON" if auto_digger_enabled else "Enable Digger",
             True,
-            test_excavation_dig_active,
-            (0, 90, 200),
-            (80, 170, 255),
+            auto_digger_enabled,
+            (0, 140, 60),
+            (110, 255, 150),
+        )
+        draw_control_button(
+            direct_nav_rect,
+            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
+            True,
+            direct_nav_enabled,
+            (0, 150, 90),
+            (100, 255, 180),
         )
         draw_control_button(
             test_excavation_lower_rect,
@@ -2495,12 +2528,12 @@ def main():
             (235, 150, 235),
         )
         draw_control_button(
-            direct_nav_rect,
-            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
+            test_excavation_dig_rect,
+            "Test Digger: ON" if test_excavation_dig_active else "Test Digger",
             True,
-            direct_nav_enabled,
-            (0, 150, 90),
-            (100, 255, 180),
+            test_excavation_dig_active,
+            (0, 90, 200),
+            (80, 170, 255),
         )
 
         btn_sm = 36
@@ -2532,6 +2565,7 @@ def main():
 
         for name, rect in (
             ("auto_run", auto_run_rect),
+            ("auto_digger", auto_digger_rect),
             ("test_excavation_dig", test_excavation_dig_rect),
             ("test_excavation_lower", test_excavation_lower_rect),
             ("direct_nav", direct_nav_rect),
