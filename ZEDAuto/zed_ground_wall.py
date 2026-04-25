@@ -843,6 +843,7 @@ def main():
             sd.putString("Jetson/MiningState", mining.state.value)
             sd.putBoolean("Jetson/ExcavatorEnabled", False)
             sd.putBoolean("Jetson/ConveyorEnabled", False)
+            sd.putBoolean("Jetson/ExcavatorLoweringSim", False)
             sd.putNumber("Jetson/ServoCommandAngleDeg", float(args.camera_map_angle_deg))
             sd.putNumber("Jetson/ServoCommandSeq", 0.0)
             print(
@@ -899,6 +900,8 @@ def main():
     status_cmd_duration = 0.0
     status_target_cell = None
     status_target_world = None
+    test_excavation_dig_active = False
+    test_excavation_lower_active = False
     direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
@@ -1148,6 +1151,23 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
+
+    def set_excavation_test_mode(mode_name, enabled, source="button"):
+        nonlocal test_excavation_dig_active, test_excavation_lower_active
+        enabled = bool(enabled)
+        if mode_name == "dig":
+            if test_excavation_dig_active == enabled:
+                return
+            test_excavation_dig_active = enabled
+            print(f"Excavation test dig {'ON' if enabled else 'OFF'} via {source}.")
+        elif mode_name == "lower":
+            if test_excavation_lower_active == enabled:
+                return
+            test_excavation_lower_active = enabled
+            print(f"Excavation lower simulation {'ON' if enabled else 'OFF'} via {source}.")
+        else:
+            return
+        publish_map_ui_state(force=True)
 
     def refresh_camera_servo_state():
         nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
@@ -1463,6 +1483,20 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "test_excavation_dig",
+                    "label": "Test Dig",
+                    "command": "test_excavation_dig",
+                    "active": bool(test_excavation_dig_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "test_excavation_lower",
+                    "label": "Lower Sim",
+                    "command": "test_excavation_lower",
+                    "active": bool(test_excavation_lower_active),
+                    "enabled": True,
+                },
+                {
                     "id": "main_rover_mode",
                     "label": "Main Rover Mode",
                     "command": "main_rover_mode",
@@ -1502,6 +1536,8 @@ def main():
                               or mining.preferred_start_rc is not None,
                     "enabled": bool((not button_enabled and mining.state == auto_mining.MiningState.PICK_DIG_START)
                                     or (button_enabled and bool(mining.excav_corners_rc))),
+                },
+                {
                     "id": "brush_minus",
                     "label": "Brush -",
                     "command": "brush_minus",
@@ -1751,6 +1787,18 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_direct_nav_enabled(not direct_nav_enabled, "button")
                 return
+        rect = status_button_rects.get("test_excavation_dig")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("dig", not test_excavation_dig_active, "button")
+                return
+        rect = status_button_rects.get("test_excavation_lower")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("lower", not test_excavation_lower_active, "button")
+                return
         rect = status_button_rects.get("reset_map")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1927,6 +1975,10 @@ def main():
             print("Localization scan has been removed; ignoring external command.")
         elif action == "direct_nav":
             set_direct_nav_enabled(not direct_nav_enabled, "external command")
+        elif action == "test_excavation_dig":
+            set_excavation_test_mode("dig", not test_excavation_dig_active, "external command")
+        elif action == "test_excavation_lower":
+            set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
         elif action == "camera_view":
@@ -1978,7 +2030,9 @@ def main():
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
             mining_state_value = mining.state.value
-            excavator_enabled = enabled and mining.state == auto_mining.MiningState.DIGGING
+            excavator_enabled = test_excavation_dig_active or (
+                enabled and mining.state == auto_mining.MiningState.DIGGING
+            )
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
@@ -1987,6 +2041,7 @@ def main():
             sd.putString("Jetson/MiningState", mining_state_value)
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
+            sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active))
             # Robot-side code may scale command by these keys.
             if enabled:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
@@ -2349,7 +2404,6 @@ def main():
         )
 
         auto_run_rect = (16, row0, 16 + 2 * button_w + gap, row0 + button_h)
-        localize_rect = (x2, row0, x2 + button_w, row0 + button_h)
         excav_rect = (16, row1, 16 + button_w, row1 + button_h)
         deposit_rect = (x1, row1, x1 + button_w, row1 + button_h)
         whole_rect = (x2, row1, x2 + button_w, row1 + button_h)
@@ -2366,7 +2420,9 @@ def main():
         zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
         main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
         camera_view_rect = (16, row6, panel_w - 16, row6 + button_h)
-        direct_nav_rect = (16, row7, panel_w - 16, row7 + button_h)
+        test_excavation_dig_rect = (16, row7, 16 + button_w, row7 + button_h)
+        test_excavation_lower_rect = (x1, row7, x1 + button_w, row7 + button_h)
+        direct_nav_rect = (x2, row7, x2 + button_w, row7 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -2423,6 +2479,22 @@ def main():
             (255, 220, 120),
         )
         draw_control_button(
+            test_excavation_dig_rect,
+            "Test Dig: ON" if test_excavation_dig_active else "Test Dig",
+            True,
+            test_excavation_dig_active,
+            (0, 90, 200),
+            (80, 170, 255),
+        )
+        draw_control_button(
+            test_excavation_lower_rect,
+            "Lower Sim: ON" if test_excavation_lower_active else "Lower Sim",
+            True,
+            test_excavation_lower_active,
+            (140, 70, 140),
+            (235, 150, 235),
+        )
+        draw_control_button(
             direct_nav_rect,
             "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
             True,
@@ -2460,6 +2532,8 @@ def main():
 
         for name, rect in (
             ("auto_run", auto_run_rect),
+            ("test_excavation_dig", test_excavation_dig_rect),
+            ("test_excavation_lower", test_excavation_lower_rect),
             ("direct_nav", direct_nav_rect),
             ("excav", excav_rect),
             ("deposit", deposit_rect),
