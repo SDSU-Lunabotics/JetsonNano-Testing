@@ -921,6 +921,7 @@ def main():
     localization_scan_started_lost = False
     localization_scan_reason = ""
     last_localization_log = 0.0
+    localization_scan_autostart_blocked_until = 0.0
     landmark_memory = {"version": 1, "landmarks": []}
     landmark_dirty = False
     last_landmark_save = time.time()
@@ -1055,50 +1056,48 @@ def main():
     def start_localization_scan(reason="manual"):
         nonlocal localization_scan_active, localization_scan_started
         nonlocal localization_scan_started_lost, localization_scan_reason
-        nonlocal emergency_stop, manual_mode, manual_fwd, manual_turn
-        localization_scan_active = True
-        localization_scan_started = time.time()
-        localization_scan_started_lost = bool(tracking_enabled and not tracking_pose_ok)
-        localization_scan_reason = reason
-        emergency_stop = False
-        manual_mode = False
-        manual_fwd = 0.0
-        manual_turn = 0.0
-        print(f"Localize Scan started ({reason}). Rotate/look for known area-memory features and AI landmarks.")
+        localization_scan_active = False
+        localization_scan_started = 0.0
+        localization_scan_started_lost = False
+        localization_scan_reason = ""
+        print(f"Localization scan is disabled; ignoring request ({reason}).")
 
     def stop_localization_scan(reason="done"):
         nonlocal localization_scan_active, localization_scan_reason
-        if localization_scan_active:
-            print(f"Localize Scan stopped ({reason}).")
         localization_scan_active = False
         localization_scan_reason = ""
 
-    def update_localization_scan_state():
-        if not localization_scan_active:
+    def block_localization_autostart(seconds=5.0, source="manual"):
+        nonlocal localization_scan_autostart_blocked_until
+        seconds = max(0.0, float(seconds))
+        if seconds <= 0.0:
             return
-        elapsed = time.time() - localization_scan_started
-        if tracking_enabled and localization_scan_started_lost and tracking_pose_ok:
-            stop_localization_scan("tracking relocked")
-        elif tracking_pose_ok and elapsed >= max(0.5, float(args.localize_scan_sec)):
-            stop_localization_scan("scan complete")
-        elif (not tracking_pose_ok) and elapsed >= max(1.0, float(args.localize_max_sec)):
-            stop_localization_scan("timeout")
+        localization_scan_autostart_blocked_until = max(
+            localization_scan_autostart_blocked_until,
+            time.time() + seconds,
+        )
+        print(f"Localize auto-start blocked for {seconds:.1f}s ({source}).")
+
+    def set_manual_drive_mode(enabled, source="key"):
+        nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
+        enabled = bool(enabled)
+        if localization_scan_active:
+            block_localization_autostart(5.0, f"{source} manual override")
+            stop_localization_scan(f"{source} manual override")
+        manual_mode = enabled
+        manual_fwd = 0.0
+        manual_turn = 0.0
+        emergency_stop = False
+        if manual_mode:
+            print("Manual drive mode: ON (localization canceled, auto paused)")
+        else:
+            print("Manual drive mode: OFF (auto resumed)")
+
+    def update_localization_scan_state():
+        return
 
     def draw_localization_banner(frame):
-        if not HAS_CV2 or frame is None or not localization_scan_active:
-            return
-        h, w = frame.shape[:2]
-        y0, y1 = 24, min(h, 48)
-        if y1 <= y0:
-            return
-        cv2.rectangle(frame, (0, y0), (w, y1), (0, 70, 180), -1)
-        if tracking_enabled:
-            lock = "LOCKED" if tracking_pose_ok else "SEARCHING"
-        else:
-            lock = "TRACKING OFF"
-        count = len(list(iter_visible_landmarks()))
-        text = f"LOCALIZE: {lock} | landmarks {count} | L toggles"
-        cv2.putText(frame, text, (6, y0 + 17), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1, cv2.LINE_AA)
+        return
 
     load_landmark_memory()
 
@@ -1393,7 +1392,7 @@ def main():
             "source": "zed_ground_wall",
             "timestamp_ms": int(now * 1000),
             "mining_state": mining.state.value,
-            "localization_scan_active": bool(localization_scan_active),
+            "localization_scan_active": False,
             "landmark_count": int(len(landmark_memory.get("landmarks", []))),
             "selected_tool": selected_tool,
             "brush_radius": int(paint_brush_radius),
@@ -1455,13 +1454,6 @@ def main():
                     "command": "reset_cancel",
                     "active": False,
                     "enabled": bool(reset_map_confirm),
-                },
-                {
-                    "id": "localize_scan",
-                    "label": "Localize Scan",
-                    "command": "localize_scan",
-                    "active": bool(localization_scan_active),
-                    "enabled": True,
                 },
                 {
                     "id": "direct_nav",
@@ -1751,15 +1743,6 @@ def main():
                     mining.start_run()
                     print("Auto Run: START requested via button")
                 return
-        rect = status_button_rects.get("localize_scan")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                if localization_scan_active:
-                    stop_localization_scan("button")
-                else:
-                    start_localization_scan("button")
-                return
         rect = status_button_rects.get("direct_nav")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -1939,10 +1922,7 @@ def main():
                 reset_map_confirm = False
                 print("Map reset canceled.")
         elif action == "localize_scan":
-            if localization_scan_active:
-                stop_localization_scan("external command")
-            else:
-                start_localization_scan("external command")
+            print("Localization scan has been removed; ignoring external command.")
         elif action == "direct_nav":
             set_direct_nav_enabled(not direct_nav_enabled, "external command")
         elif action == "main_rover_mode":
@@ -2137,9 +2117,6 @@ def main():
         elif emergency_stop:
             mode_label = "STOPPED"
             mode_color = (0, 80, 255)
-        elif localization_scan_active:
-            mode_label = "LOCALIZE"
-            mode_color = (0, 180, 255)
         elif tracking_enabled and not tracking_pose_ok:
             mode_label = "TRACK LOST"
             mode_color = (0, 140, 255)
@@ -2187,9 +2164,9 @@ def main():
             0.52,
         )
         put_line(
-            f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved | Localize Scan: {'ON' if localization_scan_active else 'OFF'} (l)",
+            f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved",
             168,
-            (255, 220, 170) if localization_scan_active else (190, 190, 190),
+            (190, 190, 190),
             0.45,
         )
         servo_state_txt = "OFF"
@@ -2391,8 +2368,6 @@ def main():
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
-        draw_control_button(localize_rect, "Localize: ON" if localization_scan_active else "Localize Scan",
-                            True, localization_scan_active, (0, 120, 200), (80, 220, 255))
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -2483,7 +2458,6 @@ def main():
 
         for name, rect in (
             ("auto_run", auto_run_rect),
-            ("localize_scan", localize_rect),
             ("direct_nav", direct_nav_rect),
             ("excav", excav_rect),
             ("deposit", deposit_rect),
@@ -2600,8 +2574,6 @@ def main():
                         tracking_recover_stable_count = 0
                         R_world_cam = last_valid_R_world_cam
                         t_world_cam = last_valid_t_world_cam
-                        if not localization_scan_active:
-                            start_localization_scan(jump_reason)
                         print(f"Tracking jump rejected ({jump_reason}); holding last pose.")
                 if tracking_pose_ok and have_valid_tracking_pose and not tracking_prev_ok:
                     tracking_recover_stable_count += 1
@@ -2647,7 +2619,7 @@ def main():
                 tracking_prev_ok = True
             update_localization_scan_state()
             refresh_camera_servo_state()
-            auto_camera_map_required = localization_scan_active or goal_cell is not None or mining.state in (
+            auto_camera_map_required = goal_cell is not None or mining.state in (
                 auto_mining.MiningState.PLAN_SWEEP,
                 auto_mining.MiningState.NAVIGATE_DIG,
                 auto_mining.MiningState.DIGGING,
@@ -3341,22 +3313,6 @@ def main():
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
-                            elif localization_scan_active:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
-                                turn_speed = max(-1.0, min(1.0, float(args.localize_turn_speed)))
-                                if abs(turn_speed) < 0.05:
-                                    turn_speed = 0.05
-                                if (now - last_localization_log) >= 1.0:
-                                    last_localization_log = now
-                                    state_txt = "tracking OK" if tracking_pose_ok else "tracking lost"
-                                    print(f"Localize Scan rotating in place ({state_txt}).")
-                                send_nt_command(
-                                    True,
-                                    0.0,
-                                    turn_speed,
-                                    1.0 / max(1.0, args.drive_rate_hz),
-                                )
                             elif manual_mode:
                                 last_auto_turn_cmd = 0.0
                                 last_auto_turn_time = now
@@ -3796,15 +3752,7 @@ def main():
                     if key == ord("q"):
                         break
                     if key == ord("m"):
-                        manual_mode = not manual_mode
-                        if manual_mode:
-                            # Entering manual mode pauses auto navigation but keeps the last goal.
-                            emergency_stop = False
-                            manual_fwd = 0.0
-                            manual_turn = 0.0
-                            print("Manual drive mode: ON (auto paused)")
-                        else:
-                            print("Manual drive mode: OFF (auto resumed)")
+                        set_manual_drive_mode(not manual_mode, "key")
                     if key == ord("c"):
                         follow_rover_map = not follow_rover_map
                         state = "ON" if follow_rover_map else "OFF"
@@ -3813,11 +3761,6 @@ def main():
                         map_red_only_view = not map_red_only_view
                         state = "ON" if map_red_only_view else "OFF"
                         print(f"Map red-only mode: {state}")
-                    if key == ord("l"):
-                        if localization_scan_active:
-                            stop_localization_scan("key")
-                        else:
-                            start_localization_scan("key")
                     if key == ord("u"):
                         set_main_rover_mode(not args.main_rover_mode)
                     if key == ord("o"):
