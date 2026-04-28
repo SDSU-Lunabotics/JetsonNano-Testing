@@ -3,6 +3,124 @@ import time
 import numpy as np
 
 
+def _quat_to_rotmat(quat):
+    q = np.array(quat, dtype=np.float32).reshape(-1)
+    if q.size < 4:
+        return None
+    x, y, z, w = [float(v) for v in q[:4]]
+    n = x * x + y * y + z * z + w * w
+    if n <= 1e-8:
+        return None
+    s = 2.0 / n
+    xx, yy, zz = x * x * s, y * y * s, z * z * s
+    xy, xz, yz = x * y * s, x * z * s, y * z * s
+    wx, wy, wz = w * x * s, w * y * s, w * z * s
+    return np.array(
+        [
+            [1.0 - (yy + zz), xy - wz, xz + wy],
+            [xy + wz, 1.0 - (xx + zz), yz - wx],
+            [xz - wy, yz + wx, 1.0 - (xx + yy)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _orientation_to_rotmat(orientation):
+    if orientation is None:
+        return None
+    try:
+        if hasattr(orientation, "to_rotation_matrix"):
+            rot = orientation.to_rotation_matrix()
+            if hasattr(rot, "r"):
+                return np.array(rot.r, dtype=np.float32).reshape(3, 3)
+            if hasattr(rot, "get"):
+                return np.array(rot.get(), dtype=np.float32).reshape(3, 3)
+            return np.array(rot, dtype=np.float32).reshape(3, 3)
+    except Exception:
+        pass
+    try:
+        if hasattr(orientation, "get"):
+            rot = _quat_to_rotmat(orientation.get())
+            if rot is not None:
+                return rot
+    except Exception:
+        pass
+    try:
+        rot = _quat_to_rotmat(orientation)
+        if rot is not None:
+            return rot
+    except Exception:
+        pass
+    return None
+
+
+def get_imu_rotation_with_status(zed, sl, sensors_data, sensor_warned, time_reference=None):
+    if sensors_data is None:
+        return None, sensor_warned, False
+
+    imu_rot = None
+    imu_ok = False
+    time_ref = time_reference
+    if time_ref is None:
+        time_ref = getattr(getattr(sl, "TIME_REFERENCE", None), "IMAGE", None)
+    if time_ref is None:
+        time_ref = getattr(getattr(sl, "TIME_REFERENCE", None), "CURRENT", None)
+
+    try:
+        err = zed.get_sensors_data(sensors_data, time_ref)
+        if err != sl.ERROR_CODE.SUCCESS:
+            if not sensor_warned:
+                print(f"IMU read failed: {err}")
+                sensor_warned = True
+            return None, sensor_warned, False
+
+        imu_data = None
+        if hasattr(sensors_data, "get_imu_data"):
+            imu_data = sensors_data.get_imu_data()
+        elif hasattr(sensors_data, "imu"):
+            imu_data = sensors_data.imu
+        if imu_data is None:
+            return None, sensor_warned, False
+
+        pose = None
+        if hasattr(imu_data, "get_pose"):
+            pose = imu_data.get_pose()
+        elif hasattr(imu_data, "pose"):
+            pose = imu_data.pose
+
+        if pose is not None and hasattr(pose, "get_rotation_matrix"):
+            rot = pose.get_rotation_matrix()
+            if hasattr(rot, "r"):
+                imu_rot = np.array(rot.r, dtype=np.float32).reshape(3, 3)
+            elif hasattr(rot, "get"):
+                imu_rot = np.array(rot.get(), dtype=np.float32).reshape(3, 3)
+            else:
+                imu_rot = np.array(rot, dtype=np.float32).reshape(3, 3)
+
+        if imu_rot is None and pose is not None and hasattr(pose, "get_orientation"):
+            imu_rot = _orientation_to_rotmat(pose.get_orientation())
+
+        if imu_rot is None and hasattr(imu_data, "get_pose_covariance"):
+            # Newer APIs still expose fused orientation through pose; if not present,
+            # do not guess from raw gyro/accel.
+            imu_rot = None
+
+        if imu_rot is None:
+            return None, sensor_warned, False
+
+        if not np.all(np.isfinite(imu_rot)):
+            return None, sensor_warned, False
+
+        imu_ok = True
+        sensor_warned = False
+    except Exception as exc:
+        if not sensor_warned:
+            print(f"IMU rotation read failed: {exc}")
+            sensor_warned = True
+
+    return imu_rot, sensor_warned, imu_ok
+
+
 def open_zed_camera(sl):
     init = sl.InitParameters()
     init.camera_resolution = sl.RESOLUTION.HD720
