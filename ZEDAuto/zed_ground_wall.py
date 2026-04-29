@@ -1104,6 +1104,8 @@ def main():
     test_excavation_right_extend_active = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
+    actuator_left_extension_pct = None
+    actuator_right_extension_pct = None
     direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
@@ -1393,6 +1395,54 @@ def main():
         else:
             return
         publish_map_ui_state(force=True)
+
+    def stop_all_actuators(source="button"):
+        nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
+        nonlocal test_excavation_dig_active, test_excavation_lower_active
+        changed = (
+            test_excavation_left_extend_active
+            or test_excavation_right_extend_active
+            or test_excavation_dig_active
+            or test_excavation_lower_active
+        )
+        test_excavation_left_extend_active = False
+        test_excavation_right_extend_active = False
+        test_excavation_dig_active = False
+        test_excavation_lower_active = False
+        if changed:
+            print(f"Actuator manual commands stopped via {source}.")
+            publish_map_ui_state(force=True)
+
+    def _read_first_nt_number(keys):
+        if sd is None:
+            return None
+        for key in keys:
+            try:
+                value = float(sd.getNumber(key, float("nan")))
+            except Exception:
+                continue
+            if np.isfinite(value):
+                return value
+        return None
+
+    def refresh_actuator_feedback():
+        nonlocal actuator_left_extension_pct, actuator_right_extension_pct
+        left_pct = _read_first_nt_number(
+            (
+                "Jetson/ExcavatorLeftExtensionPct",
+                "Jetson/LeftActuatorExtensionPct",
+                "Excavator/LeftExtensionPct",
+            )
+        )
+        right_pct = _read_first_nt_number(
+            (
+                "Jetson/ExcavatorRightExtensionPct",
+                "Jetson/RightActuatorExtensionPct",
+                "Excavator/RightExtensionPct",
+            )
+        )
+        actuator_left_extension_pct = None if left_pct is None else max(0.0, min(100.0, left_pct))
+        actuator_right_extension_pct = None if right_pct is None else max(0.0, min(100.0, right_pct))
 
     def refresh_camera_servo_state():
         nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
@@ -1772,6 +1822,7 @@ def main():
     def publish_map_ui_state(force=False):
         nonlocal last_map_ui_state_write
         refresh_camera_servo_state()
+        refresh_actuator_feedback()
         now = time.time()
         if (not force) and (now - last_map_ui_state_write) < 0.20:
             return
@@ -1793,6 +1844,14 @@ def main():
             "brush_radius_max": 15,
             "drive_calibration": drive_cal_state,
             "dig_profiles": dig_ui_state,
+            "actuators": {
+                "left_extension_pct": actuator_left_extension_pct,
+                "right_extension_pct": actuator_right_extension_pct,
+                "left_extend_command": bool(test_excavation_left_extend_active),
+                "right_extend_command": bool(test_excavation_right_extend_active),
+                "dig_command": bool(test_excavation_dig_active),
+                "lower_command": bool(test_excavation_lower_active),
+            },
             "controls": [
                 {
                     "id": "paint_obstacle",
@@ -1981,6 +2040,13 @@ def main():
                     "label": "Lower Sim",
                     "command": "test_excavation_lower",
                     "active": bool(test_excavation_lower_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "stop_actuators",
+                    "label": "Stop Actuators",
+                    "command": "stop_actuators",
+                    "active": False,
                     "enabled": True,
                 },
                 {
@@ -2321,6 +2387,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_excavation_test_mode("lower", not test_excavation_lower_active, "button")
                 return
+        rect = status_button_rects.get("stop_actuators")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                stop_all_actuators("button")
+                return
         rect = status_button_rects.get("reset_map")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -2589,6 +2661,8 @@ def main():
             set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "external command")
         elif action == "test_excavation_lower":
             set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
+        elif action == "stop_actuators":
+            stop_all_actuators("external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
         elif action == "camera_view":
@@ -2998,13 +3072,47 @@ def main():
             (200, 240, 255),
             0.48,
         )
+        refresh_actuator_feedback()
+        left_pct_text = "n/a" if actuator_left_extension_pct is None else f"{actuator_left_extension_pct:.0f}%"
+        right_pct_text = "n/a" if actuator_right_extension_pct is None else f"{actuator_right_extension_pct:.0f}%"
+        put_line(
+            f"Actuator extension: Left {left_pct_text} | Right {right_pct_text}",
+            528,
+            (200, 240, 255),
+            0.46,
+        )
+
+        def draw_pct_bar(x0, y0, width, height, label, value, active):
+            cv2.putText(panel, label, (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 220, 240), 1, cv2.LINE_AA)
+            cv2.rectangle(panel, (x0, y0), (x0 + width, y0 + height), (55, 55, 55), -1)
+            cv2.rectangle(panel, (x0, y0), (x0 + width, y0 + height), (120, 120, 120), 1)
+            if value is not None:
+                fill_w = int(round((max(0.0, min(100.0, float(value))) / 100.0) * max(1, width - 2)))
+                fill_color = (0, 180, 110) if active else (0, 140, 220)
+                cv2.rectangle(panel, (x0 + 1, y0 + 1), (x0 + 1 + fill_w, y0 + height - 1), fill_color, -1)
+                val_text = f"{value:.0f}%"
+            else:
+                val_text = "n/a"
+            cv2.putText(
+                panel,
+                val_text,
+                (x0 + width + 8, y0 + height - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        draw_pct_bar(16, 544, 180, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
+        draw_pct_bar(16, 572, 180, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
         put_line(
             "Dig profile name — click field, type a name, recording uses style+phase automatically",
-            528,
+            612,
             (170, 200, 230),
             0.44,
         )
-        dig_name_rect = (16, 538, panel_w - 16, 578)
+        dig_name_rect = (16, 622, panel_w - 16, 662)
         status_button_rects["dig_name_input"] = dig_name_rect
         dig_name_border = (100, 220, 255) if dig_name_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (dig_name_rect[0], dig_name_rect[1]), (dig_name_rect[2], dig_name_rect[3]), (40, 40, 40), -1)
@@ -3023,7 +3131,7 @@ def main():
             cv2.LINE_AA,
         )
 
-        controls_top = 590
+        controls_top = 674
         controls_bottom = panel_h - 16
         controls_h = max(1, controls_bottom - controls_top)
         button_h = 42
@@ -3143,6 +3251,7 @@ def main():
         dig_profile_next_rect = (x2, row11, x2 + button_w, row11 + button_h)
         dig_profile_use_rect = (16, row12, 16 + button_w, row12 + button_h)
         dig_profile_delete_rect = (x1, row12, x1 + button_w, row12 + button_h)
+        stop_actuators_rect = (x2, row12, x2 + button_w, row12 + button_h)
 
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
@@ -3326,6 +3435,14 @@ def main():
             bool(dig_profiles.get_cursor_profile() is not None),
             False,
         )
+        draw_control_button(
+            stop_actuators_rect,
+            "Stop Actuators",
+            True,
+            False,
+            (120, 60, 0),
+            (255, 180, 120),
+        )
 
         btn_sm = 36
         brush_minus_rect = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
@@ -3440,6 +3557,7 @@ def main():
             ("dig_profile_next", dig_profile_next_rect),
             ("dig_profile_use", dig_profile_use_rect),
             ("dig_profile_delete", dig_profile_delete_rect),
+            ("stop_actuators", stop_actuators_rect),
             ("brush_minus", brush_minus_rect),
             ("brush_plus", brush_plus_rect),
             ("brush_slider", brush_slider_rect),
