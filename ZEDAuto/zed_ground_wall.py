@@ -3037,9 +3037,10 @@ def main():
         )
         map_state = "ACTIVE" if map_integration_ok else "PAUSED"
         map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
+        map_mode = "COMPLEX" if args.complex else "SIMPLE"
         map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
         put_line(
-            f"Map: {map_state} | View: {map_view_mode} | Points: {last_map_point_count}",
+            f"Map: {map_state} | Mode: {map_mode} | View: {map_view_mode} | Points: {last_map_point_count}",
             168,
             map_state_color,
             0.46,
