@@ -915,8 +915,6 @@ def main():
     def display_forward_world(R_world_cam, rover_forward_world, tracking_ok=True, imu_forward_fallback=None):
         if (not tracking_ok) and imu_forward_fallback is not None:
             return np.array(imu_forward_fallback, dtype=np.float32).reshape(3,)
-        if args.camera_servo_track and servo_map_view:
-            return world_forward_from_rotation(R_world_cam)
         return np.array(rover_forward_world, dtype=np.float32).reshape(3,)
 
     def angle_between_vec_deg(vec_a, vec_b):
