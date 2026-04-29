@@ -2156,6 +2156,67 @@ def main():
         if is_person:
             cv2.circle(frame, (dc, dr), 6, color, 1)
 
+    def draw_rover_overlay(frame, rover_cell, cam_cell=None, heading_vec_rc=None):
+        if frame is None:
+            return
+        if cam_cell is not None:
+            display_cam = display_cell_for_map_cell(cam_cell[0], cam_cell[1], frame)
+            if display_cam is not None:
+                r0, c0 = display_cam
+                half = max(1, int(args.map_camera_size) // 2)
+                r1 = max(0, r0 - half)
+                r2 = min(frame.shape[0], r0 + half + 1)
+                c1 = max(0, c0 - half)
+                c2 = min(frame.shape[1], c0 + half + 1)
+                frame[r1:r2, c1:c2, :] = (255, 0, 0)
+        if rover_cell is None:
+            return
+        display_rover = display_cell_for_map_cell(rover_cell[0], rover_cell[1], frame)
+        if display_rover is None:
+            return
+
+        r0, c0 = display_rover
+        cv2.circle(frame, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
+        rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
+        if heading_vec_rc is None:
+            rr = int(round(rover_half_cells))
+            box_pts = np.array(
+                [
+                    [c0 - rr, r0 - rr],
+                    [c0 + rr, r0 - rr],
+                    [c0 + rr, r0 + rr],
+                    [c0 - rr, r0 + rr],
+                ],
+                dtype=np.int32,
+            )
+        else:
+            fwd_v = np.array(heading_vec_rc, dtype=np.float32).reshape(2,)
+            fwd_norm = float(np.linalg.norm(fwd_v))
+            if fwd_norm > 1e-6:
+                fwd_v /= fwd_norm
+            right_v = np.array([fwd_v[1], -fwd_v[0]], dtype=np.float32)
+            center = np.array([float(r0), float(c0)], dtype=np.float32)
+            p1 = center + fwd_v * rover_half_cells + right_v * rover_half_cells
+            p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
+            p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
+            p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
+            box_pts = np.array(
+                [
+                    [int(round(p1[1])), int(round(p1[0]))],
+                    [int(round(p2[1])), int(round(p2[0]))],
+                    [int(round(p3[1])), int(round(p3[0]))],
+                    [int(round(p4[1])), int(round(p4[0]))],
+                ],
+                dtype=np.int32,
+            )
+            size = max(8, int(args.map_camera_size) * 4)
+            end_pt = (
+                int(round(c0 + float(fwd_v[1]) * size)),
+                int(round(r0 + float(fwd_v[0]) * size)),
+            )
+            cv2.arrowedLine(frame, (c0, r0), end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
+        cv2.polylines(frame, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
+
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
@@ -3987,6 +4048,7 @@ def main():
                 heatmap_vis = None
                 cam_row_col = None
                 rover_row_col = None
+                rover_heading_vec_rc = None
                 camera_map_pause_reason = ""
                 current_mount_yaw_deg = current_camera_mount_yaw_deg()
                 _, _, close_obstacle_escape_sign = camera_mount_axes(current_mount_yaw_deg)
@@ -4149,6 +4211,7 @@ def main():
                                 dtype=np.float32,
                             )
                             heading_vec_rc = np.array(fwd_v, dtype=np.float32)
+                            rover_heading_vec_rc = np.array(fwd_v, dtype=np.float32)
                             right_v = np.array(
                                 [np.cos(heading_ang), np.sin(heading_ang)],
                                 dtype=np.float32,
@@ -4408,6 +4471,7 @@ def main():
 
                     # Optional display-only map recentering around rover.
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
+                    draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
@@ -4726,6 +4790,7 @@ def main():
                                 alpha=args.heatmap_alpha,
                             )
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
+                    draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
