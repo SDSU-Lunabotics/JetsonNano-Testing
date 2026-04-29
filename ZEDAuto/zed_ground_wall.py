@@ -1113,9 +1113,13 @@ def main():
     map_integration_ok = False
     camera_map_pause_reason = ""
     last_map_point_count = 0
+    last_raw_point_count = 0
+    last_in_range_point_count = 0
     last_ground_pct = 0.0
     last_obstacle_pct = 0.0
     last_hole_pct = 0.0
+    last_depth_status = "init"
+    range_filter_bypassed = False
     last_plane_update_time = 0.0
     plane_fail_count = 0
     plane_reject_count = 0
@@ -3045,18 +3049,25 @@ def main():
             map_state_color,
             0.46,
         )
+        put_line(
+            f"Depth: {last_depth_status} | Raw {last_raw_point_count} | In-range {last_in_range_point_count}"
+            + (" | RANGE BYPASS" if range_filter_bypassed else ""),
+            186,
+            (180, 240, 255) if last_raw_point_count > 0 else (0, 180, 255),
+            0.42,
+        )
         if not map_integration_ok:
             pause_detail = camera_map_pause_reason if camera_map_pause_reason else "TRACKING LOST OR PAUSED"
-            put_line(f"Map pause reason: {pause_detail}", 186, (0, 200, 255), 0.44)
-            servo_info_y = 204
+            put_line(f"Map pause reason: {pause_detail}", 204, (0, 200, 255), 0.44)
+            servo_info_y = 222
         else:
             put_line(
                 f"Ground {last_ground_pct:4.1f}% | Obst {last_obstacle_pct:4.1f}% | Holes {last_hole_pct:4.1f}%",
-                186,
+                204,
                 (180, 240, 255),
                 0.44,
             )
-            servo_info_y = 204
+            servo_info_y = 222
         put_line(
             f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved",
             servo_info_y,
@@ -3877,8 +3888,9 @@ def main():
                 refresh_camera_servo_state()
 
             # Retrieve point cloud
-            zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
+            depth_status = zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
             zed.retrieve_image(image_left, sl.VIEW.LEFT)
+            last_depth_status = str(depth_status)
             # Fit/update floor plane on an interval to reduce SDK load.
             now = time.time()
             should_update_plane = (not has_plane) or ((now - last_plane_update_time) >= args.floor_update_sec)
@@ -3958,26 +3970,43 @@ def main():
             # Sample a downscaled cloud to compute a quick summary
             cloud = point_cloud.get_data()
             if cloud is None:
+                last_raw_point_count = 0
+                last_in_range_point_count = 0
+                range_filter_bypassed = False
+                last_depth_status = "no-cloud"
                 continue
             # Downsample for speed
             stride = max(1, int(args.sample_stride))
             if driver_priority_active:
                 stride = max(stride, int(max(1, args.driver_priority_sample_stride)))
-            xyz = cloud[::stride, ::stride, :3].reshape(-1, 3)
+            xyz_all = cloud[::stride, ::stride, :3].reshape(-1, 3)
             # Filter invalid points
-            mask = np.isfinite(xyz).all(axis=1)
+            finite_mask = np.isfinite(xyz_all).all(axis=1)
+            last_raw_point_count = int(np.count_nonzero(finite_mask))
+            mask = finite_mask.copy()
             if float(args.min_range_z_m) > 0.0:
-                mask &= xyz[:, 2] >= float(args.min_range_z_m)
+                mask &= xyz_all[:, 2] >= float(args.min_range_z_m)
             if float(args.max_range_z_m) > 0.0:
-                mask &= xyz[:, 2] <= float(args.max_range_z_m)
-            xyz = xyz[mask]
+                mask &= xyz_all[:, 2] <= float(args.max_range_z_m)
+            last_in_range_point_count = int(np.count_nonzero(mask))
+            range_filter_bypassed = False
+            if last_in_range_point_count == 0 and last_raw_point_count > 0:
+                xyz = xyz_all[finite_mask]
+                range_filter_bypassed = True
+                if no_points_count % 30 == 0:
+                    print(
+                        "All finite depth points failed Z-range filtering; "
+                        "temporarily bypassing min/max Z filter for mapping diagnostics."
+                    )
+            else:
+                xyz = xyz_all[mask]
 
             if xyz.size == 0:
                 no_points_count += 1
                 if no_points_count % 30 == 1:
                     print(
                         "No valid depth points after filtering; "
-                        "consider lowering --min-range-z-m or disabling range limits."
+                        "check depth validity, min/max Z limits, and lighting/texture."
                     )
                 dist = np.empty((0,), dtype=np.float32)
                 ground_mask = np.zeros((0,), dtype=bool)
@@ -3986,8 +4015,18 @@ def main():
                 ground_pct = 0.0
                 obstacle_pct = 0.0
                 hole_pct = 0.0
+                if last_raw_point_count <= 0:
+                    last_depth_status = f"{depth_status}|all-invalid"
+                elif range_filter_bypassed:
+                    last_depth_status = f"{depth_status}|bypass-empty"
+                else:
+                    last_depth_status = f"{depth_status}|range-empty"
             else:
                 no_points_count = 0
+                if range_filter_bypassed:
+                    last_depth_status = f"{depth_status}|range-bypassed"
+                else:
+                    last_depth_status = f"{depth_status}|ok"
                 # Distance to plane (signed)
                 dist, ground_mask, obstacle_mask = segmentation.classify_points(
                     xyz, a, b, c, d, ground_thresh=args.obstacle_thresh_m
