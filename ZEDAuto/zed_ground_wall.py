@@ -2874,8 +2874,8 @@ def main():
 
     def render_status_panel(cam_cell):
         nonlocal status_scroll_y, status_scroll_max
-        panel_h = 680
-        panel_w = 620
+        panel_h = 980
+        panel_w = 700
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
         status_button_rects.clear()
@@ -3104,8 +3104,9 @@ def main():
                 cv2.LINE_AA,
             )
 
-        draw_pct_bar(16, 544, 180, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
-        draw_pct_bar(16, 572, 180, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
+        pct_bar_w = max(180, min(260, panel_w - 220))
+        draw_pct_bar(16, 544, pct_bar_w, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
+        draw_pct_bar(16, 572, pct_bar_w, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
         put_line(
             "Dig profile name — click field, type a name, recording uses style+phase automatically",
             612,
@@ -3131,12 +3132,12 @@ def main():
             cv2.LINE_AA,
         )
 
-        controls_top = 674
-        controls_bottom = panel_h - 16
+        controls_top = dig_name_rect[3] + 12
+        controls_bottom = panel_h - 20
         controls_h = max(1, controls_bottom - controls_top)
         button_h = 42
-        button_w = 160
-        gap = 20
+        gap = 14
+        button_w = max(132, int((panel_w - 32 - 2 * gap) / 3))
         x1 = 16 + button_w + gap
         x2 = 16 + 2 * (button_w + gap)
         row0 = 36
@@ -4118,6 +4119,7 @@ def main():
                         r0, c0 = rover_row_col
                         cv2.circle(map_vis, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
                         heading_ang = None
+                        heading_vec_rc = None
                         if tracking_enabled:
                             forward = display_forward_world(
                                 R_world_cam,
@@ -4146,6 +4148,7 @@ def main():
                                 [-np.sin(heading_ang), np.cos(heading_ang)],
                                 dtype=np.float32,
                             )
+                            heading_vec_rc = np.array(fwd_v, dtype=np.float32)
                             right_v = np.array(
                                 [np.cos(heading_ang), np.sin(heading_ang)],
                                 dtype=np.float32,
@@ -4165,11 +4168,13 @@ def main():
                             )
                         cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
                         # Draw heading arrow (yellow) if tracking is enabled.
-                        if tracking_enabled and HAS_CV2:
-                            ang = heading_ang
+                        if tracking_enabled and HAS_CV2 and heading_vec_rc is not None:
                             size = max(8, int(args.map_camera_size) * 4)
                             start_pt = (int(c0), int(r0))
-                            end_pt = (int(c0 + np.cos(ang) * size), int(r0 - np.sin(ang) * size))
+                            end_pt = (
+                                int(round(c0 + float(heading_vec_rc[1]) * size)),
+                                int(round(r0 + float(heading_vec_rc[0]) * size)),
+                            )
                             cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
                     if (not map_integration_ok) and HAS_CV2:
                         pause_text = "TRACKING LOST - MAP PAUSED"
@@ -4898,23 +4903,22 @@ def main():
                 if not args.no_gui:
                     # Always show the map (even if the image frame is missing)
                     if map_vis is not None:
+                        map_window_vis = map_vis.copy()
                         # Draw detected persons on the map
-                        draw_landmarks(map_vis)
+                        draw_landmarks(map_window_vis)
                         for pr, pc_col, is_p in human_person_map_points:
-                            draw_live_detection_marker(map_vis, pr, pc_col, is_p)
+                            draw_live_detection_marker(map_window_vis, pr, pc_col, is_p)
                         if map_red_only_view:
                             # Red-only map mode for easier obstacle inspection.
-                            map_vis[:, :, 0] = 0
-                            map_vis[:, :, 1] = 0
+                            map_window_vis[:, :, 0] = 0
+                            map_window_vis[:, :, 1] = 0
                         if map_scale_live > 1:
-                            map_vis = cv2.resize(
-                                map_vis,
+                            map_window_vis = cv2.resize(
+                                map_window_vis,
                                 (occ_map.grid_w * map_scale_live, occ_map.grid_h * map_scale_live),
                                 interpolation=cv2.INTER_NEAREST,
                             )
-                        cv2.imshow("ZED Occupancy Map (XZ)", map_vis)
-                    if display_map_vis is not None:
-                        cv2.imshow("ZED Occupancy Map (XZ)", display_map_vis)
+                        cv2.imshow("ZED Occupancy Map (XZ)", map_window_vis)
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
                             map_window_ready = True
