@@ -860,15 +860,18 @@ def main():
         robot_forward_cam, robot_right_cam, _ = camera_mount_axes(mount_yaw_deg)
         rover_forward_world = (R_world_cam @ robot_forward_cam.reshape(3, 1)).reshape(3,)
         rover_right_world = (R_world_cam @ robot_right_cam.reshape(3, 1)).reshape(3,)
-        if args.drive_heading_flip:
-            rover_forward_world = -rover_forward_world
-            rover_right_world = -rover_right_world
         rover_pos_world = (
             np.array(camera_pos_world, dtype=np.float32)
             - rover_forward_world * float(camera_forward_offset_m)
             - rover_right_world * float(camera_right_offset_m)
         )
         return rover_pos_world, rover_forward_world, rover_right_world
+
+    def drive_forward_world_from_rover(forward_world):
+        forward = np.array(forward_world, dtype=np.float32).reshape(3,)
+        if args.drive_heading_flip:
+            return -forward
+        return forward
 
     def world_forward_from_rotation(R_world_cam):
         forward = (np.array(R_world_cam, dtype=np.float32) @ np.array([0.0, 0.0, 1.0], dtype=np.float32)).reshape(3,)
@@ -4733,7 +4736,7 @@ def main():
                                         continue
 
                                 # Heading error in the physical X/Z frame, not the mirrored display frame.
-                                forward = rover_forward_world
+                                forward = drive_forward_world_from_rover(rover_forward_world)
                                 heading = math.atan2(float(forward[2]), float(forward[0]))
                                 target = math.atan2(dz, dx)  # dz = target_z - curr_z, dx = target_x - curr_x
                                 if reverse_path_drive:
