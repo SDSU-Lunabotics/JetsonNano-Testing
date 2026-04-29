@@ -1110,6 +1110,12 @@ def main():
     last_path_plan_time = 0.0
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
+    map_integration_ok = False
+    camera_map_pause_reason = ""
+    last_map_point_count = 0
+    last_ground_pct = 0.0
+    last_obstacle_pct = 0.0
+    last_hole_pct = 0.0
     last_plane_update_time = 0.0
     plane_fail_count = 0
     plane_reject_count = 0
@@ -2209,7 +2215,7 @@ def main():
                 ],
                 dtype=np.int32,
             )
-            size = max(8, int(args.map_camera_size) * 4)
+            size = max(18, int(args.map_camera_size) * 8)
             end_pt = (
                 int(round(c0 + float(fwd_v[1]) * size)),
                 int(round(r0 + float(fwd_v[0]) * size)),
@@ -3029,9 +3035,30 @@ def main():
             track_color,
             0.52,
         )
+        map_state = "ACTIVE" if map_integration_ok else "PAUSED"
+        map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
+        map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
+        put_line(
+            f"Map: {map_state} | View: {map_view_mode} | Points: {last_map_point_count}",
+            168,
+            map_state_color,
+            0.46,
+        )
+        if not map_integration_ok:
+            pause_detail = camera_map_pause_reason if camera_map_pause_reason else "TRACKING LOST OR PAUSED"
+            put_line(f"Map pause reason: {pause_detail}", 186, (0, 200, 255), 0.44)
+            servo_info_y = 204
+        else:
+            put_line(
+                f"Ground {last_ground_pct:4.1f}% | Obst {last_obstacle_pct:4.1f}% | Holes {last_hole_pct:4.1f}%",
+                186,
+                (180, 240, 255),
+                0.44,
+            )
+            servo_info_y = 204
         put_line(
             f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved",
-            168,
+            servo_info_y,
             (190, 190, 190),
             0.45,
         )
@@ -3049,68 +3076,68 @@ def main():
                 servo_state_color = (170, 255, 170)
         put_line(
             f"Camera servo: {servo_state_txt} | angle {servo_angle_deg:.0f} | target {servo_command_angle_deg:.0f}",
-            186,
+            servo_info_y + 18,
             servo_state_color,
             0.46,
         )
 
         excav_set = bool(mining.excav_corners_rc)
         deposit_set = bool(mining.deposit_corners_rc)
-        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", 210, (170, 255, 170) if excav_set else (190, 190, 190))
-        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", 234, (170, 255, 170) if deposit_set else (190, 190, 190))
-        put_line("Click a button below, then define 4 corners on the map.", 258, (210, 210, 210), 0.48)
+        put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", servo_info_y + 42, (170, 255, 170) if excav_set else (190, 190, 190))
+        put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", servo_info_y + 66, (170, 255, 170) if deposit_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", servo_info_y + 90, (210, 210, 210), 0.48)
 
         if goal_cell is None:
-            put_line("Goal cell: none", 280, (190, 190, 190))
-            put_line("Goal world: none", 304, (190, 190, 190))
+            put_line("Goal cell: none", servo_info_y + 112, (190, 190, 190))
+            put_line("Goal world: none", servo_info_y + 136, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", 280, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", servo_info_y + 112, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", 304, (190, 190, 190))
+                put_line("Goal world: unavailable", servo_info_y + 136, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", 304, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", servo_info_y + 136, (220, 240, 255))
 
         if status_target_world is None:
-            put_line("Active target: none", 318, (190, 190, 190))
+            put_line("Active target: none", servo_info_y + 150, (190, 190, 190))
         else:
             tc = status_target_cell
             if tc is None:
                 put_line(
                     f"Active target: x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    318,
+                    servo_info_y + 150,
                     (255, 235, 170),
                 )
             else:
                 put_line(
                     f"Active target: r={tc[0]} c={tc[1]} x={status_target_world[0]:+.2f} z={status_target_world[1]:+.2f}",
-                    318,
+                    servo_info_y + 150,
                     (255, 235, 170),
                 )
 
         if cam_cell is None:
-            put_line("Robot cell: unavailable", 342, (190, 190, 190))
+            put_line("Robot cell: unavailable", servo_info_y + 174, (190, 190, 190))
         else:
-            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", 342, (180, 255, 220))
+            put_line(f"Robot cell: r={cam_cell[0]} c={cam_cell[1]}", servo_info_y + 174, (180, 255, 220))
 
-        put_line(f"Map zoom: x{map_scale_live}", 366, (220, 240, 255))
+        put_line(f"Map zoom: x{map_scale_live}", servo_info_y + 198, (220, 240, 255))
         put_line(
             f"Last command: {'ENABLED' if status_cmd_enabled else 'DISABLED'} dur={status_cmd_duration:.2f}s",
-            390,
+            servo_info_y + 222,
             (190, 255, 190) if status_cmd_enabled else (190, 190, 190),
         )
-        draw_axis("Forward", status_cmd_fwd, 414)
-        draw_axis("Turn", status_cmd_turn, 436)
+        draw_axis("Forward", status_cmd_fwd, servo_info_y + 246)
+        draw_axis("Turn", status_cmd_turn, servo_info_y + 268)
 
         # --- Rover size input field (placed between axis bars and the zone buttons) ---
         cur_rover_ft = args.rover_size_m / 0.3048
         put_line(
             "Rover size (ft, square) — click field, type e.g. 2.5, press Enter",
-            440,
+            servo_info_y + 272,
             (170, 200, 230),
             0.44,
         )
-        input_rect = (16, 450, panel_w - 16, 490)
+        input_rect = (16, servo_info_y + 282, panel_w - 16, servo_info_y + 322)
         status_button_rects["map_size_input"] = input_rect
         border_color = (100, 220, 255) if map_size_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (input_rect[0], input_rect[1]), (input_rect[2], input_rect[3]), (40, 40, 40), -1)
@@ -3129,7 +3156,7 @@ def main():
         )
         put_line(
             f"Current rover size: {cur_rover_ft:.2f} ft  ({args.rover_size_m:.3f} m)",
-            504,
+            servo_info_y + 336,
             (200, 240, 255),
             0.48,
         )
@@ -3138,7 +3165,7 @@ def main():
         right_pct_text = "n/a" if actuator_right_extension_pct is None else f"{actuator_right_extension_pct:.0f}%"
         put_line(
             f"Actuator extension: Left {left_pct_text} | Right {right_pct_text}",
-            528,
+            servo_info_y + 360,
             (200, 240, 255),
             0.46,
         )
@@ -3166,15 +3193,15 @@ def main():
             )
 
         pct_bar_w = max(180, min(260, panel_w - 220))
-        draw_pct_bar(16, 544, pct_bar_w, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
-        draw_pct_bar(16, 572, pct_bar_w, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
+        draw_pct_bar(16, servo_info_y + 376, pct_bar_w, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
+        draw_pct_bar(16, servo_info_y + 404, pct_bar_w, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
         put_line(
             "Dig profile name — click field, type a name, recording uses style+phase automatically",
-            612,
+            servo_info_y + 444,
             (170, 200, 230),
             0.44,
         )
-        dig_name_rect = (16, 622, panel_w - 16, 662)
+        dig_name_rect = (16, servo_info_y + 454, panel_w - 16, servo_info_y + 494)
         status_button_rects["dig_name_input"] = dig_name_rect
         dig_name_border = (100, 220, 255) if dig_name_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (dig_name_rect[0], dig_name_rect[1]), (dig_name_rect[2], dig_name_rect[3]), (40, 40, 40), -1)
@@ -3995,6 +4022,10 @@ def main():
                     ground_pct = 0.0
                     obstacle_pct = 0.0
                     hole_pct = 0.0
+                last_map_point_count = int(xyz.shape[0])
+                last_ground_pct = float(ground_pct)
+                last_obstacle_pct = float(obstacle_pct)
+                last_hole_pct = float(hole_pct)
 
             close_obstacle_detected = False
             close_obstacle_min_z = None
@@ -4474,6 +4505,17 @@ def main():
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
+                    if map_red_only_view:
+                        cv2.putText(
+                            map_vis,
+                            "RED-ONLY VIEW (press 'v' to toggle off)",
+                            (8, max(24, map_vis.shape[0] - 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 120, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
@@ -4793,6 +4835,17 @@ def main():
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
+                    if map_red_only_view:
+                        cv2.putText(
+                            map_vis,
+                            "RED-ONLY VIEW (press 'v' to toggle off)",
+                            (8, max(24, map_vis.shape[0] - 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            (0, 120, 255),
+                            1,
+                            cv2.LINE_AA,
+                        )
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
