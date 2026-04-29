@@ -2166,6 +2166,34 @@ def main():
         if is_person:
             cv2.circle(frame, (dc, dr), 6, color, 1)
 
+    def heading_vec_from_world(rover_pos_world, forward_world):
+        if rover_pos_world is None or forward_world is None:
+            return None
+        pos = np.array(rover_pos_world, dtype=np.float32).reshape(3,)
+        fwd = np.array(forward_world, dtype=np.float32).reshape(3,)
+        fwd_xz_norm = float(np.linalg.norm(fwd[[0, 2]]))
+        if fwd_xz_norm <= 1e-6:
+            return None
+        fwd = fwd / fwd_xz_norm
+        start_rc = map_world_to_grid(float(pos[0]), float(pos[2]))
+        if start_rc is None:
+            return None
+        step_candidates = (
+            max(0.35, float(args.rover_size_m) * 0.75),
+            max(0.50, float(args.rover_size_m)),
+            max(0.75, float(args.rover_size_m) * 1.5),
+        )
+        for step_m in step_candidates:
+            ahead = pos + fwd * float(step_m)
+            end_rc = map_world_to_grid(float(ahead[0]), float(ahead[2]))
+            if end_rc is None:
+                continue
+            dr = int(end_rc[0]) - int(start_rc[0])
+            dc = int(end_rc[1]) - int(start_rc[1])
+            if dr != 0 or dc != 0:
+                return np.array([float(dr), float(dc)], dtype=np.float32)
+        return None
+
     def draw_rover_overlay(frame, rover_cell, cam_cell=None, heading_vec_rc=None):
         if frame is None:
             return
@@ -4240,76 +4268,14 @@ def main():
                         auto_mining.MiningState.ABORTED,
                     ):
                         clear_navigation_goal()
-                    if cam_row_col is not None:
-                        r0, c0 = cam_row_col
-                        half = max(1, int(args.map_camera_size) // 2)
-                        r1 = max(0, r0 - half)
-                        r2 = min(occ_map.grid_h, r0 + half + 1)
-                        c1 = max(0, c0 - half)
-                        c2 = min(occ_map.grid_w, c0 + half + 1)
-                        map_vis[r1:r2, c1:c2, :] = (255, 0, 0)
                     if rover_row_col is not None:
-                        r0, c0 = rover_row_col
-                        cv2.circle(map_vis, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
-                        heading_ang = None
-                        heading_vec_rc = None
-                        if tracking_enabled:
-                            forward = display_forward_world(
-                                R_world_cam,
-                                rover_forward_world,
-                                tracking_ok=tracking_pose_ok,
-                                imu_forward_fallback=heading_fallback_forward_world,
-                            )
-                            fx, fz = map_x_from_zed(forward[0]), float(forward[2])
-                            heading_ang = np.arctan2(fz, fx)
-                        # Draw rover footprint (orange outline), scaled by rover size.
-                        rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
-                        if heading_ang is None:
-                            rr = int(round(rover_half_cells))
-                            box_pts = np.array(
-                                [
-                                    [c0 - rr, r0 - rr],
-                                    [c0 + rr, r0 - rr],
-                                    [c0 + rr, r0 + rr],
-                                    [c0 - rr, r0 + rr],
-                                ],
-                                dtype=np.int32,
-                            )
-                        else:
-                            center = np.array([float(r0), float(c0)], dtype=np.float32)
-                            fwd_v = np.array(
-                                [-np.sin(heading_ang), np.cos(heading_ang)],
-                                dtype=np.float32,
-                            )
-                            heading_vec_rc = np.array(fwd_v, dtype=np.float32)
-                            rover_heading_vec_rc = np.array(fwd_v, dtype=np.float32)
-                            right_v = np.array(
-                                [np.cos(heading_ang), np.sin(heading_ang)],
-                                dtype=np.float32,
-                            )
-                            p1 = center + fwd_v * rover_half_cells + right_v * rover_half_cells
-                            p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
-                            p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
-                            p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
-                            box_pts = np.array(
-                                [
-                                    [int(round(p1[1])), int(round(p1[0]))],
-                                    [int(round(p2[1])), int(round(p2[0]))],
-                                    [int(round(p3[1])), int(round(p3[0]))],
-                                    [int(round(p4[1])), int(round(p4[0]))],
-                                ],
-                                dtype=np.int32,
-                            )
-                        cv2.polylines(map_vis, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
-                        # Draw heading arrow (yellow) if tracking is enabled.
-                        if tracking_enabled and HAS_CV2 and heading_vec_rc is not None:
-                            size = max(8, int(args.map_camera_size) * 4)
-                            start_pt = (int(c0), int(r0))
-                            end_pt = (
-                                int(round(c0 + float(heading_vec_rc[1]) * size)),
-                                int(round(r0 + float(heading_vec_rc[0]) * size)),
-                            )
-                            cv2.arrowedLine(map_vis, start_pt, end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
+                        display_forward = display_forward_world(
+                            R_world_cam,
+                            rover_forward_world,
+                            tracking_ok=tracking_pose_ok,
+                            imu_forward_fallback=heading_fallback_forward_world,
+                        )
+                        rover_heading_vec_rc = heading_vec_from_world(rover_pos_map, display_forward)
                     if (not map_integration_ok) and HAS_CV2:
                         pause_text = "TRACKING LOST - MAP PAUSED"
                         pause_color = (0, 140, 255)
