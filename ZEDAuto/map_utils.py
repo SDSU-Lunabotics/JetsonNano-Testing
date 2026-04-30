@@ -62,6 +62,7 @@ class OccupancyMap:
         loaded_free = data["free_counts"].astype(np.float32)
         loaded_occ = data["occ_counts"].astype(np.float32)
         loaded_hole = data["hole_counts"].astype(np.float32) if "hole_counts" in data else None
+        loaded_painted = data["painted_free"].astype(bool) if "painted_free" in data else None
         if (
             "map_res_m" in data
             and "map_width_m" in data
@@ -93,6 +94,8 @@ class OccupancyMap:
                 self.occ_counts[:] = loaded_occ
                 if loaded_hole is not None and loaded_hole.shape == self.hole_counts.shape:
                     self.hole_counts[:] = loaded_hole
+                if loaded_painted is not None and loaded_painted.shape == self.painted_free.shape:
+                    self.painted_free[:] = loaded_painted
                 return True, "Loaded map"
             return False, "Map size mismatch; starting with empty map."
         return False, "Map settings differ; starting with empty map."
@@ -106,6 +109,7 @@ class OccupancyMap:
             free_counts=self.free_counts,
             occ_counts=self.occ_counts,
             hole_counts=self.hole_counts,
+            painted_free=self.painted_free,
             map_res_m=np.float32(self.map_res_m),
             map_width_m=np.float32(self.map_width_m),
             map_height_m=np.float32(self.map_height_m),

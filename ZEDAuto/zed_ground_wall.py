@@ -151,6 +151,30 @@ def main():
     parser.add_argument("--map-save-path", default="zed_map.npz", help="Path to save persistent map data")
     parser.add_argument("--map-save-every", type=float, default=5.0, help="Seconds between map saves (0 to disable)")
     parser.add_argument("--map-load", action="store_true", help="Load existing map on startup if available")
+    parser.add_argument(
+        "--recovery-checkpoint-path",
+        default=os.path.join(SCRIPT_DIR, "zed_recovery_checkpoint.json"),
+        help="Path to lightweight crash-recovery checkpoint JSON",
+    )
+    parser.add_argument(
+        "--recovery-save-every",
+        type=float,
+        default=1.0,
+        help="Seconds between pose/heading recovery checkpoint saves (0 to disable)",
+    )
+    parser.add_argument(
+        "--no-recovery-load",
+        action="store_false",
+        dest="recovery_load",
+        help="Disable loading the latest crash-recovery checkpoint on startup",
+    )
+    parser.add_argument(
+        "--no-recovery-nt-mirror",
+        action="store_false",
+        dest="recovery_nt_mirror",
+        help="Disable mirroring the latest lightweight recovery state to RoboRIO NetworkTables",
+    )
+    parser.set_defaults(recovery_load=True, recovery_nt_mirror=True)
     parser.add_argument("--map-decay", type=float, default=0.995, help="Map decay factor (1.0 = no decay)")
     parser.add_argument("--free-decay", type=float, default=None, help="Free-space decay (defaults to --map-decay)")
     parser.add_argument("--free-decay-unconfirmed", type=float, default=None, help="Decay for low-confidence free cells")
@@ -668,6 +692,15 @@ def main():
         print("GUI auto-disabled: DISPLAY is not set, running headless.")
     else:
         print("GUI enabled: opening camera/map windows.")
+        try:
+            cv2.namedWindow("ZED Ground/Obstacle Segmentation", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("ZED Occupancy Map (XZ)", cv2.WINDOW_NORMAL)
+            cv2.namedWindow("ZED Drive Status", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
+            cv2.resizeWindow("ZED Occupancy Map (XZ)", 1180, 920)
+            cv2.resizeWindow("ZED Drive Status", 920, 1160)
+        except Exception:
+            pass
 
     camera_heartbeat = None
     if args.camera_heartbeat_url:
@@ -786,6 +819,11 @@ def main():
         hole_decay=args.hole_decay,
     )
     last_save = time.time()
+    last_recovery_save = time.time()
+    recovery_checkpoint = None
+    recovery_pending_alignment = False
+    recovery_alignment_offset_t = np.zeros(3, dtype=np.float32)
+    recovery_alignment_yaw_deg = 0.0
 
     def map_x_from_zed(x):
         # ZED +X is camera-right, while the occupancy map image mirrors X for display.
@@ -828,6 +866,19 @@ def main():
         while angle < -180.0:
             angle += 360.0
         return angle
+
+    def yaw_rotation_matrix_deg(angle_deg):
+        yaw_rad = math.radians(float(angle_deg))
+        c = math.cos(yaw_rad)
+        s = math.sin(yaw_rad)
+        return np.array(
+            [
+                [c, 0.0, s],
+                [0.0, 1.0, 0.0],
+                [-s, 0.0, c],
+            ],
+            dtype=np.float32,
+        )
 
     def camera_mount_axes(yaw_deg):
         yaw_rad = math.radians(float(yaw_deg))
@@ -895,6 +946,12 @@ def main():
         rotated[2] /= norm
         return rotated
 
+    def heading_delta_deg(from_forward_world, to_forward_world):
+        return wrap_angle_deg(
+            rover_heading_deg_from_forward(to_forward_world)
+            - rover_heading_deg_from_forward(from_forward_world)
+        )
+
     def rover_heading_deg_from_forward(forward_world):
         forward = np.array(forward_world, dtype=np.float32).reshape(3,)
         return math.degrees(math.atan2(float(forward[2]), float(forward[0])))
@@ -912,10 +969,36 @@ def main():
             return np.array([0.0, 0.0, 1.0], dtype=np.float32)
         return (forward / norm).astype(np.float32)
 
+    def camera_right_from_rover_axes(rover_forward_world, rover_right_world, mount_yaw_deg=None):
+        if mount_yaw_deg is None:
+            mount_yaw_deg = current_camera_mount_yaw_deg()
+        yaw_rad = math.radians(float(mount_yaw_deg))
+        right = (
+            np.array(rover_forward_world, dtype=np.float32).reshape(3,) * math.sin(yaw_rad)
+            + np.array(rover_right_world, dtype=np.float32).reshape(3,) * math.cos(yaw_rad)
+        )
+        norm = float(np.linalg.norm(right))
+        if norm <= 1e-6:
+            return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        return (right / norm).astype(np.float32)
+
     def display_forward_world(R_world_cam, rover_forward_world, tracking_ok=True, imu_forward_fallback=None):
         if (not tracking_ok) and imu_forward_fallback is not None:
             return np.array(imu_forward_fallback, dtype=np.float32).reshape(3,)
         return np.array(rover_forward_world, dtype=np.float32).reshape(3,)
+
+    def apply_recovery_alignment(R_world_cam, t_world_cam):
+        if (
+            np.linalg.norm(recovery_alignment_offset_t) <= 1e-6
+            and abs(float(recovery_alignment_yaw_deg)) <= 1e-6
+        ):
+            return np.array(R_world_cam, dtype=np.float32), np.array(t_world_cam, dtype=np.float32).reshape(3,)
+        align_R = yaw_rotation_matrix_deg(recovery_alignment_yaw_deg)
+        raw_R = np.array(R_world_cam, dtype=np.float32).reshape(3, 3)
+        raw_t = np.array(t_world_cam, dtype=np.float32).reshape(3,)
+        aligned_R = (align_R @ raw_R).astype(np.float32)
+        aligned_t = (align_R @ raw_t + recovery_alignment_offset_t).astype(np.float32)
+        return aligned_R, aligned_t
 
     def angle_between_vec_deg(vec_a, vec_b):
         a = np.array(vec_a, dtype=np.float32).reshape(3,)
@@ -1042,6 +1125,8 @@ def main():
             sd.putBoolean("Jetson/ExcavatorEnabled", False)
             sd.putBoolean("Jetson/ConveyorEnabled", False)
             sd.putBoolean("Jetson/ExcavatorLoweringSim", False)
+            sd.putBoolean("Jetson/DoorActuatorsOpen", False)
+            sd.putBoolean("Jetson/DoorActuatorsClose", False)
             sd.putNumber("Jetson/ServoCommandAngleDeg", float(args.camera_map_angle_deg))
             sd.putNumber("Jetson/ServoCommandSeq", 0.0)
             print(
@@ -1059,9 +1144,65 @@ def main():
     map_window_ready = False
     status_window_ready = False
     status_button_rects = {}
+    status_section_jump_targets = {}
     reset_map_confirm = False
     status_scroll_y = 0
     status_scroll_max = 0
+    last_status_panel_shape = None
+    last_map_window_shape = None
+    recovery_checkpoint = load_recovery_checkpoint()
+    if recovery_checkpoint is not None:
+        ckpt_cam_t = _parse_vec3(recovery_checkpoint, "camera_t_world")
+        ckpt_rover_fwd = _parse_vec3(recovery_checkpoint, "rover_forward_world")
+        ckpt_rover_right = _parse_vec3(recovery_checkpoint, "rover_right_world")
+        ckpt_map_origin = _parse_vec3(recovery_checkpoint, "map_origin_t", default=np.zeros(3, dtype=np.float32))
+        ckpt_align_t = _parse_vec3(recovery_checkpoint, "alignment_offset_t", default=np.zeros(3, dtype=np.float32))
+        if ckpt_cam_t is not None and ckpt_rover_fwd is not None and ckpt_rover_right is not None:
+            last_valid_t_world_cam = np.array(ckpt_cam_t, dtype=np.float32).reshape(3,)
+            last_valid_rover_forward_world = rotate_world_xz(ckpt_rover_fwd, 0.0)
+            last_valid_rover_right_world = rotate_world_xz(ckpt_rover_right, 0.0)
+            ckpt_cam_forward = camera_forward_from_rover_axes(
+                last_valid_rover_forward_world,
+                last_valid_rover_right_world,
+                current_camera_mount_yaw_deg(),
+            )
+            ckpt_cam_right = camera_right_from_rover_axes(
+                last_valid_rover_forward_world,
+                last_valid_rover_right_world,
+                current_camera_mount_yaw_deg(),
+            )
+            ckpt_cam_up = np.cross(ckpt_cam_forward, ckpt_cam_right)
+            up_norm = float(np.linalg.norm(ckpt_cam_up))
+            if up_norm > 1e-6:
+                ckpt_cam_up = (ckpt_cam_up / up_norm).astype(np.float32)
+            else:
+                ckpt_cam_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            last_valid_R_world_cam = np.column_stack((ckpt_cam_right, ckpt_cam_up, ckpt_cam_forward)).astype(np.float32)
+            recovery_alignment_offset_t = np.array(ckpt_align_t, dtype=np.float32).reshape(3,)
+            recovery_alignment_yaw_deg = float(recovery_checkpoint.get("alignment_yaw_deg", 0.0) or 0.0)
+            map_origin_t = np.array(ckpt_map_origin, dtype=np.float32).reshape(3,)
+            map_origin_set = bool(recovery_checkpoint.get("map_origin_set", False))
+            last_valid_navx_yaw_deg = recovery_checkpoint.get("navx_yaw_deg")
+            navx_sign = float(recovery_checkpoint.get("navx_sign", navx_sign) or navx_sign)
+            navx_sign_locked = bool(recovery_checkpoint.get("navx_sign_locked", navx_sign_locked))
+            have_valid_tracking_pose = bool(recovery_checkpoint.get("have_valid_tracking_pose", True))
+            recovery_pending_alignment = bool(tracking_enabled and have_valid_tracking_pose)
+            goal_payload = recovery_checkpoint.get("goal_cell")
+            if isinstance(goal_payload, (list, tuple)) and len(goal_payload) == 2:
+                try:
+                    goal_candidate = (int(goal_payload[0]), int(goal_payload[1]))
+                except Exception:
+                    goal_candidate = None
+                if goal_candidate is not None:
+                    if 0 <= goal_candidate[0] < occ_map.grid_h and 0 <= goal_candidate[1] < occ_map.grid_w:
+                        goal_cell = goal_candidate
+            print(
+                "Loaded recovery checkpoint: "
+                f"pose=({last_valid_t_world_cam[0]:+.2f}, {last_valid_t_world_cam[2]:+.2f}) "
+                f"heading={rover_heading_deg_from_forward(last_valid_rover_forward_world):+.1f}deg"
+                + (" with saved goal." if goal_cell is not None else ".")
+            )
+            publish_recovery_checkpoint_to_nt(recovery_checkpoint)
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
     smooth_map_enabled = False
@@ -1105,6 +1246,8 @@ def main():
     test_excavation_right_extend_active = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
+    test_door_open_active = False
+    test_door_close_active = False
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
     direct_nav_enabled = False
@@ -1169,6 +1312,175 @@ def main():
             os.replace(tmp_path, path)
         except Exception:
             pass
+
+    def _json_vec3(value):
+        arr = np.array(value, dtype=np.float32).reshape(3,)
+        return [float(arr[0]), float(arr[1]), float(arr[2])]
+
+    def _parse_vec3(payload, key, default=None):
+        raw = payload.get(key)
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            return None if default is None else np.array(default, dtype=np.float32).reshape(3,)
+        try:
+            return np.array([float(raw[0]), float(raw[1]), float(raw[2])], dtype=np.float32)
+        except Exception:
+            return None if default is None else np.array(default, dtype=np.float32).reshape(3,)
+
+    def recovery_checkpoint_payload(navx_yaw_deg=None):
+        payload = {
+            "version": 1,
+            "timestamp_ms": int(time.time() * 1000),
+            "tracking_enabled": bool(tracking_enabled),
+            "have_valid_tracking_pose": bool(have_valid_tracking_pose),
+            "camera_t_world": _json_vec3(last_valid_t_world_cam),
+            "rover_forward_world": _json_vec3(last_valid_rover_forward_world),
+            "rover_right_world": _json_vec3(last_valid_rover_right_world),
+            "map_origin_t": _json_vec3(map_origin_t),
+            "map_origin_set": bool(map_origin_set),
+            "alignment_offset_t": _json_vec3(recovery_alignment_offset_t),
+            "alignment_yaw_deg": float(recovery_alignment_yaw_deg),
+            "navx_yaw_deg": None if navx_yaw_deg is None or (not np.isfinite(navx_yaw_deg)) else float(navx_yaw_deg),
+            "navx_sign": float(navx_sign),
+            "navx_sign_locked": bool(navx_sign_locked),
+            "goal_cell": None if goal_cell is None else [int(goal_cell[0]), int(goal_cell[1])],
+            "drive_heading_flip": bool(args.drive_heading_flip),
+            "map_save_path": str(args.map_save_path),
+        }
+        rover_pos_world = (
+            np.array(last_valid_t_world_cam, dtype=np.float32)
+            - np.array(last_valid_rover_forward_world, dtype=np.float32) * float(camera_forward_offset_m)
+            - np.array(last_valid_rover_right_world, dtype=np.float32) * float(camera_right_offset_m)
+        )
+        payload["rover_pos_world"] = _json_vec3(rover_pos_world)
+        payload["heading_deg"] = float(rover_heading_deg_from_forward(last_valid_rover_forward_world))
+        return payload
+
+    def load_recovery_checkpoint_from_nt():
+        if (sd is None) or (not args.recovery_nt_mirror):
+            return None
+        try:
+            stamp_ms = int(sd.getNumber("Jetson/RecoveryTimestampMs", 0.0))
+        except Exception:
+            return None
+        if stamp_ms <= 0:
+            return None
+        try:
+            pose_x = float(sd.getNumber("Jetson/RecoveryPoseX", float("nan")))
+            pose_y = float(sd.getNumber("Jetson/RecoveryPoseY", float("nan")))
+            pose_z = float(sd.getNumber("Jetson/RecoveryPoseZ", float("nan")))
+            fwd_x = float(sd.getNumber("Jetson/RecoveryForwardX", float("nan")))
+            fwd_y = float(sd.getNumber("Jetson/RecoveryForwardY", 0.0))
+            fwd_z = float(sd.getNumber("Jetson/RecoveryForwardZ", float("nan")))
+            right_x = float(sd.getNumber("Jetson/RecoveryRightX", float("nan")))
+            right_y = float(sd.getNumber("Jetson/RecoveryRightY", 0.0))
+            right_z = float(sd.getNumber("Jetson/RecoveryRightZ", float("nan")))
+            map_origin_x = float(sd.getNumber("Jetson/RecoveryMapOriginX", 0.0))
+            map_origin_y = float(sd.getNumber("Jetson/RecoveryMapOriginY", 0.0))
+            map_origin_z = float(sd.getNumber("Jetson/RecoveryMapOriginZ", 0.0))
+            align_x = float(sd.getNumber("Jetson/RecoveryAlignOffsetX", 0.0))
+            align_y = float(sd.getNumber("Jetson/RecoveryAlignOffsetY", 0.0))
+            align_z = float(sd.getNumber("Jetson/RecoveryAlignOffsetZ", 0.0))
+            align_yaw = float(sd.getNumber("Jetson/RecoveryAlignYawDeg", 0.0))
+            map_origin_valid = bool(sd.getBoolean("Jetson/RecoveryMapOriginSet", False))
+            navx_saved = float(sd.getNumber("Jetson/RecoveryNavXYawDeg", float("nan")))
+            navx_sign_saved = float(sd.getNumber("Jetson/RecoveryNavXSign", 1.0))
+            navx_sign_locked_saved = bool(sd.getBoolean("Jetson/RecoveryNavXSignLocked", False))
+            has_goal = bool(sd.getBoolean("Jetson/RecoveryHasGoal", False))
+            goal_r = int(sd.getNumber("Jetson/RecoveryGoalRow", -1.0))
+            goal_c = int(sd.getNumber("Jetson/RecoveryGoalCol", -1.0))
+        except Exception:
+            return None
+        vecs = [pose_x, pose_y, pose_z, fwd_x, fwd_z, right_x, right_z]
+        if not all(np.isfinite(v) for v in vecs):
+            return None
+        return {
+            "version": 1,
+            "timestamp_ms": stamp_ms,
+            "camera_t_world": [pose_x, pose_y, pose_z],
+            "rover_forward_world": [fwd_x, fwd_y, fwd_z],
+            "rover_right_world": [right_x, right_y, right_z],
+            "map_origin_t": [map_origin_x, map_origin_y, map_origin_z],
+            "map_origin_set": map_origin_valid,
+            "alignment_offset_t": [align_x, align_y, align_z],
+            "alignment_yaw_deg": align_yaw,
+            "navx_yaw_deg": navx_saved if np.isfinite(navx_saved) else None,
+            "navx_sign": navx_sign_saved,
+            "navx_sign_locked": navx_sign_locked_saved,
+            "goal_cell": [goal_r, goal_c] if has_goal and goal_r >= 0 and goal_c >= 0 else None,
+        }
+
+    def load_recovery_checkpoint():
+        best = None
+        if args.recovery_load and args.recovery_checkpoint_path and os.path.exists(args.recovery_checkpoint_path):
+            try:
+                with open(args.recovery_checkpoint_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    best = data
+            except Exception as exc:
+                print(f"Failed to load recovery checkpoint: {exc}")
+        nt_data = load_recovery_checkpoint_from_nt()
+        if nt_data is not None:
+            nt_stamp = int(nt_data.get("timestamp_ms", 0) or 0)
+            file_stamp = int(best.get("timestamp_ms", 0) or 0) if isinstance(best, dict) else 0
+            if nt_stamp > file_stamp:
+                best = nt_data
+        return best if isinstance(best, dict) else None
+
+    def publish_recovery_checkpoint_to_nt(payload):
+        if (sd is None) or (not args.recovery_nt_mirror) or (not isinstance(payload, dict)):
+            return
+        try:
+            cam_t = payload.get("camera_t_world") or [0.0, 0.0, 0.0]
+            rover_fwd = payload.get("rover_forward_world") or [1.0, 0.0, 0.0]
+            rover_right = payload.get("rover_right_world") or [0.0, 0.0, -1.0]
+            map_origin_vec = payload.get("map_origin_t") or [0.0, 0.0, 0.0]
+            align_vec = payload.get("alignment_offset_t") or [0.0, 0.0, 0.0]
+            goal = payload.get("goal_cell")
+            sd.putNumber("Jetson/RecoveryTimestampMs", float(payload.get("timestamp_ms", 0)))
+            sd.putNumber("Jetson/RecoveryPoseX", float(cam_t[0]))
+            sd.putNumber("Jetson/RecoveryPoseY", float(cam_t[1]))
+            sd.putNumber("Jetson/RecoveryPoseZ", float(cam_t[2]))
+            sd.putNumber("Jetson/RecoveryForwardX", float(rover_fwd[0]))
+            sd.putNumber("Jetson/RecoveryForwardY", float(rover_fwd[1]))
+            sd.putNumber("Jetson/RecoveryForwardZ", float(rover_fwd[2]))
+            sd.putNumber("Jetson/RecoveryRightX", float(rover_right[0]))
+            sd.putNumber("Jetson/RecoveryRightY", float(rover_right[1]))
+            sd.putNumber("Jetson/RecoveryRightZ", float(rover_right[2]))
+            sd.putNumber("Jetson/RecoveryMapOriginX", float(map_origin_vec[0]))
+            sd.putNumber("Jetson/RecoveryMapOriginY", float(map_origin_vec[1]))
+            sd.putNumber("Jetson/RecoveryMapOriginZ", float(map_origin_vec[2]))
+            sd.putBoolean("Jetson/RecoveryMapOriginSet", bool(payload.get("map_origin_set", False)))
+            sd.putNumber("Jetson/RecoveryAlignOffsetX", float(align_vec[0]))
+            sd.putNumber("Jetson/RecoveryAlignOffsetY", float(align_vec[1]))
+            sd.putNumber("Jetson/RecoveryAlignOffsetZ", float(align_vec[2]))
+            sd.putNumber("Jetson/RecoveryAlignYawDeg", float(payload.get("alignment_yaw_deg", 0.0)))
+            navx_saved = payload.get("navx_yaw_deg")
+            sd.putNumber("Jetson/RecoveryNavXYawDeg", 0.0 if navx_saved is None else float(navx_saved))
+            sd.putBoolean("Jetson/RecoveryHasNavX", navx_saved is not None)
+            sd.putNumber("Jetson/RecoveryNavXSign", float(payload.get("navx_sign", 1.0)))
+            sd.putBoolean("Jetson/RecoveryNavXSignLocked", bool(payload.get("navx_sign_locked", False)))
+            sd.putBoolean("Jetson/RecoveryHasGoal", bool(goal is not None))
+            sd.putNumber("Jetson/RecoveryGoalRow", -1.0 if goal is None else float(goal[0]))
+            sd.putNumber("Jetson/RecoveryGoalCol", -1.0 if goal is None else float(goal[1]))
+            sd.putNumber("Jetson/RecoveryHeadingDeg", float(payload.get("heading_deg", 0.0)))
+        except Exception:
+            pass
+
+    def save_recovery_checkpoint(force=False, navx_yaw_deg=None):
+        nonlocal recovery_checkpoint, last_recovery_save
+        if float(args.recovery_save_every) <= 0.0:
+            return
+        if not have_valid_tracking_pose:
+            return
+        now = time.time()
+        if (not force) and (now - last_recovery_save) < float(args.recovery_save_every):
+            return
+        payload = recovery_checkpoint_payload(navx_yaw_deg=navx_yaw_deg)
+        _write_json_atomic(args.recovery_checkpoint_path, payload)
+        publish_recovery_checkpoint_to_nt(payload)
+        recovery_checkpoint = payload
+        last_recovery_save = now
 
     def load_landmark_memory():
         nonlocal landmark_memory
@@ -1377,6 +1689,7 @@ def main():
         nonlocal auto_digger_enabled
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_door_open_active, test_door_close_active
         enabled = bool(enabled)
         if mode_name == "auto_digger":
             if auto_digger_enabled == enabled:
@@ -1403,6 +1716,20 @@ def main():
                 return
             test_excavation_lower_active = enabled
             print(f"Excavation lower simulation {'ON' if enabled else 'OFF'} via {source}.")
+        elif mode_name == "door_open":
+            if enabled:
+                test_door_close_active = False
+            if test_door_open_active == enabled:
+                return
+            test_door_open_active = enabled
+            print(f"Door actuators open {'ON' if enabled else 'OFF'} via {source}.")
+        elif mode_name == "door_close":
+            if enabled:
+                test_door_open_active = False
+            if test_door_close_active == enabled:
+                return
+            test_door_close_active = enabled
+            print(f"Door actuators close {'ON' if enabled else 'OFF'} via {source}.")
         else:
             return
         publish_map_ui_state(force=True)
@@ -1410,16 +1737,21 @@ def main():
     def stop_all_actuators(source="button"):
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_door_open_active, test_door_close_active
         changed = (
             test_excavation_left_extend_active
             or test_excavation_right_extend_active
             or test_excavation_dig_active
             or test_excavation_lower_active
+            or test_door_open_active
+            or test_door_close_active
         )
         test_excavation_left_extend_active = False
         test_excavation_right_extend_active = False
         test_excavation_dig_active = False
         test_excavation_lower_active = False
+        test_door_open_active = False
+        test_door_close_active = False
         if changed:
             print(f"Actuator manual commands stopped via {source}.")
             publish_map_ui_state(force=True)
@@ -1687,6 +2019,27 @@ def main():
         nonlocal status_scroll_y
         status_scroll_y = max(0, min(int(status_scroll_max), int(status_scroll_y + delta)))
 
+    def set_status_scroll_to(target_y):
+        nonlocal status_scroll_y
+        status_scroll_y = max(0, min(int(status_scroll_max), int(target_y)))
+
+    def window_to_image_coords(window_name, x, y, frame_shape):
+        if frame_shape is None:
+            return int(x), int(y)
+        img_h, img_w = int(frame_shape[0]), int(frame_shape[1])
+        if img_h <= 0 or img_w <= 0:
+            return int(x), int(y)
+        try:
+            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+            if win_w > 1 and win_h > 1:
+                x = int(round(float(x) * float(img_w) / float(win_w)))
+                y = int(round(float(y) * float(img_h) / float(win_h)))
+        except Exception:
+            pass
+        x = max(0, min(img_w - 1, int(x)))
+        y = max(0, min(img_h - 1, int(y)))
+        return x, y
+
     def reset_map_memory():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
         nonlocal path_plan_mode
@@ -1862,6 +2215,8 @@ def main():
                 "right_extend_command": bool(test_excavation_right_extend_active),
                 "dig_command": bool(test_excavation_dig_active),
                 "lower_command": bool(test_excavation_lower_active),
+                "door_open_command": bool(test_door_open_active),
+                "door_close_command": bool(test_door_close_active),
             },
             "controls": [
                 {
@@ -2051,6 +2406,20 @@ def main():
                     "label": "Lower Sim",
                     "command": "test_excavation_lower",
                     "active": bool(test_excavation_lower_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "door_open",
+                    "label": "Open Door",
+                    "command": "door_open",
+                    "active": bool(test_door_open_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "door_close",
+                    "label": "Close Door",
+                    "command": "door_close",
+                    "active": bool(test_door_close_active),
                     "enabled": True,
                 },
                 {
@@ -2260,6 +2629,8 @@ def main():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
         nonlocal path_plan_mode, mining_goal_active
+        if last_map_window_shape is not None:
+            x, y = window_to_image_coords("ZED Occupancy Map (XZ)", x, y, last_map_window_shape)
         if event == cv2.EVENT_RBUTTONDOWN:
             emergency_stop = True
             print("EMERGENCY STOP")
@@ -2340,6 +2711,8 @@ def main():
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
         nonlocal reset_map_confirm
         nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
+        if last_status_panel_shape is not None:
+            x, y = window_to_image_coords("ZED Drive Status", x, y, last_status_panel_shape)
         if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
             try:
                 wheel_delta = cv2.getMouseWheelDelta(flags)
@@ -2378,6 +2751,14 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_status_scroll(90)
+                return
+        for jump_name, target_y in status_section_jump_targets.items():
+            rect = status_button_rects.get(jump_name)
+            if rect is None:
+                continue
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_status_scroll_to(int(target_y))
                 return
         # Brush size slider supports drag.
         rect = status_button_rects.get("brush_slider")
@@ -2486,6 +2867,18 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_excavation_test_mode("lower", not test_excavation_lower_active, "button")
+                return
+        rect = status_button_rects.get("door_open")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("door_open", not test_door_open_active, "button")
+                return
+        rect = status_button_rects.get("door_close")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_test_mode("door_close", not test_door_close_active, "button")
                 return
         rect = status_button_rects.get("stop_actuators")
         if rect is not None:
@@ -2761,6 +3154,10 @@ def main():
             set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "external command")
         elif action == "test_excavation_lower":
             set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
+        elif action == "door_open":
+            set_excavation_test_mode("door_open", not test_door_open_active, "external command")
+        elif action == "door_close":
+            set_excavation_test_mode("door_close", not test_door_close_active, "external command")
         elif action == "stop_actuators":
             stop_all_actuators("external command")
         elif action == "main_rover_mode":
@@ -2864,6 +3261,18 @@ def main():
             else:
                 left_extend_enabled = test_excavation_left_extend_active
                 right_extend_enabled = test_excavation_right_extend_active
+            door_open_enabled = bool(test_door_open_active)
+            door_close_enabled = bool(test_door_close_active)
+            if enabled and not (door_open_enabled or door_close_enabled):
+                if mining.state == auto_mining.MiningState.DEPOSITING:
+                    door_open_enabled = True
+                elif mining.state in (
+                    auto_mining.MiningState.NAVIGATE_DIG,
+                    auto_mining.MiningState.DIGGING,
+                    auto_mining.MiningState.BACKUP,
+                    auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                ):
+                    door_close_enabled = True
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
@@ -2874,6 +3283,8 @@ def main():
             sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(excavator_lower_requested))
             sd.putBoolean("Jetson/ExcavatorLeftExtend", bool(left_extend_enabled))
             sd.putBoolean("Jetson/ExcavatorRightExtend", bool(right_extend_enabled))
+            sd.putBoolean("Jetson/DoorActuatorsOpen", bool(door_open_enabled and not door_close_enabled))
+            sd.putBoolean("Jetson/DoorActuatorsClose", bool(door_close_enabled and not door_open_enabled))
             # Robot-side code may scale command by these keys.
             if enabled:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
@@ -2974,11 +3385,12 @@ def main():
 
     def render_status_panel(cam_cell):
         nonlocal status_scroll_y, status_scroll_max
-        panel_h = 980
-        panel_w = 700
+        panel_h = 1180
+        panel_w = 820
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
         status_button_rects.clear()
+        status_section_jump_targets.clear()
 
         def put_line(text, y, color=(235, 235, 235), scale=0.55):
             cv2.putText(
@@ -3261,40 +3673,64 @@ def main():
             cv2.LINE_AA,
         )
 
-        controls_top = dig_name_rect[3] + 12
+        jump_bar_top = dig_name_rect[3] + 16
+        jump_bar_h = 40
+        jump_gap = 10
+        jump_buttons = [
+            ("jump_map_tools", "Map"),
+            ("jump_zones_camera", "Zones"),
+            ("jump_calibration", "Calibration"),
+            ("jump_actuators", "Actuators"),
+            ("jump_dig_profiles", "Dig"),
+        ]
+        jump_btn_w = int((panel_w - 32 - (len(jump_buttons) - 1) * jump_gap) / len(jump_buttons))
+
+        def draw_nav_button(rect, label, fill, border):
+            x0, y0, x1b, y1b = rect
+            cv2.rectangle(panel, (x0, y0), (x1b, y1b), fill, -1)
+            cv2.rectangle(panel, (x0, y0), (x1b, y1b), border, 1)
+            tsz, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.50, 1)
+            cv2.putText(
+                panel,
+                label,
+                (x0 + (x1b - x0 - tsz[0]) // 2, y0 + (y1b - y0 + tsz[1]) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
+        put_line("Quick Access", jump_bar_top - 6, (170, 200, 230), 0.44)
+        for idx, (jump_name, jump_label) in enumerate(jump_buttons):
+            x0 = 16 + idx * (jump_btn_w + jump_gap)
+            rect = (x0, jump_bar_top, x0 + jump_btn_w, jump_bar_top + jump_bar_h)
+            status_button_rects[jump_name] = rect
+            draw_nav_button(rect, jump_label, (46, 72, 112), (145, 195, 255))
+
+        controls_top = jump_bar_top + jump_bar_h + 18
         controls_bottom = panel_h - 20
         controls_h = max(1, controls_bottom - controls_top)
-        button_h = 42
-        gap = 14
-        button_w = max(132, int((panel_w - 32 - 2 * gap) / 3))
-        x1 = 16 + button_w + gap
-        x2 = 16 + 2 * (button_w + gap)
-        row0 = 36
-        row1 = row0 + button_h + 10
-        row2 = row1 + button_h + 10
-        row3 = row2 + button_h + 10
-        row4 = row3 + button_h + 10
-        row5 = row4 + button_h + 10
-        row6 = row5 + button_h + 10
-        row7 = row6 + button_h + 10
-        row8 = row7 + button_h + 10
-        row9 = row8 + button_h + 10
-        row10 = row9 + button_h + 10
-        row11 = row10 + button_h + 10
-        row12 = row11 + button_h + 10
-        slider_y = row12 + button_h + 20
-        summary_y = slider_y + 62
-        content_h = summary_y + 232
-        controls = np.zeros((content_h, panel_w, 3), dtype=np.uint8)
-        controls[:] = (28, 28, 28)
+        button_h = 46
+        card_gap = 14
+        card_x0 = 10
+        card_x1 = panel_w - 10
+        card_inner = 14
+        grid_gap = 12
+        button_w = max(160, int((card_x1 - card_x0 - 2 * card_inner - 2 * grid_gap) / 3))
+        controls = np.zeros((2600, panel_w, 3), dtype=np.uint8)
+        controls[:] = (24, 24, 28)
 
-        def put_control_line(text, y, color=(235, 235, 235), scale=0.48):
-            cv2.putText(controls, text, (16, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
+        def tint(color, mix=0.35, base=(36, 36, 42)):
+            return tuple(int(base[i] * (1.0 - mix) + int(color[i]) * mix) for i in range(3))
+
+        def put_control_line(text, y, color=(235, 235, 235), scale=0.48, x=22):
+            cv2.putText(controls, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
         def draw_control_button(rect, label, enabled, active=False, active_color=(70, 130, 220), active_border=(200, 200, 200)):
             x0, y0, x1b, y1b = rect
-            fill = active_color if active else ((70, 130, 220) if enabled else (50, 50, 50))
-            border = active_border if active else ((200, 200, 200) if enabled else (120, 120, 120))
+            fill = active_color if active else ((66, 104, 164) if enabled else (48, 48, 54))
+            border = active_border if active else ((220, 225, 230) if enabled else (120, 120, 126))
             text_color = (255, 255, 255) if enabled or active else (180, 180, 180)
             cv2.rectangle(controls, (x0, y0), (x1b, y1b), fill, -1)
             cv2.rectangle(controls, (x0, y0), (x1b, y1b), border, 2 if active else 1)
@@ -3323,6 +3759,24 @@ def main():
             if srect is not None:
                 status_button_rects[name] = srect
 
+        def section_frame(y0, height, title, subtitle, accent, key):
+            x0 = card_x0
+            x1b = card_x1
+            cv2.rectangle(controls, (x0, y0), (x1b, y0 + height), (30, 30, 36), -1)
+            cv2.rectangle(controls, (x0, y0), (x1b, y0 + height), tint(accent, 0.90), 1)
+            cv2.rectangle(controls, (x0, y0), (x1b, y0 + 38), tint(accent, 0.45), -1)
+            cv2.putText(controls, title, (x0 + 14, y0 + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 1, cv2.LINE_AA)
+            if subtitle:
+                cv2.putText(controls, subtitle, (x0 + 14, y0 + 54), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (190, 210, 230), 1, cv2.LINE_AA)
+            section_offsets[key] = y0
+            return y0 + 72
+
+        def grid_rect(body_y, row_idx, col_idx, span=1):
+            x0 = card_x0 + card_inner + col_idx * (button_w + grid_gap)
+            width = span * button_w + (span - 1) * grid_gap
+            y0 = body_y + row_idx * (button_h + 10)
+            return (x0, y0, x0 + width, y0 + button_h)
+
         button_enabled = mining_buttons_enabled()
         mining_running = mining.state in (
             auto_mining.MiningState.PLAN_SWEEP,
@@ -3345,77 +3799,89 @@ def main():
             auto_mining.MiningState.ABORTED,
         )
 
-        auto_run_rect = (16, row0, 16 + 2 * button_w + gap, row0 + button_h)
-        excav_rect = (16, row1, 16 + button_w, row1 + button_h)
-        deposit_rect = (x1, row1, x1 + button_w, row1 + button_h)
-        whole_rect = (x2, row1, x2 + button_w, row1 + button_h)
-        obstacle_rect = (16, row2, 16 + button_w, row2 + button_h)
-        paint_rect = (x1, row2, x1 + button_w, row2 + button_h)
-        erase_rect = (x2, row2, x2 + button_w, row2 + button_h)
-        smooth_rect = (16, row3, 16 + button_w, row3 + button_h)
-        holes_rect = (x1, row3, x1 + button_w, row3 + button_h)
-        clear_paint_rect = (x2, row3, x2 + button_w, row3 + button_h)
-        reset_map_rect = (16, row4, 16 + button_w, row4 + button_h)
-        lock_green_rect = (x1, row4, x1 + button_w, row4 + button_h)
-        pick_dig_start_rect = (x2, row4, x2 + button_w, row4 + button_h)
-        zoom_in_rect = (16, row5, 16 + button_w, row5 + button_h)
-        zoom_out_rect = (x1, row5, x1 + button_w, row5 + button_h)
-        main_rover_rect = (x2, row5, x2 + button_w, row5 + button_h)
-        camera_view_rect = (16, row6, 16 + button_w, row6 + button_h)
-        camera_overlay_rect = (x1, row6, x1 + button_w, row6 + button_h)
-        drive_heading_flip_rect = (x2, row6, x2 + button_w, row6 + button_h)
-        auto_digger_rect = (16, row7, 16 + button_w, row7 + button_h)
-        direct_nav_rect = (x1, row7, x1 + button_w, row7 + button_h)
-        test_excavation_lower_rect = (x2, row7, x2 + button_w, row7 + button_h)
-        test_excavation_left_extend_rect = (16, row8, 16 + button_w, row8 + button_h)
-        test_excavation_right_extend_rect = (x1, row8, x1 + button_w, row8 + button_h)
-        test_excavation_dig_rect = (x2, row8, x2 + button_w, row8 + button_h)
-        drive_calibration_mode_rect = (16, row9, 16 + button_w, row9 + button_h)
-        drive_calibration_cancel_rect = (x1, row9, x1 + button_w, row9 + button_h)
-        dig_style_cycle_rect = (x2, row9, x2 + button_w, row9 + button_h)
-        dig_phase_cycle_rect = (16, row10, 16 + button_w, row10 + button_h)
-        dig_record_dig_rect = (x1, row10, x1 + button_w, row10 + button_h)
-        dig_record_stop_rect = (x2, row10, x2 + button_w, row10 + button_h)
-        dig_record_retract_rect = (16, row11, 16 + button_w, row11 + button_h)
-        dig_profile_prev_rect = (x1, row11, x1 + button_w, row11 + button_h)
-        dig_profile_next_rect = (x2, row11, x2 + button_w, row11 + button_h)
-        dig_profile_use_rect = (16, row12, 16 + button_w, row12 + button_h)
-        dig_profile_delete_rect = (x1, row12, x1 + button_w, row12 + button_h)
-        stop_actuators_rect = (x2, row12, x2 + button_w, row12 + button_h)
+        section_offsets = {}
+        cursor_y = 12
 
+        map_section_h = 72 + 5 * (button_h + 10) + 84
+        map_body_y = section_frame(
+            cursor_y,
+            map_section_h,
+            "Map Tools",
+            "Run, navigation, paint tools, and persistent map controls.",
+            (88, 170, 255),
+            "map_tools",
+        )
+        auto_run_rect = grid_rect(map_body_y, 0, 0, span=2)
+        direct_nav_rect = grid_rect(map_body_y, 0, 2)
+        whole_rect = grid_rect(map_body_y, 1, 0)
+        smooth_rect = grid_rect(map_body_y, 1, 1)
+        holes_rect = grid_rect(map_body_y, 1, 2)
+        zoom_in_rect = grid_rect(map_body_y, 2, 0)
+        zoom_out_rect = grid_rect(map_body_y, 2, 1)
+        reset_map_rect = grid_rect(map_body_y, 2, 2)
+        obstacle_rect = grid_rect(map_body_y, 3, 0)
+        paint_rect = grid_rect(map_body_y, 3, 1)
+        erase_rect = grid_rect(map_body_y, 3, 2)
+        clear_paint_rect = grid_rect(map_body_y, 4, 0)
+        lock_green_rect = grid_rect(map_body_y, 4, 1)
+        main_rover_rect = grid_rect(map_body_y, 4, 2)
+        slider_y = map_body_y + 5 * (button_h + 10) + 16
+        btn_sm = 36
+        brush_minus_rect = (card_x0 + card_inner, slider_y + 6, card_x0 + card_inner + btn_sm, slider_y + 6 + btn_sm)
+        brush_plus_rect = (card_x1 - card_inner - btn_sm, slider_y + 6, card_x1 - card_inner, slider_y + 6 + btn_sm)
+        slider_x0 = brush_minus_rect[2] + 10
+        slider_x1 = brush_plus_rect[0] - 10
+        brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 48)
         auto_run_label = "Stop Auto Run" if _mining_active else "Start Auto Run"
         draw_control_button(auto_run_rect, auto_run_label, True, _mining_active, (0, 140, 40), (60, 240, 100))
-        excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
-        deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
-        draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
-        draw_control_button(deposit_rect, deposit_label, zone_buttons_enabled, deposit_drawing or deposit_set, (180, 150, 0), (255, 230, 80))
-        draw_control_button(whole_rect, "Whole Map", button_enabled)
-        draw_control_button(obstacle_rect, "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
-                            True, paint_obstacle_mode, (0, 0, 200), (80, 80, 255))
-        draw_control_button(paint_rect, "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
-                            True, paint_safe_mode, (0, 180, 80), (80, 255, 140))
-        draw_control_button(erase_rect, "Erase: ON" if erase_safe_mode else "Erase Safe",
-                            True, erase_safe_mode, (0, 80, 200), (80, 140, 255))
-        draw_control_button(smooth_rect, "Smooth Map: ON" if smooth_map_enabled else "Smooth Map",
-                            button_enabled, smooth_map_enabled, (0, 160, 160), (80, 220, 220))
-        draw_control_button(holes_rect, "Disable Holes", button_enabled)
-        draw_control_button(clear_paint_rect, "Clear Paint", True)
-        draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
-        lock_label = "Green Locked" if lock_green_applied else "Lock Green"
-        draw_control_button(lock_green_rect, lock_label, True, lock_green_applied, (0, 160, 80), (80, 255, 140))
-        pick_label = "Picking Start..." if picking_dig_start else (
-            "Dig Start Set" if mining.preferred_start_rc is not None else "Pick Dig Start"
-        )
         draw_control_button(
-            pick_dig_start_rect,
-            pick_label,
-            zone_buttons_enabled and excav_set,
-            picking_dig_start or mining.preferred_start_rc is not None,
-            (0, 170, 70),
-            (100, 255, 160),
+            direct_nav_rect,
+            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
+            True,
+            direct_nav_enabled,
+            (0, 150, 90),
+            (100, 255, 180),
         )
+        draw_control_button(whole_rect, "Whole Map", button_enabled)
+        draw_control_button(
+            smooth_rect,
+            "Smooth Map: ON" if smooth_map_enabled else "Smooth Map",
+            button_enabled,
+            smooth_map_enabled,
+            (0, 160, 160),
+            (80, 220, 220),
+        )
+        draw_control_button(holes_rect, "Disable Holes", button_enabled)
         draw_control_button(zoom_in_rect, "+ Zoom", True)
         draw_control_button(zoom_out_rect, "- Zoom", True)
+        draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
+        draw_control_button(
+            obstacle_rect,
+            "Paint Obstacle: ON" if paint_obstacle_mode else "Paint Obstacle",
+            True,
+            paint_obstacle_mode,
+            (0, 0, 200),
+            (80, 80, 255),
+        )
+        draw_control_button(
+            paint_rect,
+            "Paint Safe: ON" if paint_safe_mode else "Paint Safe",
+            True,
+            paint_safe_mode,
+            (0, 180, 80),
+            (80, 255, 140),
+        )
+        draw_control_button(
+            erase_rect,
+            "Erase: ON" if erase_safe_mode else "Erase Safe",
+            True,
+            erase_safe_mode,
+            (0, 80, 200),
+            (80, 140, 255),
+        )
+        draw_control_button(clear_paint_rect, "Clear Paint", True)
+        lock_label = "Green Locked" if lock_green_applied else "Lock Green"
+        draw_control_button(lock_green_rect, lock_label, True, lock_green_applied, (0, 160, 80), (80, 255, 140))
         draw_control_button(
             main_rover_rect,
             "Main Rover: ON" if args.main_rover_mode else "Main Rover",
@@ -3423,6 +3889,59 @@ def main():
             args.main_rover_mode,
             (0, 120, 200),
             (80, 220, 255),
+        )
+        put_control_line("Brush size", slider_y - 2, (170, 200, 230), 0.44, x=card_x0 + card_inner)
+        cv2.rectangle(controls, (slider_x0, slider_y + 18), (slider_x1, slider_y + 34), (60, 60, 60), -1)
+        cv2.rectangle(controls, (slider_x0, slider_y + 18), (slider_x1, slider_y + 34), (120, 120, 120), 1)
+        frac = (paint_brush_radius - 1) / 14.0
+        knob_x = int(slider_x0 + frac * (slider_x1 - slider_x0))
+        cv2.circle(controls, (knob_x, slider_y + 26), 11, (100, 200, 255), -1)
+        cv2.circle(controls, (knob_x, slider_y + 26), 11, (200, 240, 255), 1)
+        put_control_line(f"Brush: {paint_brush_radius} cells", slider_y + 52, (220, 240, 255), 0.44, x=card_x0 + card_inner)
+        for rect, lbl in ((brush_minus_rect, "-"), (brush_plus_rect, "+")):
+            x0b, y0b, x1b, y1b = rect
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (70, 130, 220), -1)
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (200, 200, 200), 1)
+            tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.putText(
+                controls,
+                lbl,
+                (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+        cursor_y += map_section_h + card_gap
+
+        zones_section_h = 72 + 2 * (button_h + 10) + 20
+        zones_body_y = section_frame(
+            cursor_y,
+            zones_section_h,
+            "Zones & Camera",
+            "Excavation/deposit selection and camera access.",
+            (255, 188, 92),
+            "zones_camera",
+        )
+        excav_rect = grid_rect(zones_body_y, 0, 0)
+        deposit_rect = grid_rect(zones_body_y, 0, 1)
+        pick_dig_start_rect = grid_rect(zones_body_y, 0, 2)
+        camera_view_rect = grid_rect(zones_body_y, 1, 0)
+        camera_overlay_rect = grid_rect(zones_body_y, 1, 1)
+        auto_digger_rect = grid_rect(zones_body_y, 1, 2)
+        excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
+        deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
+        draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
+        draw_control_button(deposit_rect, deposit_label, zone_buttons_enabled, deposit_drawing or deposit_set, (180, 150, 0), (255, 230, 80))
+        pick_label = "Picking Start..." if picking_dig_start else ("Dig Start Set" if mining.preferred_start_rc is not None else "Pick Dig Start")
+        draw_control_button(
+            pick_dig_start_rect,
+            pick_label,
+            zone_buttons_enabled and excav_set,
+            picking_dig_start or mining.preferred_start_rc is not None,
+            (0, 170, 70),
+            (100, 255, 160),
         )
         camera_label = "Camera: Deposit 0" if (
             servo_deposit_view
@@ -3446,14 +3965,6 @@ def main():
             (120, 220, 255),
         )
         draw_control_button(
-            drive_heading_flip_rect,
-            "Flip Drive: ON" if args.drive_heading_flip else "Flip Drive",
-            True,
-            bool(args.drive_heading_flip),
-            (180, 80, 0),
-            (255, 190, 110),
-        )
-        draw_control_button(
             auto_digger_rect,
             "Enable Digger: ON" if auto_digger_enabled else "Enable Digger",
             True,
@@ -3461,14 +3972,74 @@ def main():
             (0, 140, 60),
             (110, 255, 150),
         )
-        draw_control_button(
-            direct_nav_rect,
-            "Direct Nav: ON" if direct_nav_enabled else "Direct Nav",
-            True,
-            direct_nav_enabled,
-            (0, 150, 90),
-            (100, 255, 180),
+        cursor_y += zones_section_h + card_gap
+
+        cal_section_h = 72 + 1 * (button_h + 10) + 70
+        cal_body_y = section_frame(
+            cursor_y,
+            cal_section_h,
+            "Calibration & Drive",
+            "Drive flip and heading calibration tools.",
+            (118, 182, 255),
+            "calibration",
         )
+        drive_calibration_mode_rect = grid_rect(cal_body_y, 0, 0)
+        drive_calibration_cancel_rect = grid_rect(cal_body_y, 0, 1)
+        drive_heading_flip_rect = grid_rect(cal_body_y, 0, 2)
+        draw_control_button(
+            drive_calibration_mode_rect,
+            "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
+            True,
+            drive_calibration.active,
+            (0, 130, 200),
+            (90, 220, 255),
+        )
+        draw_control_button(
+            drive_calibration_cancel_rect,
+            "Cancel Cal",
+            bool(drive_calibration.active or drive_calibration.target_cell is not None),
+            False,
+        )
+        draw_control_button(
+            drive_heading_flip_rect,
+            "Flip Drive: ON" if args.drive_heading_flip else "Flip Drive",
+            True,
+            bool(args.drive_heading_flip),
+            (180, 80, 0),
+            (255, 190, 110),
+        )
+        put_control_line(
+            f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
+            cal_body_y + button_h + 34,
+            (180, 220, 255),
+            0.44,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            drive_calibration.last_result[:88],
+            cal_body_y + button_h + 58,
+            (210, 230, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        cursor_y += cal_section_h + card_gap
+
+        actuators_section_h = 72 + 3 * (button_h + 10) + 52
+        actuators_body_y = section_frame(
+            cursor_y,
+            actuators_section_h,
+            "Actuators & Manual Test",
+            "Manual excavator and door outputs for bench checks and recovery.",
+            (208, 148, 255),
+            "actuators",
+        )
+        test_excavation_lower_rect = grid_rect(actuators_body_y, 0, 0)
+        stop_actuators_rect = grid_rect(actuators_body_y, 0, 1, span=2)
+        test_excavation_left_extend_rect = grid_rect(actuators_body_y, 1, 0)
+        test_excavation_right_extend_rect = grid_rect(actuators_body_y, 1, 1)
+        test_excavation_dig_rect = grid_rect(actuators_body_y, 1, 2)
+        door_open_rect = grid_rect(actuators_body_y, 2, 0)
+        door_close_rect = grid_rect(actuators_body_y, 2, 1)
         draw_control_button(
             test_excavation_lower_rect,
             "Lower Sim: ON" if test_excavation_lower_active else "Lower Sim",
@@ -3476,6 +4047,14 @@ def main():
             test_excavation_lower_active,
             (140, 70, 140),
             (235, 150, 235),
+        )
+        draw_control_button(
+            stop_actuators_rect,
+            "Stop Actuators",
+            True,
+            False,
+            (120, 60, 0),
+            (255, 180, 120),
         )
         draw_control_button(
             test_excavation_left_extend_rect,
@@ -3502,29 +4081,55 @@ def main():
             (80, 170, 255),
         )
         draw_control_button(
-            drive_calibration_mode_rect,
-            "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
+            door_open_rect,
+            "Open Door: ON" if test_door_open_active else "Open Door",
             True,
-            drive_calibration.active,
-            (0, 130, 200),
-            (90, 220, 255),
+            test_door_open_active,
+            (0, 120, 60),
+            (130, 255, 170),
         )
         draw_control_button(
-            drive_calibration_cancel_rect,
-            "Cancel Cal",
-            bool(drive_calibration.active or drive_calibration.target_cell is not None),
-            False,
-        )
-        draw_control_button(
-            dig_style_cycle_rect,
-            f"Dig Style: {dig_profiles.active_style.title()}",
+            door_close_rect,
+            "Close Door: ON" if test_door_close_active else "Close Door",
             True,
-            False,
+            test_door_close_active,
+            (170, 90, 0),
+            (255, 200, 120),
         )
+        door_mode_text = "Manual door override active" if (test_door_open_active or test_door_close_active) else "Door auto: closes for dig, opens for deposit"
+        put_control_line(
+            door_mode_text,
+            actuators_body_y + 3 * (button_h + 10) + 10,
+            (220, 232, 255),
+            0.41,
+            x=card_x0 + card_inner,
+        )
+        cursor_y += actuators_section_h + card_gap
+
+        dig_section_h = 72 + 4 * (button_h + 10) + 170
+        dig_body_y = section_frame(
+            cursor_y,
+            dig_section_h,
+            "Dig Recording & Profiles",
+            "Record, browse, and select dig/retract routines by style.",
+            (122, 220, 160),
+            "dig_profiles",
+        )
+        dig_style_cycle_rect = grid_rect(dig_body_y, 0, 0)
+        dig_phase_cycle_rect = grid_rect(dig_body_y, 0, 1)
+        dig_profile_use_rect = grid_rect(dig_body_y, 0, 2)
+        dig_record_dig_rect = grid_rect(dig_body_y, 1, 0)
+        dig_record_retract_rect = grid_rect(dig_body_y, 1, 1)
+        dig_record_stop_rect = grid_rect(dig_body_y, 1, 2)
+        dig_profile_prev_rect = grid_rect(dig_body_y, 2, 0)
+        dig_profile_next_rect = grid_rect(dig_body_y, 2, 1)
+        dig_profile_delete_rect = grid_rect(dig_body_y, 2, 2)
+        draw_control_button(dig_style_cycle_rect, f"Dig Style: {dig_profiles.active_style.title()}", True, False)
+        draw_control_button(dig_phase_cycle_rect, f"Phase: {dig_profiles.active_phase.title()}", True, False)
         draw_control_button(
-            dig_phase_cycle_rect,
-            f"Phase: {dig_profiles.active_phase.title()}",
-            True,
+            dig_profile_use_rect,
+            "Use Profile",
+            bool(dig_profiles.get_cursor_profile() is not None),
             False,
         )
         draw_control_button(
@@ -3554,47 +4159,11 @@ def main():
         draw_control_button(dig_profile_prev_rect, "Dig Prev", True)
         draw_control_button(dig_profile_next_rect, "Dig Next", True)
         draw_control_button(
-            dig_profile_use_rect,
-            "Use Profile",
-            bool(dig_profiles.get_cursor_profile() is not None),
-            False,
-        )
-        draw_control_button(
             dig_profile_delete_rect,
             "Delete Profile",
             bool(dig_profiles.get_cursor_profile() is not None),
             False,
         )
-        draw_control_button(
-            stop_actuators_rect,
-            "Stop Actuators",
-            True,
-            False,
-            (120, 60, 0),
-            (255, 180, 120),
-        )
-
-        btn_sm = 36
-        brush_minus_rect = (16, slider_y + 4, 16 + btn_sm, slider_y + 4 + btn_sm)
-        brush_plus_rect = (panel_w - 16 - btn_sm, slider_y + 4, panel_w - 16, slider_y + 4 + btn_sm)
-        slider_x0 = brush_minus_rect[2] + 8
-        slider_x1 = brush_plus_rect[0] - 8
-        brush_slider_rect = (slider_x0, slider_y, slider_x1, slider_y + 44)
-        put_control_line("Brush size:", slider_y - 8, (170, 200, 230), 0.44)
-        cv2.rectangle(controls, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (60, 60, 60), -1)
-        cv2.rectangle(controls, (slider_x0, slider_y + 14), (slider_x1, slider_y + 30), (120, 120, 120), 1)
-        frac = (paint_brush_radius - 1) / 14.0
-        knob_x = int(slider_x0 + frac * (slider_x1 - slider_x0))
-        cv2.circle(controls, (knob_x, slider_y + 22), 11, (100, 200, 255), -1)
-        cv2.circle(controls, (knob_x, slider_y + 22), 11, (200, 240, 255), 1)
-        put_control_line(f"Brush: {paint_brush_radius}", slider_y + 28, (220, 240, 255), 0.46)
-        for rect, lbl in ((brush_minus_rect, "-"), (brush_plus_rect, "+")):
-            x0b, y0b, x1b, y1b = rect
-            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (70, 130, 220), -1)
-            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (200, 200, 200), 1)
-            tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-            cv2.putText(controls, lbl, (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
         selected_short_dig = dig_profiles.selected.get("short", {}).get("dig") or "none"
         selected_short_retract = dig_profiles.selected.get("short", {}).get("retract") or "none"
@@ -3608,42 +4177,52 @@ def main():
             if dig_profiles.recording and dig_profiles.recording_style and dig_profiles.recording_phase
             else "Recording: OFF"
         )
-        put_control_line(f"Drive calibration: {'ON' if drive_calibration.active else 'OFF'}", summary_y + 8, (180, 220, 255), 0.44)
-        put_control_line(drive_calibration.last_result[:64], summary_y + 30, (210, 230, 255), 0.40)
+        summary_y = dig_body_y + 3 * (button_h + 10) + 34
         put_control_line(
-            f"Active dig style: {dig_profiles.active_style.upper()} {dig_profiles.active_phase.upper()} | {recording_text}",
-            summary_y + 56,
+            f"Active {dig_profiles.active_style.upper()} {dig_profiles.active_phase.upper()} | {recording_text}",
+            summary_y,
             (180, 255, 200),
             0.42,
+            x=card_x0 + card_inner,
         )
-        put_control_line(f"Short dig: {selected_short_dig[:38]}", summary_y + 80, (235, 235, 235), 0.40)
-        put_control_line(f"Short retract: {selected_short_retract[:34]}", summary_y + 102, (235, 235, 235), 0.40)
-        put_control_line(f"Long dig: {selected_long_dig[:39]}", summary_y + 124, (235, 235, 235), 0.40)
-        put_control_line(f"Long retract: {selected_long_retract[:35]}", summary_y + 146, (235, 235, 235), 0.40)
+        put_control_line(f"Short dig: {selected_short_dig[:42]}", summary_y + 24, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Short retract: {selected_short_retract[:38]}", summary_y + 46, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Long dig: {selected_long_dig[:43]}", summary_y + 68, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Long retract: {selected_long_retract[:39]}", summary_y + 90, (235, 235, 235), 0.40, x=card_x0 + card_inner)
         put_control_line(
-            f"Browse {dig_profiles.active_style} {dig_profiles.active_phase}: {cursor_name[:24]} ({cursor_duration:.2f}s)",
-            summary_y + 168,
+            f"Browse {dig_profiles.active_style}/{dig_profiles.active_phase}: {cursor_name[:26]} ({cursor_duration:.2f}s)",
+            summary_y + 114,
             (255, 230, 190),
             0.40,
+            x=card_x0 + card_inner,
         )
-        visible_profiles = dig_profiles.list_profiles(dig_profiles.active_style)[:4]
         visible_profiles = dig_profiles.list_profiles(dig_profiles.active_style, dig_profiles.active_phase)[:4]
         put_control_line(
             f"{dig_profiles.active_style.title()} {dig_profiles.active_phase.title()} profiles:",
-            summary_y + 192,
+            summary_y + 138,
             (170, 210, 255),
             0.40,
+            x=card_x0 + card_inner,
         )
         for idx, profile in enumerate(visible_profiles):
             marker = "* " if profile["name"] == dig_profiles.selected.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else "  "
             cursor_marker = ">" if profile["name"] == dig_profiles.cursor.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else " "
-            line_y = summary_y + 214 + idx * 20
+            line_y = summary_y + 160 + idx * 20
             put_control_line(
-                f"{cursor_marker}{marker}{profile['name'][:28]} ({float(profile.get('duration_sec', 0.0)):.2f}s)",
+                f"{cursor_marker}{marker}{profile['name'][:34]} ({float(profile.get('duration_sec', 0.0)):.2f}s)",
                 line_y,
                 (230, 230, 230),
                 0.38,
+                x=card_x0 + card_inner,
             )
+        cursor_y += dig_section_h + 8
+
+        status_section_jump_targets["jump_map_tools"] = int(section_offsets.get("map_tools", 0))
+        status_section_jump_targets["jump_zones_camera"] = int(section_offsets.get("zones_camera", 0))
+        status_section_jump_targets["jump_calibration"] = int(section_offsets.get("calibration", 0))
+        status_section_jump_targets["jump_actuators"] = int(section_offsets.get("actuators", 0))
+        status_section_jump_targets["jump_dig_profiles"] = int(section_offsets.get("dig_profiles", 0))
+        content_h = max(controls_h + 1, cursor_y)
 
         status_scroll_max = max(0, content_h - controls_h)
         status_scroll_y = max(0, min(status_scroll_y, status_scroll_max))
@@ -3687,6 +4266,8 @@ def main():
             ("dig_profile_next", dig_profile_next_rect),
             ("dig_profile_use", dig_profile_use_rect),
             ("dig_profile_delete", dig_profile_delete_rect),
+            ("door_open", door_open_rect),
+            ("door_close", door_close_rect),
             ("stop_actuators", stop_actuators_rect),
             ("brush_minus", brush_minus_rect),
             ("brush_plus", brush_plus_rect),
@@ -3770,11 +4351,45 @@ def main():
                 )
             # Update camera pose (world frame) if tracking is enabled.
             if tracking_enabled:
-                R_world_cam, t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
+                raw_R_world_cam, raw_t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
                 if imu_heading_available:
                     imu_estimated_R_world_cam = estimate_world_rotation_from_imu(imu_rotation)
+                if tracking_pose_ok and recovery_pending_alignment:
+                    predicted_forward = np.array(last_valid_rover_forward_world, dtype=np.float32).reshape(3,)
+                    if (
+                        navx_yaw_deg is not None
+                        and np.isfinite(navx_yaw_deg)
+                        and last_valid_navx_yaw_deg is not None
+                        and np.isfinite(last_valid_navx_yaw_deg)
+                        and navx_sign_locked
+                    ):
+                        predicted_forward = rotate_world_xz(
+                            last_valid_rover_forward_world,
+                            navx_sign * wrap_angle_deg(float(navx_yaw_deg) - float(last_valid_navx_yaw_deg)),
+                        )
+                    raw_rover_pos_world, raw_rover_forward_world, _raw_rover_right_world = rover_pose_from_camera(
+                        raw_R_world_cam,
+                        raw_t_world_cam,
+                        current_camera_mount_yaw_deg(),
+                    )
+                    recovery_alignment_yaw_deg = heading_delta_deg(
+                        raw_rover_forward_world,
+                        predicted_forward,
+                    )
+                    align_R = yaw_rotation_matrix_deg(recovery_alignment_yaw_deg)
+                    desired_t_world = np.array(last_valid_t_world_cam, dtype=np.float32).reshape(3,)
+                    recovery_alignment_offset_t = (
+                        desired_t_world - (align_R @ np.array(raw_t_world_cam, dtype=np.float32).reshape(3,))
+                    ).astype(np.float32)
+                    recovery_pending_alignment = False
+                    print(
+                        "Recovery alignment locked: "
+                        f"yaw={recovery_alignment_yaw_deg:+.1f}deg "
+                        f"offset=({recovery_alignment_offset_t[0]:+.2f}, {recovery_alignment_offset_t[2]:+.2f})"
+                    )
+                R_world_cam, t_world_cam = apply_recovery_alignment(raw_R_world_cam, raw_t_world_cam)
                 candidate_rover_pos_world, candidate_rover_forward_world, candidate_rover_right_world = rover_pose_from_camera(
                     R_world_cam,
                     t_world_cam,
@@ -4801,6 +5416,7 @@ def main():
                     if args.map_save_every > 0 and (time.time() - last_save) >= args.map_save_every:
                         occ_map.save(args.map_save_path)
                         last_save = time.time()
+                    save_recovery_checkpoint(navx_yaw_deg=navx_yaw_deg)
                     save_landmark_memory()
                     # Periodically save ZED area memory for startup relocalization.
                     if (
@@ -5025,10 +5641,10 @@ def main():
                     process_external_map_command()
                     publish_map_ui_state()
 
-                if not args.no_gui:
-                    # Always show the map (even if the image frame is missing)
-                    if map_vis is not None:
-                        map_window_vis = map_vis.copy()
+                    if not args.no_gui:
+                        # Always show the map (even if the image frame is missing)
+                        if map_vis is not None:
+                            map_window_vis = map_vis.copy()
                         # Draw detected persons on the map
                         draw_landmarks(map_window_vis)
                         for pr, pc_col, is_p in human_person_map_points:
@@ -5043,6 +5659,7 @@ def main():
                                 (occ_map.grid_w * map_scale_live, occ_map.grid_h * map_scale_live),
                                 interpolation=cv2.INTER_NEAREST,
                             )
+                        last_map_window_shape = map_window_vis.shape[:2]
                         cv2.imshow("ZED Occupancy Map (XZ)", map_window_vis)
                         if not map_window_ready:
                             cv2.setMouseCallback("ZED Occupancy Map (XZ)", on_map_click)
@@ -5058,6 +5675,7 @@ def main():
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
                 if not args.no_gui:
                     status_panel = render_status_panel(rover_row_col)
+                    last_status_panel_shape = status_panel.shape[:2]
                     cv2.imshow("ZED Drive Status", status_panel)
                     if not status_window_ready:
                         cv2.setMouseCallback("ZED Drive Status", on_status_click)
@@ -5174,6 +5792,7 @@ def main():
             pass
     if spatial_enabled:
         zed_utils.disable_spatial_mapping(zed)
+    save_recovery_checkpoint(force=True)
     save_landmark_memory(force=True)
     if tracking_enabled and args.area_save_path:
         zed_utils.save_area_memory(zed, sl, args.area_save_path)
