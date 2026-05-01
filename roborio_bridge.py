@@ -22,6 +22,16 @@ heartbeat_state = {
     "last_seen_ms": None,
 }
 
+BATTERY_VALUE_KEYS = (
+    "Battery/Voltage",
+    "BatteryVoltage",
+    "Battery Voltage",
+    "RoboRIO/BatteryVoltage",
+    "RoboRIO/Battery/Voltage",
+    "Robot/BatteryVoltage",
+    "RobotController/BatteryVoltage",
+)
+
 
 DATA_KEYS = {
     "Jetson/DriveForward": "number",
@@ -216,6 +226,91 @@ def _safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def read_available_keys():
+    try:
+        return set(sd.getKeys())
+    except Exception:
+        return set()
+
+
+def read_battery_values(available_keys):
+    values = {}
+
+    for key in BATTERY_VALUE_KEYS:
+        if key in DATA_KEYS:
+            continue
+        if available_keys and key not in available_keys:
+            continue
+
+        value = read_value(key, "number", available_keys)
+        if value is not None:
+            values[key] = value
+
+    for key in available_keys:
+        normalized = re.sub(r"[^a-z0-9]+", "", key.lower())
+        if "battery" not in normalized or "voltage" not in normalized:
+            continue
+        if key in DATA_KEYS or key in values:
+            continue
+
+        value = read_value(key, "number", available_keys)
+        if value is not None:
+            values[key] = value
+
+    return values
+
+
+def normalize_battery_voltage(values):
+    canonical_key = "Battery/Voltage"
+    if _safe_float(values.get(canonical_key)) is not None:
+        return {
+            "source_key": canonical_key,
+            "voltage_v": float(values[canonical_key]),
+            "aliases": {},
+        }
+
+    aliases = {
+        key: value
+        for key, value in values.items()
+        if key != canonical_key
+        and (
+            key in BATTERY_VALUE_KEYS
+            or (
+                "battery" in re.sub(r"[^a-z0-9]+", "", key.lower())
+                and "voltage" in re.sub(r"[^a-z0-9]+", "", key.lower())
+            )
+        )
+        and _safe_float(value) is not None
+    }
+
+    for key in BATTERY_VALUE_KEYS:
+        value = aliases.get(key)
+        voltage = _safe_float(value)
+        if voltage is not None:
+            values[canonical_key] = voltage
+            return {
+                "source_key": key,
+                "voltage_v": voltage,
+                "aliases": aliases,
+            }
+
+    for key, value in aliases.items():
+        voltage = _safe_float(value)
+        if voltage is not None:
+            values[canonical_key] = voltage
+            return {
+                "source_key": key,
+                "voltage_v": voltage,
+                "aliases": aliases,
+            }
+
+    return {
+        "source_key": None,
+        "voltage_v": None,
+        "aliases": aliases,
+    }
 
 
 def torque_warnings(values):
@@ -542,10 +637,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/status":
-            try:
-                available_keys = set(sd.getKeys())
-            except Exception:
-                available_keys = set()
+            available_keys = read_available_keys()
 
             values = {
                 key: read_value(key, value_type, available_keys)
@@ -553,6 +645,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             dynamic_controller_values = read_dynamic_controller_values()
             values.update(dynamic_controller_values)
+            values.update(read_battery_values(available_keys))
+            battery = normalize_battery_voltage(values)
             connected = NetworkTables.isConnected()
             heartbeat = update_heartbeat_status(values)
 
@@ -564,6 +658,7 @@ class Handler(BaseHTTPRequestHandler):
                     "connected": connected,
                     "heartbeat": heartbeat,
                     "values": values,
+                    "battery": battery,
                     "controller": infer_controller_status(values),
                     "warnings": torque_warnings(values) + heartbeat_warnings(connected, heartbeat),
                 },
