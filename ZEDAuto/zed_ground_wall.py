@@ -26,6 +26,14 @@ try:
 except Exception:
     HAS_CV2 = False
 
+STATUS_PANEL_W = 820
+STATUS_PANEL_H = 1180
+
+LEFT_KEYS = {81, 2424832, 65361, 63234}
+UP_KEYS = {82, 2490368, 65362, 63232}
+RIGHT_KEYS = {83, 2555904, 65363, 63235}
+DOWN_KEYS = {84, 2621440, 65364, 63233}
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -693,12 +701,14 @@ def main():
     else:
         print("GUI enabled: opening camera/map windows.")
         try:
-            cv2.namedWindow("ZED Ground/Obstacle Segmentation", cv2.WINDOW_NORMAL)
-            cv2.namedWindow("ZED Occupancy Map (XZ)", cv2.WINDOW_NORMAL)
-            cv2.namedWindow("ZED Drive Status", cv2.WINDOW_NORMAL)
+            gui_normal = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
+            base_flags = cv2.WINDOW_NORMAL | gui_normal
+            cv2.namedWindow("ZED Ground/Obstacle Segmentation", base_flags)
+            cv2.namedWindow("ZED Occupancy Map (XZ)", base_flags)
+            cv2.namedWindow("ZED Drive Status", base_flags)
             cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
             cv2.resizeWindow("ZED Occupancy Map (XZ)", 1180, 920)
-            cv2.resizeWindow("ZED Drive Status", 920, 1160)
+            cv2.resizeWindow("ZED Drive Status", STATUS_PANEL_W, STATUS_PANEL_H)
         except Exception:
             pass
 
@@ -2033,8 +2043,14 @@ def main():
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
             if win_w > 1 and win_h > 1:
-                x = int(round(float(x) * float(img_w) / float(win_w)))
-                y = int(round(float(y) * float(img_h) / float(win_h)))
+                scale = min(float(win_w) / float(img_w), float(win_h) / float(img_h))
+                if scale > 0.0:
+                    draw_w = float(img_w) * scale
+                    draw_h = float(img_h) * scale
+                    pad_x = max(0.0, (float(win_w) - draw_w) * 0.5)
+                    pad_y = max(0.0, (float(win_h) - draw_h) * 0.5)
+                    x = int(round((float(x) - pad_x) / scale))
+                    y = int(round((float(y) - pad_y) / scale))
         except Exception:
             pass
         x = max(0, min(img_w - 1, int(x)))
@@ -3386,8 +3402,8 @@ def main():
 
     def render_status_panel(cam_cell):
         nonlocal status_scroll_y, status_scroll_max
-        panel_h = 1180
-        panel_w = 820
+        panel_h = STATUS_PANEL_H
+        panel_w = STATUS_PANEL_W
         panel = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
         panel[:] = (24, 24, 24)
         status_button_rects.clear()
@@ -5681,7 +5697,8 @@ def main():
                     if not status_window_ready:
                         cv2.setMouseCallback("ZED Drive Status", on_status_click)
                         status_window_ready = True
-                    key = cv2.waitKey(1) & 0xFF
+                    raw_key = cv2.waitKeyEx(1)
+                    key = (raw_key & 0xFF) if raw_key >= 0 else -1
                     # Route keys to focused text input fields first.
                     if dig_name_input_focused:
                         if key == 13:  # Enter
@@ -5693,7 +5710,7 @@ def main():
                             dig_name_input_text = dig_name_input_text[:-1]
                         elif key == 27:  # Escape
                             dig_name_input_focused = False
-                        elif key != 255:
+                        elif key >= 0:
                             ch = chr(key)
                             if ch.isalnum() or ch in " _-.":
                                 dig_name_input_text += ch
@@ -5717,7 +5734,7 @@ def main():
                         elif key == 27:  # Escape — cancel
                             map_size_input_focused = False
                             map_size_input_text = ""
-                        elif key != 255:
+                        elif key >= 0:
                             ch = chr(key)
                             if ch in "0123456789.":
                                 map_size_input_text += ch
@@ -5750,6 +5767,10 @@ def main():
                         print(f"Map red-only mode: {state}")
                     if key == ord("u"):
                         set_main_rover_mode(not args.main_rover_mode)
+                    if raw_key in UP_KEYS:
+                        set_status_scroll(-80)
+                    if raw_key in DOWN_KEYS:
+                        set_status_scroll(80)
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)
                         print(f"Map zoom: x{map_scale_live}")
