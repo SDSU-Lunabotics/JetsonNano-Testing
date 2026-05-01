@@ -35,13 +35,19 @@ _ONE_PX_JPEG = (
 _SUPPORTED_UI_COMMANDS = {
     "paint_obstacle",
     "paint_safe",
+    "draw_safe",
     "erase_safe",
     "clear_all",
+    "clear_paint",
     "lock_green",
     "reset_map",
     "reset_confirm",
     "reset_cancel",
     "localize_scan",
+    "direct_nav",
+    "main_rover_mode",
+    "camera_view",
+    "set_control_mode",
     "auto_digger",
     "camera_overlay",
     "drive_heading_flip",
@@ -75,6 +81,11 @@ _SUPPORTED_UI_COMMANDS = {
     "set_brush_radius",
 }
 
+_COMMAND_ALIASES = {
+    "draw_safe": "paint_safe",
+    "clear_paint": "clear_all",
+}
+
 
 def _default_ui_controls() -> List[MapUiControl]:
     return [
@@ -93,6 +104,10 @@ def _write_waypoint_command(command: dict) -> None:
     tmp = target.with_suffix(f"{target.suffix}.tmp")
     tmp.write_text(json.dumps(command), encoding="utf-8")
     tmp.replace(target)
+
+
+def _command_seq() -> int:
+    return int(time.time_ns() // 1000)
 
 
 def _read_ui_state() -> MapUiStateResponse:
@@ -203,7 +218,8 @@ async def post_map_frame(
 
 @router.post("/waypoint", response_model=MapWaypointCommandResponse)
 def post_waypoint(req: MapWaypointClickRequest) -> MapWaypointCommandResponse:
-    command_seq = int(time.time() * 1000)
+    command_seq = _command_seq()
+    timestamp_ms = int(time.time() * 1000)
     _write_waypoint_command(
         {
             "seq": command_seq,
@@ -211,12 +227,12 @@ def post_waypoint(req: MapWaypointClickRequest) -> MapWaypointCommandResponse:
             "display_x": int(req.display_x),
             "display_y": int(req.display_y),
             "source": req.source,
-            "timestamp_ms": command_seq,
+            "timestamp_ms": timestamp_ms,
         }
     )
     return MapWaypointCommandResponse(
         ok=True,
-        timestamp_ms=command_seq,
+        timestamp_ms=timestamp_ms,
         command_seq=command_seq,
     )
 
@@ -226,23 +242,27 @@ def post_map_ui_command(req: MapUiCommandRequest) -> MapUiCommandResponse:
     command = str(req.command).strip()
     if command not in _SUPPORTED_UI_COMMANDS:
         raise HTTPException(status_code=400, detail=f"Unsupported map UI command: {command}")
+    action = _COMMAND_ALIASES.get(command, command)
 
     payload = {
-        "seq": int(time.time() * 1000),
+        "seq": _command_seq(),
         "type": "ui_action",
-        "action": command,
+        "action": action,
         "source": req.source,
         "timestamp_ms": int(time.time() * 1000),
     }
+    if action == "set_control_mode":
+        if req.mode is None:
+            raise HTTPException(status_code=400, detail="mode is required for set_control_mode")
+        payload["mode"] = req.mode
     if req.value is not None:
         payload["value"] = int(req.value)
 
     command_seq = int(payload["seq"])
-    payload["timestamp_ms"] = command_seq
     _write_waypoint_command(payload)
     return MapUiCommandResponse(
         ok=True,
-        timestamp_ms=command_seq,
+        timestamp_ms=int(payload["timestamp_ms"]),
         command_seq=command_seq,
         command=command,
     )

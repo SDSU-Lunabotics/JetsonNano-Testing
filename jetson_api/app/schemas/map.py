@@ -4,6 +4,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.schemas.common import ControlMode
+
 
 class MapStreamStatus(BaseModel):
     available: bool = False
@@ -68,6 +70,8 @@ class MapUiCommandRequest(BaseModel):
         description=(
             "UI map action. Supported values include paint_obstacle, paint_safe, erase_safe, "
             "clear_all, lock_green, reset_map, reset_confirm, reset_cancel, localize_scan, "
+            "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
+            "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius."
             "auto_digger, camera_overlay, drive_heading_flip, display_heading_flip, direct_nav, "
             "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
             "dig_phase_cycle, dig_record_dig, dig_record_retract, dig_record_stop, "
@@ -80,6 +84,7 @@ class MapUiCommandRequest(BaseModel):
         )
     )
     source: Optional[str] = None
+    mode: Optional[ControlMode] = None
     value: Optional[int] = None
 
 

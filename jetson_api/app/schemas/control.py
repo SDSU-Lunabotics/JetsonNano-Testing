@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from app.schemas.common import ControlMode
+
 
 class LedRequest(BaseModel):
     state: bool
@@ -34,4 +36,16 @@ class EstopRequest(BaseModel):
 class EstopResponse(BaseModel):
     ok: bool
     estop: bool
+    timestamp_ms: int
+
+
+class ControlModeRequest(BaseModel):
+    mode: ControlMode
+
+
+class ControlModeResponse(BaseModel):
+    ok: bool
+    mode: ControlMode
+    autonomy_running: bool
+    command_seq: int
     timestamp_ms: int

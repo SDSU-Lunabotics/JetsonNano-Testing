@@ -137,7 +137,7 @@ class TelemetryService:
         control = ControlStatus(
             armed=self._armed_status(bridge_status),
             estop=self._combined_estop(bridge_status),
-            mode="manual",
+            mode=("autonomy" if state_service.autonomy_enabled else "manual"),
             autonomy_running=state_service.autonomy_enabled,
             controller=self._controller_status(bridge_status),
         )
