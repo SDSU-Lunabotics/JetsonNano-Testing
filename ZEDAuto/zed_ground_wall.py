@@ -4710,17 +4710,6 @@ def main():
             update_localization_scan_state()
             refresh_camera_servo_state()
             refresh_ds_joystick_state()
-            auto_camera_map_required = goal_cell is not None or mining.state in (
-                auto_mining.MiningState.PLAN_SWEEP,
-                auto_mining.MiningState.NAVIGATE_DIG,
-                auto_mining.MiningState.DIGGING,
-                auto_mining.MiningState.BACKUP,
-                auto_mining.MiningState.NAVIGATE_DEPOSIT,
-                auto_mining.MiningState.DEPOSITING,
-            )
-            if auto_camera_map_required:
-                request_camera_map_view("auto navigation")
-                refresh_camera_servo_state()
 
             # Retrieve point cloud
             depth_status = zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
