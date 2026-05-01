@@ -335,6 +335,12 @@ def main():
     parser.add_argument("--drive", action="store_true", help="Enable RoboRIO driving commands")
     parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
     parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
+    parser.add_argument(
+        "--drive-forward-slew-per-sec",
+        type=float,
+        default=1.4,
+        help="Max change rate of forward command during auto path driving (command units per second)",
+    )
     parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
     parser.add_argument(
         "--drive-max-turn-cmd",
@@ -1245,6 +1251,7 @@ def main():
     actuator_right_extension_pct = None
     direct_nav_enabled = False
     last_path_plan_time = 0.0
+    last_auto_fwd_cmd = 0.0
     last_auto_turn_cmd = 0.0
     last_auto_turn_time = time.time()
     map_integration_ok = False
@@ -3457,6 +3464,43 @@ def main():
                 )
                 last_drive_debug_time = now
 
+    def reset_auto_drive_shape(now=None):
+        nonlocal last_auto_fwd_cmd, last_auto_turn_cmd, last_auto_turn_time
+        if now is None:
+            now = time.time()
+        last_auto_fwd_cmd = 0.0
+        last_auto_turn_cmd = 0.0
+        last_auto_turn_time = float(now)
+
+    def apply_auto_drive_shape(fwd_target, turn_target, now):
+        nonlocal last_auto_fwd_cmd, last_auto_turn_cmd, last_auto_turn_time
+        dt_cmd = max(1e-3, float(now) - float(last_auto_turn_time))
+        max_fwd_step = max(0.0, float(args.drive_forward_slew_per_sec)) * dt_cmd
+        max_turn_step = max(0.0, float(args.drive_turn_slew_per_sec)) * dt_cmd
+        fwd_target = max(-1.0, min(1.0, float(fwd_target)))
+        turn_target = max(-1.0, min(1.0, float(turn_target)))
+
+        delta_fwd = fwd_target - last_auto_fwd_cmd
+        if delta_fwd > max_fwd_step:
+            fwd = last_auto_fwd_cmd + max_fwd_step
+        elif delta_fwd < -max_fwd_step:
+            fwd = last_auto_fwd_cmd - max_fwd_step
+        else:
+            fwd = fwd_target
+
+        delta_turn = turn_target - last_auto_turn_cmd
+        if delta_turn > max_turn_step:
+            turn = last_auto_turn_cmd + max_turn_step
+        elif delta_turn < -max_turn_step:
+            turn = last_auto_turn_cmd - max_turn_step
+        else:
+            turn = turn_target
+
+        last_auto_fwd_cmd = float(fwd)
+        last_auto_turn_cmd = float(turn)
+        last_auto_turn_time = float(now)
+        return float(fwd), float(turn)
+
     def mix_ds_drive(fwd, turn):
         if not args.ds_joystick:
             return float(fwd), float(turn)
@@ -3589,18 +3633,40 @@ def main():
             track_txt = "OFF"
             area_txt = "OFF"
         track_color = (170, 255, 170) if tracking_pose_ok else (0, 140, 255)
+        navx_status_txt = "OFF"
+        navx_status_color = (190, 190, 190)
+        if args.navx_heading_aid:
+            if navx_yaw_deg is None or (not np.isfinite(navx_yaw_deg)):
+                navx_status_txt = "NO DATA"
+                navx_status_color = (0, 140, 255)
+            else:
+                navx_fallback_active = bool(
+                    (not tracking_pose_ok)
+                    and heading_fallback_forward_world is not None
+                    and navx_estimated_rover_forward_world is not None
+                )
+                if navx_fallback_active:
+                    navx_state = "FALLBACK"
+                    navx_status_color = (255, 210, 120)
+                elif navx_sign_locked:
+                    navx_state = "LOCKED"
+                    navx_status_color = (170, 255, 170)
+                else:
+                    navx_state = "CAL"
+                    navx_status_color = (0, 220, 255)
+                navx_status_txt = f"{navx_state} {float(navx_yaw_deg):+.1f}deg"
         put_line(
-            f"Tracking: {track_txt} | AreaMem: {area_txt} | Follow: {'ON' if follow_rover_map else 'OFF'} (c)",
+            f"Tracking: {track_txt} | AreaMem: {area_txt} | NavX: {navx_status_txt}",
             150,
-            track_color,
-            0.52,
+            navx_status_color if args.navx_heading_aid else track_color,
+            0.50,
         )
         map_state = "ACTIVE" if map_integration_ok else "PAUSED"
         map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
         map_mode = "COMPLEX" if args.complex else "SIMPLE"
         map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
         put_line(
-            f"Map: {map_state} | Mode: {map_mode} | View: {map_view_mode} | Points: {last_map_point_count}",
+            f"Map: {map_state} {map_mode} | Follow: {'ON' if follow_rover_map else 'OFF'} | View: {map_view_mode} | Pts: {last_map_point_count}",
             168,
             map_state_color,
             0.46,
@@ -5369,14 +5435,12 @@ def main():
                                     nt_watchdog_tripped = True
                                     print(f"[WATCHDOG] NT telemetry lost for >{_nt_timeout:.1f}s — stopping rover!")
                                 send_nt_command(False, 0.0, 0.0, 0.1)
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 continue
                             if driver_priority_active and not manual_mode:
                                 # Let the RoboRIO/Xbox path own the drivetrain while the driver is actively commanding it.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 continue
                             # Human STOP: stamp person cells as temporary obstacles so A* reroutes.
                             if human_hazard_state == "STOP" and human_person_map_points:
@@ -5394,17 +5458,14 @@ def main():
                                     now + max(0.05, float(args.backup_hold_sec)),
                                 )
                             if emergency_stop:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif human_hazard_state == "STOP":
                                 # Person too close — hold still while A* replans around them.
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif now < backup_hold_until:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 escape_fwd = close_obstacle_escape_sign * max(0.0, min(1.0, float(args.backup_speed)))
                                 escape_label = "driving forward" if escape_fwd > 0.0 else "backing up"
                                 if (now - last_backup_log_time) >= 0.5:
@@ -5420,8 +5481,7 @@ def main():
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             elif manual_mode:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 # Driver Station joystick blends with ZED keyboard manual commands.
                                 _man_fwd, _man_turn = mix_ds_drive(manual_fwd, manual_turn)
                                 send_nt_command(
@@ -5441,17 +5501,14 @@ def main():
                                         test_excavation_right_extend_active,
                                     )
                             elif tracking_enabled and (not tracking_pose_ok):
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 # Keep robot safe while localization is uncertain.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif rover_row_col is None:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif _mine_drive is not None:
-                                last_auto_turn_cmd = 0.0
-                                last_auto_turn_time = now
+                                reset_auto_drive_shape(now)
                                 # Mining automation has direct drive control
                                 # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
                                 if mining.state == auto_mining.MiningState.DIGGING:
@@ -5498,13 +5555,11 @@ def main():
                                     status_target_cell = goal_cell
                                     status_target_world = (float(tx), float(tz))
                                 elif goal_cell is not None:
-                                    last_auto_turn_cmd = 0.0
-                                    last_auto_turn_time = now
+                                    reset_auto_drive_shape(now)
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
                                 else:
-                                    last_auto_turn_cmd = 0.0
-                                    last_auto_turn_time = now
+                                    reset_auto_drive_shape(now)
                                     send_nt_command(False, 0.0, 0.0, 0.1)
                                     continue
                                 # Auto-drive uses the robot/ZED physical X axis.
@@ -5520,8 +5575,7 @@ def main():
                                     gx, gz = goal_world
                                     gx_drive = zed_x_from_map(gx)
                                     if math.hypot(gx_drive - cx, gz - cz) <= args.drive_goal_tol_m:
-                                        last_auto_turn_cmd = 0.0
-                                        last_auto_turn_time = now
+                                        reset_auto_drive_shape(now)
                                         send_nt_command(False, 0.0, 0.0, 0.1)
                                         continue
 
@@ -5549,18 +5603,6 @@ def main():
                                 else:
                                     turn_target = max(-max_turn_cmd, min(max_turn_cmd, args.drive_turn_k * err))
 
-                                dt_turn = max(1e-3, now - last_auto_turn_time)
-                                max_turn_step = max(0.0, float(args.drive_turn_slew_per_sec)) * dt_turn
-                                delta_turn = turn_target - last_auto_turn_cmd
-                                if delta_turn > max_turn_step:
-                                    turn = last_auto_turn_cmd + max_turn_step
-                                elif delta_turn < -max_turn_step:
-                                    turn = last_auto_turn_cmd - max_turn_step
-                                else:
-                                    turn = turn_target
-                                last_auto_turn_cmd = turn
-                                last_auto_turn_time = now
-
                                 # Reduce forward speed as heading error grows to avoid cutting sharp arcs.
                                 slow_turn_rad = math.radians(max(0.0, float(args.drive_slow_turn_deg)))
                                 stop_turn_rad = math.radians(max(0.0, float(args.drive_stop_turn_deg)))
@@ -5578,10 +5620,11 @@ def main():
 
                                 align_scale = max(0.0, math.cos(err))
                                 fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
-                                fwd = -fwd_mag if reverse_path_drive else fwd_mag
+                                fwd_target = -fwd_mag if reverse_path_drive else fwd_mag
 
                                 # Driver Station joystick can nudge auto commands.
-                                fwd, turn = mix_ds_drive(fwd, turn)
+                                fwd_target, turn_target = mix_ds_drive(fwd_target, turn_target)
+                                fwd, turn = apply_auto_drive_shape(fwd_target, turn_target, now)
 
                                 send_nt_command(
                                     True,

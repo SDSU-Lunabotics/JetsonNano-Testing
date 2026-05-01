@@ -190,6 +190,7 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
   cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
+  cmd+=(--drive-forward-slew-per-sec "${DRIVE_FORWARD_SLEW_PER_SEC:-1.4}")
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
   cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
   cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
