@@ -1162,6 +1162,8 @@ def main():
     reset_map_confirm = False
     status_scroll_y = 0
     status_scroll_max = 0
+    status_scroll_drag_active = False
+    status_scroll_drag_offset = 0
     last_status_panel_shape = None
     last_map_window_shape = None
     disable_holes = bool(args.disable_holes)
@@ -2730,10 +2732,27 @@ def main():
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
         nonlocal dig_name_input_focused, dig_name_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
-        nonlocal reset_map_confirm
+        nonlocal reset_map_confirm, status_scroll_drag_active, status_scroll_drag_offset
         nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
+
+        def scroll_from_thumb_top(track_rect, thumb_rect, thumb_top):
+            if track_rect is None or thumb_rect is None:
+                return
+            track_y0, track_y1 = int(track_rect[1]), int(track_rect[3])
+            thumb_h = max(1, int(thumb_rect[3] - thumb_rect[1]))
+            max_thumb_top = max(track_y0, track_y1 - thumb_h)
+            clamped_top = max(track_y0, min(max_thumb_top, int(thumb_top)))
+            travel = max(1, max_thumb_top - track_y0)
+            frac = 0.0 if status_scroll_max <= 0 else float(clamped_top - track_y0) / float(travel)
+            set_status_scroll_to(int(round(frac * float(status_scroll_max))))
+
         if last_status_panel_shape is not None:
             x, y = window_to_image_coords("ZED Drive Status", x, y, last_status_panel_shape)
+        if event == cv2.EVENT_LBUTTONUP:
+            status_scroll_drag_active = False
+            return
+        if event == cv2.EVENT_MOUSEMOVE and not (flags & cv2.EVENT_FLAG_LBUTTON):
+            status_scroll_drag_active = False
         if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
             try:
                 wheel_delta = cv2.getMouseWheelDelta(flags)
@@ -2742,6 +2761,11 @@ def main():
             set_status_scroll(-80 if wheel_delta > 0 else 80)
             return
         is_drag = event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON)
+        track_rect = status_button_rects.get("scrollbar_track")
+        thumb_rect = status_button_rects.get("scrollbar_thumb")
+        if is_drag and status_scroll_drag_active and track_rect is not None and thumb_rect is not None:
+            scroll_from_thumb_top(track_rect, thumb_rect, y - status_scroll_drag_offset)
+            return
         if event != cv2.EVENT_LBUTTONDOWN and not is_drag:
             return
 
@@ -2772,6 +2796,19 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_status_scroll(90)
+                return
+        if event == cv2.EVENT_LBUTTONDOWN and track_rect is not None and thumb_rect is not None:
+            tx0, ty0, tx1, ty1 = track_rect
+            if tx0 <= x <= tx1 and ty0 <= y <= ty1:
+                hx0, hy0, hx1, hy1 = thumb_rect
+                thumb_h = max(1, hy1 - hy0)
+                if hx0 <= x <= hx1 and hy0 <= y <= hy1:
+                    status_scroll_drag_active = True
+                    status_scroll_drag_offset = y - hy0
+                else:
+                    status_scroll_drag_active = True
+                    status_scroll_drag_offset = thumb_h // 2
+                    scroll_from_thumb_top(track_rect, thumb_rect, y - status_scroll_drag_offset)
                 return
         for jump_name, target_y in status_section_jump_targets.items():
             rect = status_button_rects.get(jump_name)
@@ -2811,20 +2848,6 @@ def main():
                 return
             else:
                 map_size_input_focused = False
-        rect = status_button_rects.get("zoom_in")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                map_scale_live = min(12, map_scale_live + 1)
-                print(f"Map zoom: x{map_scale_live}")
-                return
-        rect = status_button_rects.get("zoom_out")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                map_scale_live = max(1, map_scale_live - 1)
-                print(f"Map zoom: x{map_scale_live}")
-                return
         mining_running = mining.state in (
             auto_mining.MiningState.PLAN_SWEEP,
             auto_mining.MiningState.NAVIGATE_DIG,
@@ -3735,7 +3758,9 @@ def main():
         button_h = 46
         card_gap = 14
         card_x0 = 10
-        card_x1 = panel_w - 10
+        scrollbar_margin = 12
+        scrollbar_w = 18
+        card_x1 = panel_w - scrollbar_margin - scrollbar_w - 8
         card_inner = 14
         grid_gap = 12
         button_w = max(160, int((card_x1 - card_x0 - 2 * card_inner - 2 * grid_gap) / 3))
@@ -3837,15 +3862,13 @@ def main():
         whole_rect = grid_rect(map_body_y, 1, 0)
         smooth_rect = grid_rect(map_body_y, 1, 1)
         holes_rect = grid_rect(map_body_y, 1, 2)
-        zoom_in_rect = grid_rect(map_body_y, 2, 0)
-        zoom_out_rect = grid_rect(map_body_y, 2, 1)
-        reset_map_rect = grid_rect(map_body_y, 2, 2)
-        obstacle_rect = grid_rect(map_body_y, 3, 0)
-        paint_rect = grid_rect(map_body_y, 3, 1)
-        erase_rect = grid_rect(map_body_y, 3, 2)
-        clear_paint_rect = grid_rect(map_body_y, 4, 0)
-        lock_green_rect = grid_rect(map_body_y, 4, 1)
-        main_rover_rect = grid_rect(map_body_y, 4, 2)
+        reset_map_rect = grid_rect(map_body_y, 2, 0)
+        obstacle_rect = grid_rect(map_body_y, 2, 1)
+        paint_rect = grid_rect(map_body_y, 2, 2)
+        erase_rect = grid_rect(map_body_y, 3, 0)
+        clear_paint_rect = grid_rect(map_body_y, 3, 1)
+        lock_green_rect = grid_rect(map_body_y, 3, 2)
+        main_rover_rect = grid_rect(map_body_y, 4, 0, span=3)
         slider_y = map_body_y + 5 * (button_h + 10) + 16
         btn_sm = 36
         brush_minus_rect = (card_x0 + card_inner, slider_y + 6, card_x0 + card_inner + btn_sm, slider_y + 6 + btn_sm)
@@ -3873,8 +3896,6 @@ def main():
             (80, 220, 220),
         )
         draw_control_button(holes_rect, "Disable Holes", button_enabled)
-        draw_control_button(zoom_in_rect, "+ Zoom", True)
-        draw_control_button(zoom_out_rect, "- Zoom", True)
         draw_control_button(reset_map_rect, "Reset Map", True, reset_map_confirm, (0, 70, 200), (80, 160, 255))
         draw_control_button(
             obstacle_rect,
@@ -4270,8 +4291,6 @@ def main():
             ("reset_map", reset_map_rect),
             ("lock_green", lock_green_rect),
             ("pick_dig_start", pick_dig_start_rect),
-            ("zoom_in", zoom_in_rect),
-            ("zoom_out", zoom_out_rect),
             ("main_rover_mode", main_rover_rect),
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
@@ -4296,8 +4315,64 @@ def main():
         ):
             _register_button(name, rect)
 
-        scroll_up_rect = (panel_w - 42, controls_top + 6, panel_w - 10, controls_top + 34)
-        scroll_down_rect = (panel_w - 42, controls_bottom - 34, panel_w - 10, controls_bottom - 6)
+        scrollbar_track_rect = (
+            panel_w - scrollbar_margin - scrollbar_w,
+            controls_top + 6,
+            panel_w - scrollbar_margin,
+            controls_bottom - 6,
+        )
+        track_h = max(1, scrollbar_track_rect[3] - scrollbar_track_rect[1])
+        if status_scroll_max > 0:
+            thumb_h = max(52, int(round(track_h * float(controls_h) / float(content_h))))
+            thumb_h = min(track_h, thumb_h)
+            thumb_travel = max(1, track_h - thumb_h)
+            thumb_y0 = scrollbar_track_rect[1] + int(round((float(status_scroll_y) / float(status_scroll_max)) * thumb_travel))
+        else:
+            thumb_h = track_h
+            thumb_y0 = scrollbar_track_rect[1]
+        scrollbar_thumb_rect = (
+            scrollbar_track_rect[0] + 2,
+            thumb_y0,
+            scrollbar_track_rect[2] - 2,
+            thumb_y0 + thumb_h,
+        )
+        status_button_rects["scrollbar_track"] = scrollbar_track_rect
+        status_button_rects["scrollbar_thumb"] = scrollbar_thumb_rect
+        cv2.rectangle(
+            panel,
+            (scrollbar_track_rect[0], scrollbar_track_rect[1]),
+            (scrollbar_track_rect[2], scrollbar_track_rect[3]),
+            (44, 44, 48),
+            -1,
+        )
+        cv2.rectangle(
+            panel,
+            (scrollbar_track_rect[0], scrollbar_track_rect[1]),
+            (scrollbar_track_rect[2], scrollbar_track_rect[3]),
+            (110, 110, 118),
+            1,
+        )
+        thumb_fill = (100, 170, 255) if status_scroll_max > 0 else (72, 72, 78)
+        thumb_border = (220, 230, 240) if status_scroll_max > 0 else (120, 120, 126)
+        cv2.rectangle(
+            panel,
+            (scrollbar_thumb_rect[0], scrollbar_thumb_rect[1]),
+            (scrollbar_thumb_rect[2], scrollbar_thumb_rect[3]),
+            thumb_fill,
+            -1,
+        )
+        cv2.rectangle(
+            panel,
+            (scrollbar_thumb_rect[0], scrollbar_thumb_rect[1]),
+            (scrollbar_thumb_rect[2], scrollbar_thumb_rect[3]),
+            thumb_border,
+            1,
+        )
+
+        scroll_btn_x1 = scrollbar_track_rect[0] - 8
+        scroll_btn_x0 = scroll_btn_x1 - 28
+        scroll_up_rect = (scroll_btn_x0, controls_top + 6, scroll_btn_x1, controls_top + 34)
+        scroll_down_rect = (scroll_btn_x0, controls_bottom - 34, scroll_btn_x1, controls_bottom - 6)
         status_button_rects["scroll_up"] = scroll_up_rect
         status_button_rects["scroll_down"] = scroll_down_rect
         for rect, lbl, enabled in (
@@ -4315,7 +4390,7 @@ def main():
         put_line(
             (
                 f"Controls scroll: {status_scroll_y}/{status_scroll_max} | "
-                "Wheel, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
+                "Wheel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
             ),
             controls_top - 8,
             (170, 200, 230),
