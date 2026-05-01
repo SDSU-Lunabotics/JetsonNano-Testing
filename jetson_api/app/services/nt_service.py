@@ -63,6 +63,33 @@ class NTService:
         self.initialize()
         self._table.putBoolean("Jetson/ExcavatorEnabled", bool(enabled))
 
+    def set_excavator_lowering_sim(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorLoweringSim", bool(enabled))
+
+    def set_excavator_left_extend(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorLeftExtend", bool(enabled))
+
+    def set_excavator_right_extend(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/ExcavatorRightExtend", bool(enabled))
+
+    def set_door_open(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/DoorActuatorsClose", False if enabled else self._table.getBoolean("Jetson/DoorActuatorsClose", False))
+        self._table.putBoolean("Jetson/DoorActuatorsOpen", bool(enabled))
+
+    def set_door_close(self, enabled: bool) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/DoorActuatorsOpen", False if enabled else self._table.getBoolean("Jetson/DoorActuatorsOpen", False))
+        self._table.putBoolean("Jetson/DoorActuatorsClose", bool(enabled))
+
+    def stop_door(self) -> None:
+        self.initialize()
+        self._table.putBoolean("Jetson/DoorActuatorsOpen", False)
+        self._table.putBoolean("Jetson/DoorActuatorsClose", False)
+
     def set_deposition(self, enabled: bool) -> None:
         self.initialize()
         self._table.putBoolean("Jetson/ConveyorEnabled", bool(enabled))
@@ -80,6 +107,11 @@ class NTService:
         self._table.putString("Jetson/Command", "")
 
         self._table.putBoolean("Jetson/ExcavatorEnabled", False)
+        self._table.putBoolean("Jetson/ExcavatorLoweringSim", False)
+        self._table.putBoolean("Jetson/ExcavatorLeftExtend", False)
+        self._table.putBoolean("Jetson/ExcavatorRightExtend", False)
+        self._table.putBoolean("Jetson/DoorActuatorsOpen", False)
+        self._table.putBoolean("Jetson/DoorActuatorsClose", False)
         self._table.putBoolean("Jetson/ConveyorEnabled", False)
 
     def run_async(self, fn, *args) -> None:

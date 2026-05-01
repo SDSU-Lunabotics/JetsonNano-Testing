@@ -43,6 +43,13 @@ class MapUiControl(BaseModel):
     enabled: bool = True
 
 
+class DriveCalibrationState(BaseModel):
+    active: bool = False
+    target_cell: Optional[List[int]] = None
+    last_result: Optional[str] = None
+    saved_drive_heading_flip: Optional[bool] = None
+
+
 class MapUiStateResponse(BaseModel):
     available: bool = False
     source: Optional[str] = None
@@ -54,6 +61,7 @@ class MapUiStateResponse(BaseModel):
     brush_radius: Optional[int] = None
     brush_radius_min: Optional[int] = None
     brush_radius_max: Optional[int] = None
+    drive_calibration: Optional[DriveCalibrationState] = None
     controls: List[MapUiControl] = Field(default_factory=list)
 
 
@@ -64,6 +72,15 @@ class MapUiCommandRequest(BaseModel):
             "clear_all, lock_green, reset_map, reset_confirm, reset_cancel, localize_scan, "
             "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
             "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius."
+            "auto_digger, camera_overlay, drive_heading_flip, display_heading_flip, direct_nav, "
+            "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
+            "dig_phase_cycle, dig_record_dig, dig_record_retract, dig_record_stop, "
+            "dig_profile_prev, dig_profile_next, dig_profile_use, dig_profile_delete, "
+            "test_excavation_dig, "
+            "test_excavation_left_extend, test_excavation_right_extend, "
+            "test_excavation_lower, door_open, door_close, stop_actuators, "
+            "main_rover_mode, camera_view, draw_excav_zone, draw_deposit_zone, "
+            "pick_dig_start, brush_minus, brush_plus, set_brush_radius."
         )
     )
     source: Optional[str] = None

@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.map import (
+    DriveCalibrationState,
     MapFrameIngestResponse,
     MapStreamStatus,
     MapUiCommandRequest,
@@ -47,6 +48,31 @@ _SUPPORTED_UI_COMMANDS = {
     "main_rover_mode",
     "camera_view",
     "set_control_mode",
+    "auto_digger",
+    "camera_overlay",
+    "drive_heading_flip",
+    "display_heading_flip",
+    "direct_nav",
+    "drive_calibration_mode",
+    "drive_calibration_cancel",
+    "dig_style_cycle",
+    "dig_phase_cycle",
+    "dig_record_dig",
+    "dig_record_retract",
+    "dig_record_stop",
+    "dig_profile_prev",
+    "dig_profile_next",
+    "dig_profile_use",
+    "dig_profile_delete",
+    "test_excavation_dig",
+    "test_excavation_left_extend",
+    "test_excavation_right_extend",
+    "test_excavation_lower",
+    "door_open",
+    "door_close",
+    "stop_actuators",
+    "main_rover_mode",
+    "camera_view",
     "draw_excav_zone",
     "draw_deposit_zone",
     "pick_dig_start",
@@ -104,6 +130,14 @@ def _read_ui_state() -> MapUiStateResponse:
     if not controls:
         controls = _default_ui_controls()
 
+    drive_calibration = None
+    drive_calibration_raw = payload.get("drive_calibration")
+    if isinstance(drive_calibration_raw, dict):
+        try:
+            drive_calibration = DriveCalibrationState(**drive_calibration_raw)
+        except Exception:
+            drive_calibration = None
+
     return MapUiStateResponse(
         available=bool(payload.get("available", True)),
         source=payload.get("source"),
@@ -115,6 +149,7 @@ def _read_ui_state() -> MapUiStateResponse:
         brush_radius=payload.get("brush_radius"),
         brush_radius_min=payload.get("brush_radius_min"),
         brush_radius_max=payload.get("brush_radius_max"),
+        drive_calibration=drive_calibration,
         controls=controls,
     )
 

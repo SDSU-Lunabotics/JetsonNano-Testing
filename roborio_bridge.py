@@ -50,6 +50,11 @@ DATA_KEYS = {
     "Jetson/LedState": "boolean",
     "Jetson/EStop": "boolean",
     "Jetson/ExcavatorEnabled": "boolean",
+    "Jetson/ExcavatorLoweringSim": "boolean",
+    "Jetson/ExcavatorLeftExtend": "boolean",
+    "Jetson/ExcavatorRightExtend": "boolean",
+    "Jetson/DoorActuatorsOpen": "boolean",
+    "Jetson/DoorActuatorsClose": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
     "Jetson/DepositionEnabled": "boolean",
     "NavX/YawDeg": "number",
@@ -140,6 +145,11 @@ WRITE_KEYS = {
     "Jetson/LedState": "boolean",
     "Jetson/EStop": "boolean",
     "Jetson/ExcavatorEnabled": "boolean",
+    "Jetson/ExcavatorLoweringSim": "boolean",
+    "Jetson/ExcavatorLeftExtend": "boolean",
+    "Jetson/ExcavatorRightExtend": "boolean",
+    "Jetson/DoorActuatorsOpen": "boolean",
+    "Jetson/DoorActuatorsClose": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
     "Jetson/DepositionEnabled": "boolean",
     "Jetson/AutomationEnabled": "boolean",
@@ -604,6 +614,8 @@ def stop_all_motion():
     write_value("Jetson/DriveForward", "number", 0.0)
     write_value("Jetson/DriveTurn", "number", 0.0)
     write_value("Jetson/DriveTimestamp", "number", now_ms())
+    write_value("Jetson/DoorActuatorsOpen", "boolean", False)
+    write_value("Jetson/DoorActuatorsClose", "boolean", False)
 
 
 def run_motion_command(duration, speed, turn=0.0, command="drive_forward"):
@@ -956,6 +968,42 @@ class Handler(BaseHTTPRequestHandler):
                 return
             _set_deposition_enabled(False)
             self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "deposition": False})
+            return
+
+        if self.path == "/actuators/door/open":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/DoorActuatorsClose", "boolean", False)
+            write_value("Jetson/DoorActuatorsOpen", "boolean", True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "door": "open"})
+            return
+
+        if self.path == "/actuators/door/close":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/DoorActuatorsOpen", "boolean", False)
+            write_value("Jetson/DoorActuatorsClose", "boolean", True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "door": "close"})
+            return
+
+        if self.path == "/actuators/door/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            write_value("Jetson/DoorActuatorsOpen", "boolean", False)
+            write_value("Jetson/DoorActuatorsClose", "boolean", False)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "door": "stop"})
             return
 
         self._send_json(404, {"status": "error", "message": "Not found"})
