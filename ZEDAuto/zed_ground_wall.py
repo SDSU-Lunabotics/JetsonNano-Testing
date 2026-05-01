@@ -706,13 +706,13 @@ def main():
         print("GUI enabled: opening camera/map windows.")
         try:
             gui_normal = getattr(cv2, "WINDOW_GUI_NORMAL", 0)
-            base_flags = cv2.WINDOW_NORMAL | gui_normal
-            cv2.namedWindow("ZED Ground/Obstacle Segmentation", base_flags)
-            cv2.namedWindow("ZED Occupancy Map (XZ)", base_flags)
-            cv2.namedWindow("ZED Drive Status", base_flags)
+            resizable_flags = cv2.WINDOW_NORMAL | gui_normal
+            fixed_flags = cv2.WINDOW_AUTOSIZE | gui_normal
+            cv2.namedWindow("ZED Ground/Obstacle Segmentation", resizable_flags)
+            cv2.namedWindow("ZED Occupancy Map (XZ)", resizable_flags)
+            cv2.namedWindow("ZED Drive Status", fixed_flags)
             cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
             cv2.resizeWindow("ZED Occupancy Map (XZ)", 1180, 920)
-            cv2.resizeWindow("ZED Drive Status", STATUS_PANEL_W, STATUS_PANEL_H)
         except Exception:
             pass
 
@@ -3758,8 +3758,8 @@ def main():
         button_h = 46
         card_gap = 14
         card_x0 = 10
-        scrollbar_margin = 12
-        scrollbar_w = 18
+        scrollbar_margin = 10
+        scrollbar_w = 24
         card_x1 = panel_w - scrollbar_margin - scrollbar_w - 8
         card_inner = 14
         grid_gap = 12
