@@ -1865,7 +1865,7 @@ def main():
                 print(f"Brush radius: {paint_brush_radius} cells")
                 return
     def process_external_map_command():
-        nonlocal last_map_command_seq, reset_map_confirm
+        nonlocal last_map_command_seq, reset_map_confirm, paint_brush_radius
         try:
             if not args.map_command_file or (not os.path.exists(args.map_command_file)):
                 return
