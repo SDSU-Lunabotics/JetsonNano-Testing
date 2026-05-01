@@ -9,7 +9,6 @@ from .network import router as network_router
 from .battery import router as battery_router
 from .motors import router as motors_router
 from .camera import router as camera_router
-from .lidar import router as lidar_router, ws_router as lidar_ws_router
 from .map import router as map_router
 from .scripts import router as scripts_router
 from .wireless import router as wireless_router
@@ -25,8 +24,6 @@ router.include_router(network_router)
 router.include_router(battery_router)
 router.include_router(motors_router)
 router.include_router(camera_router)
-router.include_router(lidar_router)
-router.include_router(lidar_ws_router)
 router.include_router(map_router)
 router.include_router(scripts_router)
 router.include_router(wireless_router)

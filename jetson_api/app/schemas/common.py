@@ -20,7 +20,6 @@ class ActuatorId(str, Enum):
     excavator_3_actuator = "excavator_3_actuator"
     gate_actuator = "gate_actuator"
     camera_actuator = "camera_actuator"
-    lidar_actuator = "lidar_actuator"
 
 
 ControlMode = Literal["manual", "autonomy"]
@@ -62,7 +61,7 @@ class ControllerStatus(BaseModel):
 
 
 FaultSeverity = Literal["info", "warn", "error", "critical"]
-FaultSource = Literal["jetson", "roborio", "network", "camera", "lidar", "backend"]
+FaultSource = Literal["jetson", "roborio", "network", "camera", "backend"]
 
 
 class FaultCode(str, Enum):
@@ -70,7 +69,6 @@ class FaultCode(str, Enum):
     NETWORK_HIGH_LATENCY = "NETWORK_HIGH_LATENCY"
     NETWORK_HIGH_PACKET_LOSS = "NETWORK_HIGH_PACKET_LOSS"
     BATTERY_LOW = "BATTERY_LOW"
-    LIDAR_OFFLINE = "LIDAR_OFFLINE"
     CAMERA_OFFLINE = "CAMERA_OFFLINE"
     ROBORIO_OFFLINE = "ROBORIO_OFFLINE"
     JETSON_OFFLINE = "JETSON_OFFLINE"

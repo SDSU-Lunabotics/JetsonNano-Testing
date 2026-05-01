@@ -31,8 +31,6 @@ class NetworkService:
             return settings.roborio_ip
         if target == "camera":
             return settings.camera_host
-        if target == "lidar":
-            return settings.lidar_host
 
         raise ValueError(f"Unknown target '{target}'")
 
@@ -40,7 +38,7 @@ class NetworkService:
         if not settings.throughput_test_enabled:
             return False
 
-        return target in {"jetson", "camera", "lidar", "roborio", "rover"}
+        return target in {"jetson", "camera", "roborio", "rover"}
 
     def _route_interface(self, host: str) -> Optional[str]:
         ip_path = shutil.which("ip")

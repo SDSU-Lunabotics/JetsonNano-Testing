@@ -10,7 +10,6 @@ class RoverStatus(BaseModel):
     heartbeat: Heartbeat
     jetson: Optional[Heartbeat] = None
     roborio: Optional[Heartbeat] = None
-    lidar: Optional[Heartbeat] = None
 
 
 class ControlStatus(BaseModel):
