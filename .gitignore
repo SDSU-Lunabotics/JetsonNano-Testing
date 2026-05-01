@@ -9,6 +9,8 @@ __pycache__/
 # Generated model training / run outputs
 runs/
 DataTraining/runs/
+DataTraining/data/raw_labels/*.txt
+!DataTraining/data/raw_labels/.gitkeep
 
 # Trained model weights (large binary files — share via Drive/SSH, not git)
 # Keep ZEDAuto/models/README.md tracked but ignore the actual .pt files

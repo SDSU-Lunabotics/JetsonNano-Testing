@@ -965,6 +965,13 @@ def main():
             return -forward
         return forward
 
+    def navigation_origin_world(rover_pos_world, rover_forward_world):
+        if rover_pos_world is None or rover_forward_world is None:
+            return None
+        pos = np.array(rover_pos_world, dtype=np.float32).reshape(3,)
+        forward = np.array(drive_forward_world_from_rover(rover_forward_world), dtype=np.float32).reshape(3,)
+        return pos + forward * max(0.0, float(args.rover_size_m) * 0.5)
+
     def world_forward_from_rotation(R_world_cam):
         forward = (np.array(R_world_cam, dtype=np.float32) @ np.array([0.0, 0.0, 1.0], dtype=np.float32)).reshape(3,)
         norm = float(np.linalg.norm(forward))
@@ -5009,6 +5016,8 @@ def main():
                 heatmap_vis = None
                 cam_row_col = None
                 rover_row_col = None
+                drive_origin_pos_map = None
+                drive_origin_row_col = None
                 rover_heading_vec_rc = None
                 camera_map_pause_reason = ""
                 current_mount_yaw_deg = current_camera_mount_yaw_deg()
@@ -5031,6 +5040,9 @@ def main():
                 )
                 cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                 rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
+                drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
+                if drive_origin_pos_map is not None:
+                    drive_origin_row_col = map_world_to_grid(drive_origin_pos_map[0], drive_origin_pos_map[2])
                 if xyz.size > 0:
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
@@ -5153,10 +5165,10 @@ def main():
                         )
 
                     # Compute/update path to goal (avoid red obstacles only).
-                    if goal_cell is not None and rover_row_col is not None:
+                    if goal_cell is not None and drive_origin_row_col is not None:
                         now = time.time()
                         should_replan = (
-                            rover_row_col != last_start
+                            drive_origin_row_col != last_start
                             or goal_cell != last_goal
                             or path_cells is None
                             or (now - last_path_plan_time) >= args.path_replan_sec
@@ -5197,14 +5209,14 @@ def main():
 
                                 clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
                                 if clear_cells > 0:
-                                    obs_try = map_utils.clear_mask_circle(obs_try, rover_row_col, clear_cells)
+                                    obs_try = map_utils.clear_mask_circle(obs_try, drive_origin_row_col, clear_cells)
                                     keep_cost = map_utils.clear_mask_circle(
-                                        np.ones(obs_try.shape, dtype=bool), rover_row_col, clear_cells
+                                        np.ones(obs_try.shape, dtype=bool), drive_origin_row_col, clear_cells
                                     )
                                     path_cost[~keep_cost] = 0.0
 
                                 return map_utils.astar_path(
-                                    rover_row_col,
+                                    drive_origin_row_col,
                                     goal_cell,
                                     obs_try,
                                     connectivity=args.path_connectivity,
@@ -5269,7 +5281,7 @@ def main():
                                     print("Auto escape: backing up and turning to escape red spot.")
                                     backup_hold_until = max(backup_hold_until, time.time() + 0.5)
                                     stuck_escape_counter = 0
-                            last_start = rover_row_col
+                            last_start = drive_origin_row_col
                             last_goal = goal_cell
                             last_path_plan_time = now
 
@@ -5504,7 +5516,7 @@ def main():
                                 reset_auto_drive_shape(now)
                                 # Keep robot safe while localization is uncertain.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
-                            elif rover_row_col is None:
+                            elif drive_origin_row_col is None or drive_origin_pos_map is None:
                                 reset_auto_drive_shape(now)
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                             elif _mine_drive is not None:
@@ -5536,7 +5548,7 @@ def main():
                                 )
                             else:
                                 reverse_path_drive = mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
-                                target_rc = pick_drive_target(draw_path, rover_row_col, goal_cell)
+                                target_rc = pick_drive_target(draw_path, drive_origin_row_col, goal_cell)
                                 if target_rc is not None:
                                     target_world = occ_map.grid_to_world(target_rc[0], target_rc[1])
                                     if target_world is None:
@@ -5564,7 +5576,7 @@ def main():
                                     continue
                                 # Auto-drive uses the robot/ZED physical X axis.
                                 # The map view is mirrored for display, so convert map targets back.
-                                cx, cz = float(rover_pos_map[0]), float(rover_pos_map[2])
+                                cx, cz = float(drive_origin_pos_map[0]), float(drive_origin_pos_map[2])
                                 tx_drive = zed_x_from_map(tx)
                                 dx = tx_drive - cx
                                 dz = tz - cz
