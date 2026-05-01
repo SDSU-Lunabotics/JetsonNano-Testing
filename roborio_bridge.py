@@ -128,6 +128,12 @@ DATA_KEYS = {
     "MainRover/DepositCurrentLimitAppliedA": "number",
 }
 
+DIRECT_READ_KEYS = {
+    key
+    for key in tuple(DATA_KEYS) + BATTERY_VALUE_KEYS
+    if "/" in key
+}
+
 
 WRITE_KEYS = {
     "Jetson/LedOverride": "boolean",
@@ -171,8 +177,18 @@ def wait_for_connection(timeout=5.0):
 
 def read_value(key, value_type, available_keys=None):
     try:
-        if available_keys is not None and key not in available_keys:
-            return None
+        if (
+            available_keys is not None
+            and key not in available_keys
+        ):
+            if key not in DIRECT_READ_KEYS:
+                return None
+
+            try:
+                return sd.getValue(key)
+            except Exception:
+                return None
+
         if value_type == "boolean":
             return sd.getBoolean(key, False)
         if value_type == "number":
@@ -241,7 +257,8 @@ def read_battery_values(available_keys):
     for key in BATTERY_VALUE_KEYS:
         if key in DATA_KEYS:
             continue
-        if available_keys and key not in available_keys:
+        is_slash_key = "/" in key
+        if available_keys and key not in available_keys and not is_slash_key:
             continue
 
         value = read_value(key, "number", available_keys)
