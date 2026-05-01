@@ -26,13 +26,17 @@ try:
 except Exception:
     HAS_CV2 = False
 
-STATUS_PANEL_W = 820
-STATUS_PANEL_H = 1180
+STATUS_PANEL_W = int(os.getenv("ZED_STATUS_PANEL_W", "820"))
+STATUS_PANEL_H = int(os.getenv("ZED_STATUS_PANEL_H", "980"))
 
 LEFT_KEYS = {81, 2424832, 65361, 63234}
 UP_KEYS = {82, 2490368, 65362, 63232}
 RIGHT_KEYS = {83, 2555904, 65363, 63235}
 DOWN_KEYS = {84, 2621440, 65364, 63233}
+PAGEUP_KEYS = {2162688, 65365, 63276}
+PAGEDOWN_KEYS = {2228224, 65366, 63277}
+HOME_KEYS = {2359296, 65360, 63273}
+END_KEYS = {2293760, 65367, 63275}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -4309,7 +4313,10 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
 
         put_line(
-            f"Controls scroll: {status_scroll_y}/{status_scroll_max} | Wheel or ^/v buttons",
+            (
+                f"Controls scroll: {status_scroll_y}/{status_scroll_max} | "
+                "Wheel, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
+            ),
             controls_top - 8,
             (170, 200, 230),
             0.42,
@@ -5771,6 +5778,24 @@ def main():
                         set_status_scroll(-80)
                     if raw_key in DOWN_KEYS:
                         set_status_scroll(80)
+                    if raw_key in PAGEUP_KEYS or key == ord("k"):
+                        set_status_scroll(-260)
+                    if raw_key in PAGEDOWN_KEYS or key == ord("j"):
+                        set_status_scroll(260)
+                    if raw_key in HOME_KEYS:
+                        set_status_scroll_to(0)
+                    if raw_key in END_KEYS:
+                        set_status_scroll_to(status_scroll_max)
+                    if key == ord("1"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
+                    if key == ord("2"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
+                    if key == ord("3"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
+                    if key == ord("4"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                    if key == ord("5"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)
                         print(f"Map zoom: x{map_scale_live}")
