@@ -1164,6 +1164,9 @@ def main():
     status_scroll_max = 0
     status_scroll_drag_active = False
     status_scroll_drag_offset = 0
+    status_view_drag_active = False
+    status_view_drag_anchor_y = 0
+    status_view_drag_anchor_scroll = 0
     last_status_panel_shape = None
     last_map_window_shape = None
     disable_holes = bool(args.disable_holes)
@@ -2733,6 +2736,7 @@ def main():
         nonlocal dig_name_input_focused, dig_name_input_text
         nonlocal paint_safe_mode, erase_safe_mode, paint_obstacle_mode, paint_brush_radius
         nonlocal reset_map_confirm, status_scroll_drag_active, status_scroll_drag_offset
+        nonlocal status_view_drag_active, status_view_drag_anchor_y, status_view_drag_anchor_scroll
         nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
 
         def scroll_from_thumb_top(track_rect, thumb_rect, thumb_top):
@@ -2750,9 +2754,11 @@ def main():
             x, y = window_to_image_coords("ZED Drive Status", x, y, last_status_panel_shape)
         if event == cv2.EVENT_LBUTTONUP:
             status_scroll_drag_active = False
+            status_view_drag_active = False
             return
         if event == cv2.EVENT_MOUSEMOVE and not (flags & cv2.EVENT_FLAG_LBUTTON):
             status_scroll_drag_active = False
+            status_view_drag_active = False
         if event == getattr(cv2, "EVENT_MOUSEWHEEL", -9999):
             try:
                 wheel_delta = cv2.getMouseWheelDelta(flags)
@@ -2765,6 +2771,9 @@ def main():
         thumb_rect = status_button_rects.get("scrollbar_thumb")
         if is_drag and status_scroll_drag_active and track_rect is not None and thumb_rect is not None:
             scroll_from_thumb_top(track_rect, thumb_rect, y - status_scroll_drag_offset)
+            return
+        if is_drag and status_view_drag_active:
+            set_status_scroll_to(int(status_view_drag_anchor_scroll + (status_view_drag_anchor_y - y)))
             return
         if event != cv2.EVENT_LBUTTONDOWN and not is_drag:
             return
@@ -2810,6 +2819,7 @@ def main():
                     status_scroll_drag_offset = thumb_h // 2
                     scroll_from_thumb_top(track_rect, thumb_rect, y - status_scroll_drag_offset)
                 return
+        viewport_rect = status_button_rects.get("controls_viewport")
         for jump_name, target_y in status_section_jump_targets.items():
             rect = status_button_rects.get(jump_name)
             if rect is None:
@@ -3126,6 +3136,13 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 paint_brush_radius = min(15, paint_brush_radius + 1)
                 print(f"Brush radius: {paint_brush_radius} cells")
+                return
+        if viewport_rect is not None:
+            vx0, vy0, vx1, vy1 = viewport_rect
+            if vx0 <= x <= vx1 and vy0 <= y <= vy1:
+                status_view_drag_active = True
+                status_view_drag_anchor_y = int(y)
+                status_view_drag_anchor_scroll = int(status_scroll_y)
                 return
     def process_external_map_command():
         nonlocal last_map_command_seq, reset_map_confirm
@@ -3758,7 +3775,7 @@ def main():
         button_h = 46
         card_gap = 14
         card_x0 = 10
-        scrollbar_margin = 10
+        scrollbar_margin = 34
         scrollbar_w = 24
         card_x1 = panel_w - scrollbar_margin - scrollbar_w - 8
         card_inner = 14
@@ -4270,6 +4287,7 @@ def main():
         status_scroll_y = max(0, min(status_scroll_y, status_scroll_max))
         panel[controls_top:controls_bottom, :] = controls[status_scroll_y:status_scroll_y + controls_h, :]
         cv2.rectangle(panel, (0, controls_top), (panel_w - 1, controls_bottom), (90, 90, 90), 1)
+        status_button_rects["controls_viewport"] = (0, controls_top, panel_w - 1, controls_bottom)
 
         for name, rect in (
             ("auto_run", auto_run_rect),
@@ -4342,18 +4360,18 @@ def main():
             panel,
             (scrollbar_track_rect[0], scrollbar_track_rect[1]),
             (scrollbar_track_rect[2], scrollbar_track_rect[3]),
-            (44, 44, 48),
+            (34, 34, 38),
             -1,
         )
         cv2.rectangle(
             panel,
             (scrollbar_track_rect[0], scrollbar_track_rect[1]),
             (scrollbar_track_rect[2], scrollbar_track_rect[3]),
-            (110, 110, 118),
-            1,
+            (160, 160, 170),
+            2,
         )
-        thumb_fill = (100, 170, 255) if status_scroll_max > 0 else (72, 72, 78)
-        thumb_border = (220, 230, 240) if status_scroll_max > 0 else (120, 120, 126)
+        thumb_fill = (0, 180, 255) if status_scroll_max > 0 else (72, 72, 78)
+        thumb_border = (255, 255, 255) if status_scroll_max > 0 else (120, 120, 126)
         cv2.rectangle(
             panel,
             (scrollbar_thumb_rect[0], scrollbar_thumb_rect[1]),
@@ -4366,7 +4384,17 @@ def main():
             (scrollbar_thumb_rect[0], scrollbar_thumb_rect[1]),
             (scrollbar_thumb_rect[2], scrollbar_thumb_rect[3]),
             thumb_border,
+            2,
+        )
+        cv2.putText(
+            panel,
+            "SCROLL",
+            (scrollbar_track_rect[0] - 12, max(controls_top - 10, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (170, 220, 255),
             1,
+            cv2.LINE_AA,
         )
 
         scroll_btn_x1 = scrollbar_track_rect[0] - 8
@@ -4390,7 +4418,7 @@ def main():
         put_line(
             (
                 f"Controls scroll: {status_scroll_y}/{status_scroll_max} | "
-                "Wheel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
+                "Wheel, drag panel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
             ),
             controls_top - 8,
             (170, 200, 230),
@@ -4869,12 +4897,9 @@ def main():
                 # Never integrate new points while tracking is lost or a pose
                 # jump was rejected; otherwise one bad pose can drag the map.
                 map_integration_ok = (not tracking_enabled) or tracking_pose_ok
-                if args.camera_servo_track and (servo_turning or not servo_map_view):
+                if args.camera_servo_track and servo_turning:
                     map_integration_ok = False
-                    if servo_turning:
-                        camera_map_pause_reason = "CAMERA TURNING"
-                    else:
-                        camera_map_pause_reason = "CAMERA DEPOSIT VIEW"
+                    camera_map_pause_reason = "CAMERA TURNING"
                 # Compute map-local translation for simple mode
                 if not args.complex and map_origin_set:
                     t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
