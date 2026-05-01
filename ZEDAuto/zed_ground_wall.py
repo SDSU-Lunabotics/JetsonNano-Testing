@@ -315,6 +315,11 @@ def main():
         default=8.0,
         help="Allowed error from map-view servo angle before map integration pauses.",
     )
+    parser.add_argument(
+        "--camera-servo-invert",
+        action="store_true",
+        help="Invert RoboRIO servo angles so Jetson logical 0/180 map to reversed physical servo endpoints.",
+    )
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
@@ -872,6 +877,18 @@ def main():
             err += 360.0
         return err
 
+    def servo_raw_to_logical(angle_deg):
+        angle_deg = max(0.0, min(180.0, float(angle_deg)))
+        if args.camera_servo_invert:
+            return 180.0 - angle_deg
+        return angle_deg
+
+    def servo_logical_to_raw(angle_deg):
+        angle_deg = max(0.0, min(180.0, float(angle_deg)))
+        if args.camera_servo_invert:
+            return 180.0 - angle_deg
+        return angle_deg
+
     def wrap_angle_deg(angle_deg):
         angle = float(angle_deg)
         while angle > 180.0:
@@ -1085,6 +1102,7 @@ def main():
         f"forward_offset={float(camera_forward_offset_m):+.2f}m "
         f"right_offset={float(camera_right_offset_m):+.2f}m "
         f"servo_track={'on' if args.camera_servo_track else 'off'} "
+        f"servo_invert={'on' if args.camera_servo_invert else 'off'} "
         f"heading_flip={'on' if args.drive_heading_flip else 'off'}"
     )
 
@@ -1140,7 +1158,7 @@ def main():
             sd.putBoolean("Jetson/ExcavatorLoweringSim", False)
             sd.putBoolean("Jetson/DoorActuatorsOpen", False)
             sd.putBoolean("Jetson/DoorActuatorsClose", False)
-            sd.putNumber("Jetson/ServoCommandAngleDeg", float(args.camera_map_angle_deg))
+            sd.putNumber("Jetson/ServoCommandAngleDeg", float(servo_logical_to_raw(args.camera_map_angle_deg)))
             sd.putNumber("Jetson/ServoCommandSeq", 0.0)
             print(
                 f"Drive enabled: NetworkTables to {args.roborio_ip} "
@@ -1821,9 +1839,12 @@ def main():
             servo_manual_override = False
             return
 
-        servo_angle_deg = float(sd.getNumber("Jetson/ServoAngleDeg", servo_angle_deg))
-        servo_target_angle_deg = float(sd.getNumber("Jetson/ServoTargetAngleDeg", servo_target_angle_deg))
-        servo_command_angle_deg = float(sd.getNumber("Jetson/ServoCommandAngleDeg", servo_command_angle_deg))
+        raw_servo_angle_deg = float(sd.getNumber("Jetson/ServoAngleDeg", servo_logical_to_raw(servo_angle_deg)))
+        raw_servo_target_angle_deg = float(sd.getNumber("Jetson/ServoTargetAngleDeg", servo_logical_to_raw(servo_target_angle_deg)))
+        raw_servo_command_angle_deg = float(sd.getNumber("Jetson/ServoCommandAngleDeg", servo_logical_to_raw(servo_command_angle_deg)))
+        servo_angle_deg = float(servo_raw_to_logical(raw_servo_angle_deg))
+        servo_target_angle_deg = float(servo_raw_to_logical(raw_servo_target_angle_deg))
+        servo_command_angle_deg = float(servo_raw_to_logical(raw_servo_command_angle_deg))
         servo_settled = bool(sd.getBoolean("Jetson/ServoSettled", True))
         servo_manual_override = bool(sd.getBoolean("Jetson/ServoManualOverride", False))
         servo_manual_moving = bool(sd.getBoolean("Jetson/ServoManualMoving", False))
@@ -1838,11 +1859,12 @@ def main():
         angle_deg = max(0.0, min(180.0, float(angle_deg)))
         if abs(servo_command_angle_deg - angle_deg) < 0.5:
             return False
+        raw_angle_deg = servo_logical_to_raw(angle_deg)
         next_seq = float(sd.getNumber("Jetson/ServoCommandSeq", 0.0)) + 1.0
-        sd.putNumber("Jetson/ServoCommandAngleDeg", angle_deg)
+        sd.putNumber("Jetson/ServoCommandAngleDeg", raw_angle_deg)
         sd.putNumber("Jetson/ServoCommandSeq", next_seq)
         servo_command_angle_deg = angle_deg
-        print(f"Camera servo -> {angle_deg:.0f} deg ({reason})")
+        print(f"Camera servo -> logical {angle_deg:.0f} deg / raw {raw_angle_deg:.0f} deg ({reason})")
         return True
 
     def request_camera_map_view(reason="manual"):
