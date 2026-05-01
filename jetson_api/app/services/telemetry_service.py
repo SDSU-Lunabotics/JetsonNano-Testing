@@ -118,6 +118,11 @@ class TelemetryService:
             if bridge_connected:
                 bridge_status["connected"] = True
 
+        # UI connectivity should reflect the live bridge/NT link, even if the
+        # optional heartbeat key is stale or temporarily missing.
+        if bridge_connected:
+            self._roborio_last_seen_ms = now
+
         if bridge_heartbeat_fresh:
             try:
                 self._roborio_last_seen_ms = int(bridge_heartbeat.get("last_seen_ms"))
@@ -150,7 +155,7 @@ class TelemetryService:
             battery=battery_service.get_battery_status(),
             control=control,
             motors=motor_service.get_status(),
-            camera=camera_service.get_status(),
+            camera=camera_service.get_cached_status(),
             wireless=wireless_service.get_status(),
         )
 

@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.camera import (
+    CameraStatus,
     CameraHeartbeatRequest,
     CameraHeartbeatResponse,
     CameraFrameIngestResponse,
@@ -41,6 +42,11 @@ def _status_message(event_type: str) -> dict:
         camera=camera_service.get_cached_status(),
     )
     return msg.model_dump()
+
+
+@router.get("/status", response_model=CameraStatus)
+def get_camera_status() -> CameraStatus:
+    return camera_service.get_cached_status()
 
 
 @router.get("/snapshot")

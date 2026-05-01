@@ -1,11 +1,9 @@
-path: /Users/gecsanreyes/Desktop/RoboRio/Jet/JetsonNano-Testing/DataTraining/data/dataset
-train: images/train
-val: images/val
-test: images/test
 names:
   0: rock
-  1: obstacle
-  2: pole
-  3: berm_marker
-  4: hole_rgb
-  5: unknown_obstacle
+  1: pole
+  2: crater
+  3: unknown_obstacle
+path: /content/drive/MyDrive/Jetson-NanoTesting/DataTraining/data/dataset
+test: images/test
+train: images/train
+val: images/val

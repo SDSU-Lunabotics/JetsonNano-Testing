@@ -341,7 +341,7 @@ def _build_motor_health_rows(
             motor_id=MotorId.left_front,
             connected=True if _has_any(values, "Kraken/LeftFront/VelocityTps", "Kraken/LeftFront/TorqueCurrentA", "Kraken/LeftFront/Enabled", "Kraken/LeftFront/AppliedOutput") else None,
             enabled=telemetry.drive.left_front.enabled,
-            active=_active_from_output(telemetry.drive.left_front.applied_output),
+            active=_wheel_is_active(telemetry.drive.left_front),
             current_a=telemetry.drive.left_front.torque_current_a,
             output_percent=telemetry.drive.left_front.applied_output,
             last_update_ms=timestamp,
@@ -354,7 +354,7 @@ def _build_motor_health_rows(
             motor_id=MotorId.left_rear,
             connected=True if _has_any(values, "Kraken/LeftRear/VelocityTps", "Kraken/LeftRear/TorqueCurrentA", "Kraken/LeftRear/Enabled", "Kraken/LeftRear/AppliedOutput") else None,
             enabled=telemetry.drive.left_rear.enabled,
-            active=_active_from_output(telemetry.drive.left_rear.applied_output),
+            active=_wheel_is_active(telemetry.drive.left_rear),
             current_a=telemetry.drive.left_rear.torque_current_a,
             output_percent=telemetry.drive.left_rear.applied_output,
             last_update_ms=timestamp,
@@ -367,7 +367,7 @@ def _build_motor_health_rows(
             motor_id=MotorId.right_front,
             connected=True if _has_any(values, "Kraken/RightFront/VelocityTps", "Kraken/RightFront/TorqueCurrentA", "Kraken/RightFront/Enabled", "Kraken/RightFront/AppliedOutput") else None,
             enabled=telemetry.drive.right_front.enabled,
-            active=_active_from_output(telemetry.drive.right_front.applied_output),
+            active=_wheel_is_active(telemetry.drive.right_front),
             current_a=telemetry.drive.right_front.torque_current_a,
             output_percent=telemetry.drive.right_front.applied_output,
             last_update_ms=timestamp,
@@ -380,7 +380,7 @@ def _build_motor_health_rows(
             motor_id=MotorId.right_rear,
             connected=True if _has_any(values, "Kraken/RightRear/VelocityTps", "Kraken/RightRear/TorqueCurrentA", "Kraken/RightRear/Enabled", "Kraken/RightRear/AppliedOutput") else None,
             enabled=telemetry.drive.right_rear.enabled,
-            active=_active_from_output(telemetry.drive.right_rear.applied_output),
+            active=_wheel_is_active(telemetry.drive.right_rear),
             current_a=telemetry.drive.right_rear.torque_current_a,
             output_percent=telemetry.drive.right_rear.applied_output,
             last_update_ms=timestamp,
@@ -392,8 +392,8 @@ def _build_motor_health_rows(
         MotorHealth(
             motor_id=MotorId.excavator,
             connected=True if _has_any(values, "Excav/BeltRunning", "Excav/BeltOutput", "Excav/BeltLeaderTorqueCurrentA", "Excav/BeltFollowerTorqueCurrentA", "Excav/State") else None,
-            enabled=telemetry.excavation.belt_running,
-            active=telemetry.excavation.belt_running,
+            enabled=_excavation_is_active(telemetry),
+            active=_excavation_is_active(telemetry),
             current_a=_max_optional_float(
                 telemetry.excavation.belt_leader_torque_current_a,
                 telemetry.excavation.belt_follower_torque_current_a,
@@ -416,8 +416,8 @@ def _build_motor_health_rows(
         MotorHealth(
             motor_id=MotorId.deposition,
             connected=True if _has_any(values, "Deposit/Running", "Deposit/Output", "Deposit/TorqueCurrentA", "Deposit/DoorState") else None,
-            enabled=telemetry.deposition.running,
-            active=telemetry.deposition.running,
+            enabled=_deposition_is_active(telemetry),
+            active=_deposition_is_active(telemetry),
             current_a=telemetry.deposition.torque_current_a,
             output_percent=telemetry.deposition.output,
             state=_compose_deposition_state(telemetry),
@@ -453,7 +453,7 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     left_front_card = MotorCardStatus(
         motor_id=MotorId.left_front,
         label="Left Front Drive",
-        active=_active_from_output(telemetry.drive.left_front.applied_output),
+        active=_wheel_is_active(telemetry.drive.left_front),
         enabled=telemetry.drive.left_front.enabled,
         current_a=telemetry.drive.left_front.torque_current_a,
         output_percent=telemetry.drive.left_front.applied_output,
@@ -463,7 +463,7 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     left_rear_card = MotorCardStatus(
         motor_id=MotorId.left_rear,
         label="Left Rear Drive",
-        active=_active_from_output(telemetry.drive.left_rear.applied_output),
+        active=_wheel_is_active(telemetry.drive.left_rear),
         enabled=telemetry.drive.left_rear.enabled,
         current_a=telemetry.drive.left_rear.torque_current_a,
         output_percent=telemetry.drive.left_rear.applied_output,
@@ -473,7 +473,7 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     right_front_card = MotorCardStatus(
         motor_id=MotorId.right_front,
         label="Right Front Drive",
-        active=_active_from_output(telemetry.drive.right_front.applied_output),
+        active=_wheel_is_active(telemetry.drive.right_front),
         enabled=telemetry.drive.right_front.enabled,
         current_a=telemetry.drive.right_front.torque_current_a,
         output_percent=telemetry.drive.right_front.applied_output,
@@ -483,7 +483,7 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     right_rear_card = MotorCardStatus(
         motor_id=MotorId.right_rear,
         label="Right Rear Drive",
-        active=_active_from_output(telemetry.drive.right_rear.applied_output),
+        active=_wheel_is_active(telemetry.drive.right_rear),
         enabled=telemetry.drive.right_rear.enabled,
         current_a=telemetry.drive.right_rear.torque_current_a,
         output_percent=telemetry.drive.right_rear.applied_output,
@@ -493,8 +493,8 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     excavator_card = MotorCardStatus(
         motor_id=MotorId.excavator,
         label="Excavator",
-        active=telemetry.excavation.belt_running,
-        enabled=telemetry.excavation.belt_running,
+        active=_excavation_is_active(telemetry),
+        enabled=_excavation_is_active(telemetry),
         current_a=_max_optional_float(
             telemetry.excavation.belt_leader_torque_current_a,
             telemetry.excavation.belt_follower_torque_current_a,
@@ -506,8 +506,8 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
     deposition_card = MotorCardStatus(
         motor_id=MotorId.deposition,
         label="Deposition",
-        active=telemetry.deposition.running,
-        enabled=telemetry.deposition.running,
+        active=_deposition_is_active(telemetry),
+        enabled=_deposition_is_active(telemetry),
         current_a=telemetry.deposition.torque_current_a,
         output_percent=telemetry.deposition.output,
         state=_compose_deposition_state(telemetry),
@@ -553,6 +553,48 @@ def _active_from_output(value: Optional[float], threshold: float = 1e-4) -> Opti
     return abs(value) > threshold
 
 
+def _active_from_magnitude(value: Optional[float], threshold: float) -> Optional[bool]:
+    if value is None:
+        return None
+    return abs(value) > threshold
+
+
+def _any_known_true(*values: Optional[bool]) -> Optional[bool]:
+    known = [value for value in values if value is not None]
+    if not known:
+        return None
+    return any(known)
+
+
+def _wheel_is_active(wheel: DriveMotorTelemetry) -> Optional[bool]:
+    return _any_known_true(
+        _active_from_output(wheel.applied_output),
+        _active_from_magnitude(wheel.velocity_tps, 1e-3),
+        _active_from_magnitude(wheel.torque_current_a, 0.5),
+    )
+
+
+def _excavation_is_active(telemetry: JetsonMotorTelemetry) -> Optional[bool]:
+    if telemetry.excavation.belt_running is not None:
+        return telemetry.excavation.belt_running
+    return _any_known_true(
+        _active_from_output(telemetry.excavation.belt_output),
+        _active_from_magnitude(telemetry.excavation.belt_leader_torque_current_a, 0.5),
+        _active_from_magnitude(telemetry.excavation.belt_follower_torque_current_a, 0.5),
+    )
+
+
+def _deposition_is_active(telemetry: JetsonMotorTelemetry) -> Optional[bool]:
+    if telemetry.deposition.running is not None:
+        return telemetry.deposition.running
+    return _any_known_true(
+        _active_from_output(telemetry.deposition.output),
+        telemetry.deposition.collecting_assist,
+        telemetry.deposition.depositing,
+        _active_from_magnitude(telemetry.deposition.torque_current_a, 0.5),
+    )
+
+
 def _max_optional_float(*values: Optional[float]) -> Optional[float]:
     numbers = [value for value in values if value is not None]
     if not numbers:
@@ -577,14 +619,21 @@ def _drive_is_active(telemetry: JetsonMotorTelemetry) -> Optional[bool]:
     if telemetry.drive.active is not None:
         return telemetry.drive.active
     wheel_activity = [
-        _active_from_output(telemetry.drive.left_front.applied_output),
-        _active_from_output(telemetry.drive.left_rear.applied_output),
-        _active_from_output(telemetry.drive.right_front.applied_output),
-        _active_from_output(telemetry.drive.right_rear.applied_output),
+        _wheel_is_active(telemetry.drive.left_front),
+        _wheel_is_active(telemetry.drive.left_rear),
+        _wheel_is_active(telemetry.drive.right_front),
+        _wheel_is_active(telemetry.drive.right_rear),
     ]
     known = [value for value in wheel_activity if value is not None]
     if known:
         return any(known)
+    side_activity = [
+        _active_from_output(telemetry.drive.left_output),
+        _active_from_output(telemetry.drive.right_output),
+    ]
+    known_side = [value for value in side_activity if value is not None]
+    if known_side:
+        return any(known_side)
     return None
 
 

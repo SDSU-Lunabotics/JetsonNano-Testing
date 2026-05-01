@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +21,16 @@ heartbeat_state = {
     "last_value_sec": None,
     "last_seen_ms": None,
 }
+
+BATTERY_VALUE_KEYS = (
+    "Battery/Voltage",
+    "BatteryVoltage",
+    "Battery Voltage",
+    "RoboRIO/BatteryVoltage",
+    "RoboRIO/Battery/Voltage",
+    "Robot/BatteryVoltage",
+    "RobotController/BatteryVoltage",
+)
 
 
 DATA_KEYS = {
@@ -45,6 +56,7 @@ DATA_KEYS = {
     "Jetson/DoorActuatorsOpen": "boolean",
     "Jetson/DoorActuatorsClose": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
+    "Jetson/DepositionEnabled": "boolean",
     "NavX/YawDeg": "number",
     "Rover/HeartbeatSec": "number",
     "Rover/Connected": "boolean",
@@ -86,6 +98,45 @@ DATA_KEYS = {
     "Kraken/LeftRear/AppliedOutput": "number",
     "Kraken/RightFront/AppliedOutput": "number",
     "Kraken/RightRear/AppliedOutput": "number",
+    "Jetson/DriveLeftOutput": "number",
+    "Jetson/DriveRightOutput": "number",
+    "Jetson/DriveActive": "boolean",
+    "Kraken/WheelTestStep": "number",
+    "Kraken/WheelTestMode": "string",
+    "Excav/BeltRunning": "boolean",
+    "Excav/BeltOutput": "number",
+    "Excav/BeltLeaderTorqueCurrentA": "number",
+    "Excav/BeltFollowerTorqueCurrentA": "number",
+    "Excav/BotLeftCounts": "number",
+    "Excav/BotRightCounts": "number",
+    "Excav/BottomDiffCounts": "number",
+    "Excav/SyncFault": "boolean",
+    "Excav/ManualBypassSync": "boolean",
+    "Excav/BottomPositionCalibrated": "boolean",
+    "Excav/PositionReference": "string",
+    "Excav/State": "string",
+    "Excav/Targets/StowBottomCounts": "number",
+    "Excav/Targets/DigZoneBottomCounts": "number",
+    "Deposit/Running": "boolean",
+    "Deposit/Output": "number",
+    "Deposit/CollectingAssist": "boolean",
+    "Deposit/Depositing": "boolean",
+    "Deposit/DoorState": "string",
+    "Deposit/TorqueCurrentA": "number",
+    "MainRover/CurrentLimitEnabled": "boolean",
+    "MainRover/DriveCurrentLimitA": "number",
+    "MainRover/ExcavCurrentLimitA": "number",
+    "MainRover/DepositCurrentLimitA": "number",
+    "MainRover/CurrentLimitApplied": "boolean",
+    "MainRover/DriveCurrentLimitAppliedA": "number",
+    "MainRover/ExcavCurrentLimitAppliedA": "number",
+    "MainRover/DepositCurrentLimitAppliedA": "number",
+}
+
+DIRECT_READ_KEYS = {
+    key
+    for key in tuple(DATA_KEYS) + BATTERY_VALUE_KEYS
+    if "/" in key
 }
 
 
@@ -100,6 +151,7 @@ WRITE_KEYS = {
     "Jetson/DoorActuatorsOpen": "boolean",
     "Jetson/DoorActuatorsClose": "boolean",
     "Jetson/ConveyorEnabled": "boolean",
+    "Jetson/DepositionEnabled": "boolean",
     "Jetson/AutomationEnabled": "boolean",
     "Jetson/CommandReady": "boolean",
     "Jetson/CommandDuration": "number",
@@ -135,8 +187,18 @@ def wait_for_connection(timeout=5.0):
 
 def read_value(key, value_type, available_keys=None):
     try:
-        if available_keys is not None and key not in available_keys:
-            return None
+        if (
+            available_keys is not None
+            and key not in available_keys
+        ):
+            if key not in DIRECT_READ_KEYS:
+                return None
+
+            try:
+                return sd.getValue(key, None)
+            except Exception:
+                return None
+
         if value_type == "boolean":
             return sd.getBoolean(key, False)
         if value_type == "number":
@@ -185,6 +247,99 @@ def write_value(key, value_type, value):
     return parsed
 
 
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_available_keys():
+    try:
+        return set(sd.getKeys())
+    except Exception:
+        return set()
+
+
+def read_battery_values(available_keys):
+    values = {}
+
+    for key in BATTERY_VALUE_KEYS:
+        if key in DATA_KEYS:
+            continue
+        is_slash_key = "/" in key
+        if available_keys and key not in available_keys and not is_slash_key:
+            continue
+
+        value = read_value(key, "number", available_keys)
+        if value is not None:
+            values[key] = value
+
+    for key in available_keys:
+        normalized = re.sub(r"[^a-z0-9]+", "", key.lower())
+        if "battery" not in normalized or "voltage" not in normalized:
+            continue
+        if key in DATA_KEYS or key in values:
+            continue
+
+        value = read_value(key, "number", available_keys)
+        if value is not None:
+            values[key] = value
+
+    return values
+
+
+def normalize_battery_voltage(values):
+    canonical_key = "Battery/Voltage"
+    if _safe_float(values.get(canonical_key)) is not None:
+        return {
+            "source_key": canonical_key,
+            "voltage_v": float(values[canonical_key]),
+            "aliases": {},
+        }
+
+    aliases = {
+        key: value
+        for key, value in values.items()
+        if key != canonical_key
+        and (
+            key in BATTERY_VALUE_KEYS
+            or (
+                "battery" in re.sub(r"[^a-z0-9]+", "", key.lower())
+                and "voltage" in re.sub(r"[^a-z0-9]+", "", key.lower())
+            )
+        )
+        and _safe_float(value) is not None
+    }
+
+    for key in BATTERY_VALUE_KEYS:
+        value = aliases.get(key)
+        voltage = _safe_float(value)
+        if voltage is not None:
+            values[canonical_key] = voltage
+            return {
+                "source_key": key,
+                "voltage_v": voltage,
+                "aliases": aliases,
+            }
+
+    for key, value in aliases.items():
+        voltage = _safe_float(value)
+        if voltage is not None:
+            values[canonical_key] = voltage
+            return {
+                "source_key": key,
+                "voltage_v": voltage,
+                "aliases": aliases,
+            }
+
+    return {
+        "source_key": None,
+        "voltage_v": None,
+        "aliases": aliases,
+    }
+
+
 def torque_warnings(values):
     warnings = []
 
@@ -192,7 +347,9 @@ def torque_warnings(values):
         if not key.endswith("/TorqueCurrentA"):
             continue
 
-        value = values.get(key, 0.0)
+        value = _safe_float(values.get(key))
+        if value is None:
+            continue
 
         if value_type == "number" and value > TORQUE_CURRENT_LIMIT_AMPS:
             warnings.append(
@@ -285,7 +442,7 @@ def read_dynamic_controller_values():
             continue
 
         try:
-            values[key] = sd.getValue(key)
+            values[key] = sd.getValue(key, None)
         except Exception:
             continue
 
@@ -391,6 +548,61 @@ def _bool_arg(data, key, default):
     return parse_value("boolean", data.get(key, default))
 
 
+def _str_arg(data, key, default=""):
+    value = data.get(key, default)
+    if value is None:
+        return str(default)
+    return str(value).strip()
+
+
+def _set_deposition_enabled(enabled):
+    write_value("Jetson/ConveyorEnabled", "boolean", enabled)
+    write_value("Jetson/DepositionEnabled", "boolean", enabled)
+
+
+def _handle_motor_command(motor_id, data):
+    normalized_motor_id = str(motor_id).strip().lower().replace("-", "_").replace(" ", "_")
+    mode = _str_arg(data, "mode", "stop").lower()
+    value = data.get("value")
+    duration_ms = data.get("duration_ms")
+    timestamp_ms = now_ms()
+
+    if mode not in {"percent", "rpm", "stop"}:
+        return 400, {
+            "status": "error",
+            "message": f"Unsupported motor mode: {mode}",
+        }
+
+    if not wait_for_connection():
+        return 503, {
+            "status": "error",
+            "message": "RoboRIO not connected",
+        }
+
+    if normalized_motor_id == "excavator":
+        enabled = mode != "stop" and parse_value("number", value) != 0.0
+        write_value("Jetson/ExcavatorEnabled", "boolean", enabled)
+    elif normalized_motor_id in {"deposition", "conveyor"}:
+        enabled = mode != "stop" and parse_value("number", value) != 0.0
+        _set_deposition_enabled(enabled)
+        normalized_motor_id = "deposition"
+    else:
+        return 400, {
+            "status": "error",
+            "message": f"Unsupported motor id: {motor_id}",
+        }
+
+    return 200, {
+        "ok": True,
+        "status": "ok",
+        "timestamp_ms": timestamp_ms,
+        "motor_id": normalized_motor_id,
+        "mode": mode,
+        "value": None if value is None else parse_value("number", value),
+        "duration_ms": duration_ms,
+    }
+
+
 def stop_all_motion():
     write_value("Jetson/AutomationEnabled", "boolean", False)
     write_value("Jetson/CommandForward", "number", 0.0)
@@ -454,10 +666,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/status":
-            try:
-                available_keys = set(sd.getKeys())
-            except Exception:
-                available_keys = set()
+            available_keys = read_available_keys()
 
             values = {
                 key: read_value(key, value_type, available_keys)
@@ -465,6 +674,8 @@ class Handler(BaseHTTPRequestHandler):
             }
             dynamic_controller_values = read_dynamic_controller_values()
             values.update(dynamic_controller_values)
+            values.update(read_battery_values(available_keys))
+            battery = normalize_battery_voltage(values)
             connected = NetworkTables.isConnected()
             heartbeat = update_heartbeat_status(values)
 
@@ -476,6 +687,7 @@ class Handler(BaseHTTPRequestHandler):
                     "connected": connected,
                     "heartbeat": heartbeat,
                     "values": values,
+                    "battery": battery,
                     "controller": infer_controller_status(values),
                     "warnings": torque_warnings(values) + heartbeat_warnings(connected, heartbeat),
                 },
@@ -493,6 +705,12 @@ class Handler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
             data = {}
+
+        motor_match = re.fullmatch(r"/motors/([^/]+)/command", self.path)
+        if motor_match:
+            status, payload = _handle_motor_command(motor_match.group(1), data)
+            self._send_json(status, payload)
+            return
 
         if self.path == "/set":
 
@@ -715,7 +933,7 @@ class Handler(BaseHTTPRequestHandler):
                     {"status": "error", "message": "RoboRIO not connected"},
                 )
                 return
-            write_value("Jetson/ConveyorEnabled", "boolean", True)
+            _set_deposition_enabled(True)
             self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": True})
             return
 
@@ -726,8 +944,30 @@ class Handler(BaseHTTPRequestHandler):
                     {"status": "error", "message": "RoboRIO not connected"},
                 )
                 return
-            write_value("Jetson/ConveyorEnabled", "boolean", False)
+            _set_deposition_enabled(False)
             self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "conveyor": False})
+            return
+
+        if self.path == "/actuators/deposition/start":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            _set_deposition_enabled(True)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "deposition": True})
+            return
+
+        if self.path == "/actuators/deposition/stop":
+            if not wait_for_connection():
+                self._send_json(
+                    503,
+                    {"status": "error", "message": "RoboRIO not connected"},
+                )
+                return
+            _set_deposition_enabled(False)
+            self._send_json(200, {"status": "ok", "timestamp_ms": now_ms(), "deposition": False})
             return
 
         if self.path == "/actuators/door/open":
