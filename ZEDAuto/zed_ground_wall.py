@@ -709,10 +709,9 @@ def main():
             resizable_flags = cv2.WINDOW_NORMAL | gui_normal
             fixed_flags = cv2.WINDOW_AUTOSIZE | gui_normal
             cv2.namedWindow("ZED Ground/Obstacle Segmentation", resizable_flags)
-            cv2.namedWindow("ZED Occupancy Map (XZ)", resizable_flags)
+            cv2.namedWindow("ZED Occupancy Map (XZ)", fixed_flags)
             cv2.namedWindow("ZED Drive Status", fixed_flags)
             cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
-            cv2.resizeWindow("ZED Occupancy Map (XZ)", 1180, 920)
         except Exception:
             pass
 
