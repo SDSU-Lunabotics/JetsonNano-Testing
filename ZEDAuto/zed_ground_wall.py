@@ -4056,10 +4056,10 @@ def main():
             (0, 170, 70),
             (100, 255, 160),
         )
-        camera_label = "Camera: Deposit 0" if (
+        camera_label = f"Camera: Deposit {args.camera_deposit_angle_deg:.0f}" if (
             servo_deposit_view
             or abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0
-        ) else "Camera: Map 180"
+        ) else f"Camera: Map {args.camera_map_angle_deg:.0f}"
         camera_active = servo_deposit_view or (servo_turning and abs(angle_error_deg(servo_command_angle_deg, args.camera_deposit_angle_deg)) <= 2.0)
         draw_control_button(
             camera_view_rect,
