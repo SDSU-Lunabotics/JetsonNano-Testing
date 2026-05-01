@@ -1150,59 +1150,6 @@ def main():
     status_scroll_max = 0
     last_status_panel_shape = None
     last_map_window_shape = None
-    recovery_checkpoint = load_recovery_checkpoint()
-    if recovery_checkpoint is not None:
-        ckpt_cam_t = _parse_vec3(recovery_checkpoint, "camera_t_world")
-        ckpt_rover_fwd = _parse_vec3(recovery_checkpoint, "rover_forward_world")
-        ckpt_rover_right = _parse_vec3(recovery_checkpoint, "rover_right_world")
-        ckpt_map_origin = _parse_vec3(recovery_checkpoint, "map_origin_t", default=np.zeros(3, dtype=np.float32))
-        ckpt_align_t = _parse_vec3(recovery_checkpoint, "alignment_offset_t", default=np.zeros(3, dtype=np.float32))
-        if ckpt_cam_t is not None and ckpt_rover_fwd is not None and ckpt_rover_right is not None:
-            last_valid_t_world_cam = np.array(ckpt_cam_t, dtype=np.float32).reshape(3,)
-            last_valid_rover_forward_world = rotate_world_xz(ckpt_rover_fwd, 0.0)
-            last_valid_rover_right_world = rotate_world_xz(ckpt_rover_right, 0.0)
-            ckpt_cam_forward = camera_forward_from_rover_axes(
-                last_valid_rover_forward_world,
-                last_valid_rover_right_world,
-                current_camera_mount_yaw_deg(),
-            )
-            ckpt_cam_right = camera_right_from_rover_axes(
-                last_valid_rover_forward_world,
-                last_valid_rover_right_world,
-                current_camera_mount_yaw_deg(),
-            )
-            ckpt_cam_up = np.cross(ckpt_cam_forward, ckpt_cam_right)
-            up_norm = float(np.linalg.norm(ckpt_cam_up))
-            if up_norm > 1e-6:
-                ckpt_cam_up = (ckpt_cam_up / up_norm).astype(np.float32)
-            else:
-                ckpt_cam_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-            last_valid_R_world_cam = np.column_stack((ckpt_cam_right, ckpt_cam_up, ckpt_cam_forward)).astype(np.float32)
-            recovery_alignment_offset_t = np.array(ckpt_align_t, dtype=np.float32).reshape(3,)
-            recovery_alignment_yaw_deg = float(recovery_checkpoint.get("alignment_yaw_deg", 0.0) or 0.0)
-            map_origin_t = np.array(ckpt_map_origin, dtype=np.float32).reshape(3,)
-            map_origin_set = bool(recovery_checkpoint.get("map_origin_set", False))
-            last_valid_navx_yaw_deg = recovery_checkpoint.get("navx_yaw_deg")
-            navx_sign = float(recovery_checkpoint.get("navx_sign", navx_sign) or navx_sign)
-            navx_sign_locked = bool(recovery_checkpoint.get("navx_sign_locked", navx_sign_locked))
-            have_valid_tracking_pose = bool(recovery_checkpoint.get("have_valid_tracking_pose", True))
-            recovery_pending_alignment = bool(tracking_enabled and have_valid_tracking_pose)
-            goal_payload = recovery_checkpoint.get("goal_cell")
-            if isinstance(goal_payload, (list, tuple)) and len(goal_payload) == 2:
-                try:
-                    goal_candidate = (int(goal_payload[0]), int(goal_payload[1]))
-                except Exception:
-                    goal_candidate = None
-                if goal_candidate is not None:
-                    if 0 <= goal_candidate[0] < occ_map.grid_h and 0 <= goal_candidate[1] < occ_map.grid_w:
-                        goal_cell = goal_candidate
-            print(
-                "Loaded recovery checkpoint: "
-                f"pose=({last_valid_t_world_cam[0]:+.2f}, {last_valid_t_world_cam[2]:+.2f}) "
-                f"heading={rover_heading_deg_from_forward(last_valid_rover_forward_world):+.1f}deg"
-                + (" with saved goal." if goal_cell is not None else ".")
-            )
-            publish_recovery_checkpoint_to_nt(recovery_checkpoint)
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
     smooth_map_enabled = False
@@ -1466,6 +1413,60 @@ def main():
             sd.putNumber("Jetson/RecoveryHeadingDeg", float(payload.get("heading_deg", 0.0)))
         except Exception:
             pass
+
+    recovery_checkpoint = load_recovery_checkpoint()
+    if recovery_checkpoint is not None:
+        ckpt_cam_t = _parse_vec3(recovery_checkpoint, "camera_t_world")
+        ckpt_rover_fwd = _parse_vec3(recovery_checkpoint, "rover_forward_world")
+        ckpt_rover_right = _parse_vec3(recovery_checkpoint, "rover_right_world")
+        ckpt_map_origin = _parse_vec3(recovery_checkpoint, "map_origin_t", default=np.zeros(3, dtype=np.float32))
+        ckpt_align_t = _parse_vec3(recovery_checkpoint, "alignment_offset_t", default=np.zeros(3, dtype=np.float32))
+        if ckpt_cam_t is not None and ckpt_rover_fwd is not None and ckpt_rover_right is not None:
+            last_valid_t_world_cam = np.array(ckpt_cam_t, dtype=np.float32).reshape(3,)
+            last_valid_rover_forward_world = rotate_world_xz(ckpt_rover_fwd, 0.0)
+            last_valid_rover_right_world = rotate_world_xz(ckpt_rover_right, 0.0)
+            ckpt_cam_forward = camera_forward_from_rover_axes(
+                last_valid_rover_forward_world,
+                last_valid_rover_right_world,
+                current_camera_mount_yaw_deg(),
+            )
+            ckpt_cam_right = camera_right_from_rover_axes(
+                last_valid_rover_forward_world,
+                last_valid_rover_right_world,
+                current_camera_mount_yaw_deg(),
+            )
+            ckpt_cam_up = np.cross(ckpt_cam_forward, ckpt_cam_right)
+            up_norm = float(np.linalg.norm(ckpt_cam_up))
+            if up_norm > 1e-6:
+                ckpt_cam_up = (ckpt_cam_up / up_norm).astype(np.float32)
+            else:
+                ckpt_cam_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            last_valid_R_world_cam = np.column_stack((ckpt_cam_right, ckpt_cam_up, ckpt_cam_forward)).astype(np.float32)
+            recovery_alignment_offset_t = np.array(ckpt_align_t, dtype=np.float32).reshape(3,)
+            recovery_alignment_yaw_deg = float(recovery_checkpoint.get("alignment_yaw_deg", 0.0) or 0.0)
+            map_origin_t = np.array(ckpt_map_origin, dtype=np.float32).reshape(3,)
+            map_origin_set = bool(recovery_checkpoint.get("map_origin_set", False))
+            last_valid_navx_yaw_deg = recovery_checkpoint.get("navx_yaw_deg")
+            navx_sign = float(recovery_checkpoint.get("navx_sign", navx_sign) or navx_sign)
+            navx_sign_locked = bool(recovery_checkpoint.get("navx_sign_locked", navx_sign_locked))
+            have_valid_tracking_pose = bool(recovery_checkpoint.get("have_valid_tracking_pose", True))
+            recovery_pending_alignment = bool(tracking_enabled and have_valid_tracking_pose)
+            goal_payload = recovery_checkpoint.get("goal_cell")
+            if isinstance(goal_payload, (list, tuple)) and len(goal_payload) == 2:
+                try:
+                    goal_candidate = (int(goal_payload[0]), int(goal_payload[1]))
+                except Exception:
+                    goal_candidate = None
+                if goal_candidate is not None:
+                    if 0 <= goal_candidate[0] < occ_map.grid_h and 0 <= goal_candidate[1] < occ_map.grid_w:
+                        goal_cell = goal_candidate
+            print(
+                "Loaded recovery checkpoint: "
+                f"pose=({last_valid_t_world_cam[0]:+.2f}, {last_valid_t_world_cam[2]:+.2f}) "
+                f"heading={rover_heading_deg_from_forward(last_valid_rover_forward_world):+.1f}deg"
+                + (" with saved goal." if goal_cell is not None else ".")
+            )
+            publish_recovery_checkpoint_to_nt(recovery_checkpoint)
 
     def save_recovery_checkpoint(force=False, navx_yaw_deg=None):
         nonlocal recovery_checkpoint, last_recovery_save
