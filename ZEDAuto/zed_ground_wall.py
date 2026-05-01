@@ -1502,6 +1502,8 @@ def main():
                               or mining.preferred_start_rc is not None,
                     "enabled": bool((not button_enabled and mining.state == auto_mining.MiningState.PICK_DIG_START)
                                     or (button_enabled and bool(mining.excav_corners_rc))),
+                },
+                {
                     "id": "brush_minus",
                     "label": "Brush -",
                     "command": "brush_minus",
@@ -1927,6 +1929,14 @@ def main():
             set_direct_nav_enabled(not direct_nav_enabled, "external command")
         elif action == "main_rover_mode":
             set_main_rover_mode(not args.main_rover_mode)
+        elif action == "set_control_mode":
+            requested_mode = str(payload.get("mode", "") or "").strip().lower()
+            if requested_mode == "manual":
+                set_manual_drive_mode(True, "external command")
+            elif requested_mode == "autonomy":
+                set_manual_drive_mode(False, "external command")
+            else:
+                print(f"Ignoring unsupported control mode command: {requested_mode}")
         elif action == "camera_view":
             toggle_camera_view()
         elif action == "draw_excav_zone":

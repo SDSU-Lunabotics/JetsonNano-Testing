@@ -1,5 +1,9 @@
+import json
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 
+from app.core.settings import settings
 from app.schemas.control import (
     LedRequest,
     LedResponse,
@@ -7,12 +11,22 @@ from app.schemas.control import (
     DriveForwardResponse,
     EstopRequest,
     EstopResponse,
+    ControlModeRequest,
+    ControlModeResponse,
 )
 from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.nt_service import nt_service
 from app.services.state_service import state_service, now_ms
 
 router = APIRouter(tags=["control"])
+
+
+def _write_zed_command(command: dict) -> None:
+    target = Path(settings.map_waypoint_command_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(f"{target.suffix}.tmp")
+    tmp.write_text(json.dumps(command), encoding="utf-8")
+    tmp.replace(target)
 
 
 def _run_manual_drive(duration: float, speed: float) -> None:
@@ -102,4 +116,37 @@ def set_estop(req: EstopRequest) -> EstopResponse:
         ok=True,
         estop=state_service.estop,
         timestamp_ms=now_ms(),
+    )
+
+
+@router.post("/control/mode", response_model=ControlModeResponse)
+def set_control_mode(req: ControlModeRequest) -> ControlModeResponse:
+    if state_service.estop and req.mode == "autonomy":
+        raise HTTPException(status_code=409, detail="E-stop active")
+
+    command_seq = now_ms()
+    try:
+        _write_zed_command(
+            {
+                "seq": command_seq,
+                "type": "ui_action",
+                "action": "set_control_mode",
+                "mode": req.mode,
+                "source": "jetson_api",
+                "timestamp_ms": command_seq,
+            }
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to queue mode command: {exc}") from exc
+
+    state_service.autonomy_enabled = req.mode == "autonomy"
+    if req.mode == "manual":
+        state_service.manual_motion_active = False
+
+    return ControlModeResponse(
+        ok=True,
+        mode=req.mode,
+        autonomy_running=state_service.autonomy_enabled,
+        command_seq=command_seq,
+        timestamp_ms=command_seq,
     )
