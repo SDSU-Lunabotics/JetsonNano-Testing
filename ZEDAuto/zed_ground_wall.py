@@ -320,6 +320,11 @@ def main():
         action="store_true",
         help="Invert RoboRIO servo angles so Jetson logical 0/180 map to reversed physical servo endpoints.",
     )
+    parser.add_argument(
+        "--display-heading-flip",
+        action="store_true",
+        help="Flip the yellow rover/map arrow by 180 degrees without changing drive commands.",
+    )
     parser.add_argument("--spatial-mapping", action="store_true", help="Enable ZED SDK spatial mapping")
     parser.add_argument("--spatial-res", default="medium", help="Spatial map resolution: low|medium|high")
     parser.add_argument("--spatial-range", default="medium", help="Spatial map range: short|medium|long")
@@ -1014,8 +1019,12 @@ def main():
 
     def display_forward_world(R_world_cam, rover_forward_world, tracking_ok=True, imu_forward_fallback=None):
         if (not tracking_ok) and imu_forward_fallback is not None:
-            return np.array(imu_forward_fallback, dtype=np.float32).reshape(3,)
-        return np.array(rover_forward_world, dtype=np.float32).reshape(3,)
+            forward = np.array(imu_forward_fallback, dtype=np.float32).reshape(3,)
+        else:
+            forward = np.array(rover_forward_world, dtype=np.float32).reshape(3,)
+        if args.display_heading_flip:
+            forward = -forward
+        return forward
 
     def apply_recovery_alignment(R_world_cam, t_world_cam):
         if (
@@ -1103,7 +1112,8 @@ def main():
         f"right_offset={float(camera_right_offset_m):+.2f}m "
         f"servo_track={'on' if args.camera_servo_track else 'off'} "
         f"servo_invert={'on' if args.camera_servo_invert else 'off'} "
-        f"heading_flip={'on' if args.drive_heading_flip else 'off'}"
+        f"heading_flip={'on' if args.drive_heading_flip else 'off'} "
+        f"display_heading_flip={'on' if args.display_heading_flip else 'off'}"
     )
 
     if args.map_load and os.path.exists(args.map_save_path):
@@ -1902,6 +1912,14 @@ def main():
         print(f"Drive heading flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_display_heading_flip(enabled, source="button"):
+        enabled = bool(enabled)
+        if bool(args.display_heading_flip) == enabled:
+            return
+        args.display_heading_flip = enabled
+        print(f"Display heading arrow flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def sync_selected_dig_profile():
         dig_profile = dig_profiles.get_selected_profile(phase="dig")
         dig_duration_sec = dig_profiles.selected_duration_sec(phase="dig")
@@ -2341,6 +2359,13 @@ def main():
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
                     "active": bool(args.drive_heading_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "display_heading_flip",
+                    "label": "Flip Arrow",
+                    "command": "display_heading_flip",
+                    "active": bool(args.display_heading_flip),
                     "enabled": True,
                 },
                 {
@@ -2998,6 +3023,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_drive_heading_flip(not args.drive_heading_flip, "button")
                 return
+        rect = status_button_rects.get("display_heading_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_display_heading_flip(not args.display_heading_flip, "button")
+                return
         rect = status_button_rects.get("drive_calibration_mode")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3250,6 +3281,8 @@ def main():
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
+        elif action == "display_heading_flip":
+            set_display_heading_flip(not args.display_heading_flip, "external command")
         elif action == "drive_calibration_mode":
             set_drive_calibration_mode(not drive_calibration.active, "external command")
         elif action == "drive_calibration_cancel":
@@ -4054,18 +4087,19 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 1 * (button_h + 10) + 70
+        cal_section_h = 72 + 2 * (button_h + 10) + 70
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
             "Calibration & Drive",
-            "Drive flip and heading calibration tools.",
+            "Drive flip, arrow flip, and heading calibration tools.",
             (118, 182, 255),
             "calibration",
         )
         drive_calibration_mode_rect = grid_rect(cal_body_y, 0, 0)
         drive_calibration_cancel_rect = grid_rect(cal_body_y, 0, 1)
         drive_heading_flip_rect = grid_rect(cal_body_y, 0, 2)
+        display_heading_flip_rect = grid_rect(cal_body_y, 1, 0)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4088,16 +4122,24 @@ def main():
             (180, 80, 0),
             (255, 190, 110),
         )
+        draw_control_button(
+            display_heading_flip_rect,
+            "Flip Arrow: ON" if args.display_heading_flip else "Flip Arrow",
+            True,
+            bool(args.display_heading_flip),
+            (140, 80, 180),
+            (220, 150, 255),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
-            cal_body_y + button_h + 34,
+            cal_body_y + 2 * (button_h + 10) + 14,
             (180, 220, 255),
             0.44,
             x=card_x0 + card_inner,
         )
         put_control_line(
             drive_calibration.last_result[:88],
-            cal_body_y + button_h + 58,
+            cal_body_y + 2 * (button_h + 10) + 38,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -4334,6 +4376,7 @@ def main():
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
+            ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
             ("drive_calibration_cancel", drive_calibration_cancel_rect),
             ("dig_style_cycle", dig_style_cycle_rect),

@@ -156,6 +156,7 @@ if [[ -n "${CAMERA_FORWARD_OFFSET_M:-}" ]]; then cmd+=(--camera-forward-offset-m
 if [[ -n "${CAMERA_RIGHT_OFFSET_M:-}" ]]; then cmd+=(--camera-right-offset-m "${CAMERA_RIGHT_OFFSET_M}"); fi
 if [[ "${CAMERA_SERVO_TRACK:-0}" == "1" ]]; then cmd+=(--camera-servo-track); fi
 if [[ "${CAMERA_SERVO_INVERT:-0}" == "1" ]]; then cmd+=(--camera-servo-invert); fi
+if [[ "${DISPLAY_HEADING_FLIP:-0}" == "1" ]]; then cmd+=(--display-heading-flip); fi
 cmd+=(--camera-map-angle-deg "${CAMERA_MAP_ANGLE_DEG:-180.0}")
 cmd+=(--camera-deposit-angle-deg "${CAMERA_DEPOSIT_ANGLE_DEG:-0.0}")
 cmd+=(--camera-servo-map-tol-deg "${CAMERA_SERVO_MAP_TOL_DEG:-8.0}")
