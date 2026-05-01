@@ -125,6 +125,8 @@ if [[ -n "${AREA_LOAD_PATH:-}" ]]; then cmd+=(--area-load-path "${AREA_LOAD_PATH
 if [[ -n "${AREA_SAVE_PATH:-}" ]]; then cmd+=(--area-save-path "${AREA_SAVE_PATH}"); fi
 cmd+=(--area-save-every "${AREA_SAVE_EVERY:-30.0}")
 cmd+=(--tracking-max-pose-jump-m "${TRACKING_MAX_POSE_JUMP_M:-0.80}")
+cmd+=(--tracking-max-heading-jump-deg "${TRACKING_MAX_HEADING_JUMP_DEG:-55.0}")
+cmd+=(--tracking-recover-stable-frames "${TRACKING_RECOVER_STABLE_FRAMES:-6}")
 cmd+=(--localize-turn-speed "${LOCALIZE_TURN_SPEED:-0.25}")
 cmd+=(--localize-scan-sec "${LOCALIZE_SCAN_SEC:-8.0}")
 cmd+=(--localize-max-sec "${LOCALIZE_MAX_SEC:-20.0}")
@@ -153,6 +155,8 @@ if [[ -n "${CAMERA_MOUNT_YAW_DEG:-}" ]]; then cmd+=(--camera-mount-yaw-deg "${CA
 if [[ -n "${CAMERA_FORWARD_OFFSET_M:-}" ]]; then cmd+=(--camera-forward-offset-m "${CAMERA_FORWARD_OFFSET_M}"); fi
 if [[ -n "${CAMERA_RIGHT_OFFSET_M:-}" ]]; then cmd+=(--camera-right-offset-m "${CAMERA_RIGHT_OFFSET_M}"); fi
 if [[ "${CAMERA_SERVO_TRACK:-0}" == "1" ]]; then cmd+=(--camera-servo-track); fi
+if [[ "${CAMERA_SERVO_INVERT:-0}" == "1" ]]; then cmd+=(--camera-servo-invert); fi
+if [[ "${DISPLAY_HEADING_FLIP:-0}" == "1" ]]; then cmd+=(--display-heading-flip); fi
 cmd+=(--camera-map-angle-deg "${CAMERA_MAP_ANGLE_DEG:-180.0}")
 cmd+=(--camera-deposit-angle-deg "${CAMERA_DEPOSIT_ANGLE_DEG:-0.0}")
 cmd+=(--camera-servo-map-tol-deg "${CAMERA_SERVO_MAP_TOL_DEG:-8.0}")
@@ -186,6 +190,7 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
   cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
+  cmd+=(--drive-forward-slew-per-sec "${DRIVE_FORWARD_SLEW_PER_SEC:-1.4}")
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
   cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
   cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
@@ -216,6 +221,13 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
   cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")
   cmd+=(--ds-joystick-scale "${DS_JOYSTICK_SCALE:-0.5}")
+  if [[ "${DRIVER_PRIORITY_MODE:-1}" == "1" ]]; then
+    cmd+=(--driver-priority-mode)
+  else
+    cmd+=(--no-driver-priority-mode)
+  fi
+  cmd+=(--driver-priority-threshold "${DRIVER_PRIORITY_THRESHOLD:-0.12}")
+  cmd+=(--driver-priority-sample-stride "${DRIVER_PRIORITY_SAMPLE_STRIDE:-12}")
 fi
 
 # Optional streaming
