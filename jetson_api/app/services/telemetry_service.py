@@ -9,7 +9,6 @@ from app.services.battery_service import battery_service
 from app.services.wireless_service import wireless_service
 from app.services.roborio_bridge_service import roborio_bridge_service
 from app.services.camera_service import camera_service
-from app.services.lidar_service import lidar_service
 from app.services.motor_service import motor_service
 from app.services.nt_service import nt_service
 
@@ -18,16 +17,12 @@ class TelemetryService:
     def __init__(self) -> None:
         self._jetson_last_seen_ms: Optional[int] = now_ms()
         self._roborio_last_seen_ms: Optional[int] = None
-        self._lidar_last_seen_ms: Optional[int] = None
 
     def update_jetson_heartbeat(self) -> None:
         self._jetson_last_seen_ms = now_ms()
 
     def update_roborio_heartbeat(self) -> None:
         self._roborio_last_seen_ms = now_ms()
-
-    def update_lidar_heartbeat(self) -> None:
-        self._lidar_last_seen_ms = now_ms()
 
     def _hb(self, last_seen_ms: Optional[int], now: int) -> Heartbeat:
         connected = last_seen_ms is not None and (now - last_seen_ms) < 5000
@@ -137,7 +132,6 @@ class TelemetryService:
             heartbeat=self._hb(self._jetson_last_seen_ms, now),
             jetson=self._hb(self._jetson_last_seen_ms, now),
             roborio=self._hb(self._roborio_last_seen_ms, now),
-            lidar=lidar_service.get_status().heartbeat,
         )
 
         control = ControlStatus(

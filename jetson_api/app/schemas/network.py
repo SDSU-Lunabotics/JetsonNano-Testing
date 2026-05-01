@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from .common import Fault, LinkStats
 
 
-NetworkTarget = Literal["jetson", "roborio", "rover", "camera", "lidar"]
+NetworkTarget = Literal["jetson", "roborio", "rover", "camera"]
 
 
 class NetworkVerifyRequest(BaseModel):
