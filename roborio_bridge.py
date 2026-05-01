@@ -185,7 +185,7 @@ def read_value(key, value_type, available_keys=None):
                 return None
 
             try:
-                return sd.getValue(key)
+                return sd.getValue(key, None)
             except Exception:
                 return None
 
@@ -432,7 +432,7 @@ def read_dynamic_controller_values():
             continue
 
         try:
-            values[key] = sd.getValue(key)
+            values[key] = sd.getValue(key, None)
         except Exception:
             continue
 
