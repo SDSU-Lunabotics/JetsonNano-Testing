@@ -3429,6 +3429,7 @@ def main():
 
         def push_automation_state(force=False):
             nonlocal nt_last_auto_push
+            nonlocal test_excavation_lower_active, test_excavation_lower_cycle_started_at
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
             lower_cycle_elapsed = 0.0
