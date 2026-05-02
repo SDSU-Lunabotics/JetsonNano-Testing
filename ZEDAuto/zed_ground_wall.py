@@ -444,6 +444,11 @@ def main():
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     parser.add_argument(
+        "--hard-drive-flip",
+        action="store_true",
+        help="Invert the actual drivetrain forward/turn commands sent to the RoboRIO.",
+    )
+    parser.add_argument(
         "--main-rover-mode",
         action="store_true",
         dest="main_rover_mode",
@@ -1128,6 +1133,7 @@ def main():
         f"servo_track={'on' if args.camera_servo_track else 'off'} "
         f"servo_invert={'on' if args.camera_servo_invert else 'off'} "
         f"heading_flip={'on' if args.drive_heading_flip else 'off'} "
+        f"hard_drive_flip={'on' if args.hard_drive_flip else 'off'} "
         f"display_heading_flip={'on' if args.display_heading_flip else 'off'}"
     )
 
@@ -1929,6 +1935,14 @@ def main():
         print(f"Drive heading flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_hard_drive_flip(enabled, source="button"):
+        enabled = bool(enabled)
+        if bool(args.hard_drive_flip) == enabled:
+            return
+        args.hard_drive_flip = enabled
+        print(f"Hard drive flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def set_display_heading_flip(enabled, source="button"):
         enabled = bool(enabled)
         if bool(args.display_heading_flip) == enabled:
@@ -2376,6 +2390,13 @@ def main():
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
                     "active": bool(args.drive_heading_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "hard_drive_flip",
+                    "label": "Hard Flip",
+                    "command": "hard_drive_flip",
+                    "active": bool(args.hard_drive_flip),
                     "enabled": True,
                 },
                 {
@@ -3052,6 +3073,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_drive_heading_flip(not args.drive_heading_flip, "button")
                 return
+        rect = status_button_rects.get("hard_drive_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_hard_drive_flip(not args.hard_drive_flip, "button")
+                return
         rect = status_button_rects.get("display_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3310,6 +3337,8 @@ def main():
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
+        elif action == "hard_drive_flip":
+            set_hard_drive_flip(not args.hard_drive_flip, "external command")
         elif action == "display_heading_flip":
             set_display_heading_flip(not args.display_heading_flip, "external command")
         elif action == "drive_calibration_mode":
@@ -3377,6 +3406,11 @@ def main():
         if sd is None:
             return
         now = time.time()
+        fwd = float(fwd)
+        turn = float(turn)
+        if args.hard_drive_flip:
+            fwd = -fwd
+            turn = -turn
         enabled = bool(enabled)
         status_cmd_enabled = bool(enabled)
         status_cmd_fwd = float(fwd)
@@ -4188,6 +4222,7 @@ def main():
         drive_calibration_cancel_rect = grid_rect(cal_body_y, 0, 1)
         drive_heading_flip_rect = grid_rect(cal_body_y, 0, 2)
         display_heading_flip_rect = grid_rect(cal_body_y, 1, 0)
+        hard_drive_flip_rect = grid_rect(cal_body_y, 1, 1)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4217,6 +4252,14 @@ def main():
             bool(args.display_heading_flip),
             (140, 80, 180),
             (220, 150, 255),
+        )
+        draw_control_button(
+            hard_drive_flip_rect,
+            "Hard Flip: ON" if args.hard_drive_flip else "Hard Flip",
+            True,
+            bool(args.hard_drive_flip),
+            (160, 40, 40),
+            (255, 120, 120),
         )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
@@ -4464,6 +4507,7 @@ def main():
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
+            ("hard_drive_flip", hard_drive_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
             ("drive_calibration_cancel", drive_calibration_cancel_rect),

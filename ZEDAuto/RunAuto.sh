@@ -220,6 +220,7 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   elif [[ "${CAMERA_MOUNT:-front}" != "rear" ]]; then
     cmd+=(--drive-heading-flip)
   fi
+  if [[ "${HARD_DRIVE_FLIP:-0}" == "1" ]]; then cmd+=(--hard-drive-flip); fi
   if [[ "${DS_JOYSTICK:-1}" == "1" ]]; then cmd+=(--ds-joystick); fi
   cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
   cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")

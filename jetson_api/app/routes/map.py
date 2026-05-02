@@ -45,6 +45,7 @@ _SUPPORTED_UI_COMMANDS = {
     "auto_digger",
     "camera_overlay",
     "drive_heading_flip",
+    "hard_drive_flip",
     "display_heading_flip",
     "direct_nav",
     "drive_calibration_mode",
