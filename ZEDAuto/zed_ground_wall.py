@@ -853,6 +853,8 @@ def main():
     recovery_pending_alignment = False
     recovery_alignment_offset_t = np.zeros(3, dtype=np.float32)
     recovery_alignment_yaw_deg = 0.0
+    recovery_loaded_from_checkpoint = False
+    recovery_jump_reject_count = 0
 
     def map_x_from_zed(x):
         # ZED +X is camera-right, while the occupancy map image mirrors X for display.
@@ -1511,6 +1513,7 @@ def main():
             navx_sign_locked = bool(recovery_checkpoint.get("navx_sign_locked", navx_sign_locked))
             have_valid_tracking_pose = bool(recovery_checkpoint.get("have_valid_tracking_pose", True))
             recovery_pending_alignment = bool(tracking_enabled and have_valid_tracking_pose)
+            recovery_loaded_from_checkpoint = True
             goal_payload = recovery_checkpoint.get("goal_cell")
             if isinstance(goal_payload, (list, tuple)) and len(goal_payload) == 2:
                 try:
@@ -4722,6 +4725,41 @@ def main():
                                 f"NavX mismatch {navx_heading_mismatch_deg:.1f}deg > "
                                 f"{float(args.navx_heading_max_mismatch_deg):.1f}deg"
                             )
+                    if jump_reason is not None:
+                        if recovery_loaded_from_checkpoint or recovery_pending_alignment:
+                            recovery_jump_reject_count += 1
+                            if recovery_jump_reject_count >= 5:
+                                print(
+                                    "Startup recovery pose kept being rejected; "
+                                    "clearing saved recovery alignment and waiting for fresh tracking."
+                                )
+                                have_valid_tracking_pose = False
+                                tracking_prev_ok = False
+                                tracking_loss_warned = False
+                                tracking_recover_stable_count = 0
+                                recovery_pending_alignment = False
+                                recovery_loaded_from_checkpoint = False
+                                recovery_alignment_offset_t = np.zeros(3, dtype=np.float32)
+                                recovery_alignment_yaw_deg = 0.0
+                                last_valid_R_world_cam = np.eye(3, dtype=np.float32)
+                                last_valid_t_world_cam = np.zeros(3, dtype=np.float32)
+                                last_valid_rover_forward_world = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                                last_valid_rover_right_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+                                last_valid_imu_rotation = None
+                                last_valid_navx_yaw_deg = None
+                                map_origin_set = False
+                                map_origin_t = np.zeros(3, dtype=np.float32)
+                                goal_cell = None
+                                path_cells = None
+                                last_path_cells = None
+                                last_start = None
+                                last_goal = None
+                                last_path_plan_time = 0.0
+                                jump_reason = None
+                        else:
+                            recovery_jump_reject_count = 0
+                    else:
+                        recovery_jump_reject_count = 0
                     if jump_reason is not None:
                         tracking_pose_ok = False
                         tracking_recover_stable_count = 0

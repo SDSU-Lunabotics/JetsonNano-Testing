@@ -127,6 +127,9 @@ cmd+=(--area-save-every "${AREA_SAVE_EVERY:-30.0}")
 cmd+=(--tracking-max-pose-jump-m "${TRACKING_MAX_POSE_JUMP_M:-0.80}")
 cmd+=(--tracking-max-heading-jump-deg "${TRACKING_MAX_HEADING_JUMP_DEG:-55.0}")
 cmd+=(--tracking-recover-stable-frames "${TRACKING_RECOVER_STABLE_FRAMES:-6}")
+cmd+=(--recovery-save-every "${RECOVERY_SAVE_EVERY:-1.0}")
+if [[ "${RECOVERY_LOAD:-1}" != "1" ]]; then cmd+=(--no-recovery-load); fi
+if [[ "${RECOVERY_NT_MIRROR:-1}" != "1" ]]; then cmd+=(--no-recovery-nt-mirror); fi
 cmd+=(--localize-turn-speed "${LOCALIZE_TURN_SPEED:-0.25}")
 cmd+=(--localize-scan-sec "${LOCALIZE_SCAN_SEC:-8.0}")
 cmd+=(--localize-max-sec "${LOCALIZE_MAX_SEC:-20.0}")
