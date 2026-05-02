@@ -2672,6 +2672,8 @@ def main():
         r0, c0 = display_rover
         cv2.circle(frame, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
         rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
+        front_edge_pts = None
+        nose_pt = None
         if heading_vec_rc is None:
             rr = int(round(rover_half_cells))
             box_pts = np.array(
@@ -2694,6 +2696,12 @@ def main():
             p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
             p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
             p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
+            front_edge_pts = (
+                (int(round(p1[1])), int(round(p1[0]))),
+                (int(round(p2[1])), int(round(p2[0]))),
+            )
+            nose = center + fwd_v * (rover_half_cells + max(2.0, float(args.map_camera_size) * 0.8))
+            nose_pt = (int(round(nose[1])), int(round(nose[0])))
             box_pts = np.array(
                 [
                     [int(round(p1[1])), int(round(p1[0]))],
@@ -2710,6 +2718,10 @@ def main():
             )
             cv2.arrowedLine(frame, (c0, r0), end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
         cv2.polylines(frame, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
+        if front_edge_pts is not None:
+            cv2.line(frame, front_edge_pts[0], front_edge_pts[1], (0, 255, 120), 2, cv2.LINE_AA)
+        if nose_pt is not None:
+            cv2.circle(frame, nose_pt, 3, (0, 255, 120), -1)
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
