@@ -1183,6 +1183,7 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", bool(emergency_stop))
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
             sd.putString("Jetson/MiningState", mining.state.value)
             sd.putBoolean("Jetson/ExcavatorEnabled", False)
             sd.putBoolean("Jetson/ConveyorEnabled", False)
@@ -1754,6 +1755,7 @@ def main():
         if sd is not None:
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
     def set_excavation_test_mode(mode_name, enabled, source="button"):
@@ -1949,6 +1951,8 @@ def main():
         if bool(args.hard_drive_flip) == enabled:
             return
         args.hard_drive_flip = enabled
+        if sd is not None:
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
         print(f"Hard drive flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
@@ -3478,6 +3482,7 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
             mechanism_request_active = bool(
                 test_excavation_dig_active
                 or lower_cycle_active
