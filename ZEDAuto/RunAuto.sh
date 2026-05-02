@@ -290,10 +290,18 @@ if [[ "${LANDMARK_MEMORY:-1}" == "1" ]]; then
 else
   cmd+=(--no-landmark-memory)
 fi
+cmd+=(--landmark-classes "${LANDMARK_CLASSES:-backpack,rock,stone,boulder,obstacle}")
 cmd+=(--landmark-path "${LANDMARK_PATH:-${SCRIPT_DIR}/zed_landmarks.json}")
 cmd+=(--landmark-assoc-m "${LANDMARK_ASSOC_M:-0.45}")
 cmd+=(--landmark-min-hits "${LANDMARK_MIN_HITS:-2}")
 cmd+=(--landmark-save-every "${LANDMARK_SAVE_EVERY:-5.0}")
+if [[ "${LANDMARK_RELOCALIZE:-1}" == "1" ]]; then
+  cmd+=(--landmark-relocalize)
+else
+  cmd+=(--no-landmark-relocalize)
+fi
+cmd+=(--landmark-relocalize-max-offset-m "${LANDMARK_RELOCALIZE_MAX_OFFSET_M:-4.0}")
+cmd+=(--landmark-relocalize-alpha "${LANDMARK_RELOCALIZE_ALPHA:-0.65}")
 
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"
