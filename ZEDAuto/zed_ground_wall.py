@@ -1260,6 +1260,7 @@ def main():
     test_excavation_right_extend_active = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
+    test_excavation_lower_cycle_started_at = 0.0
     test_door_open_active = False
     test_door_close_active = False
     actuator_left_extension_pct = None
@@ -1759,13 +1760,14 @@ def main():
         nonlocal auto_digger_enabled
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
         enabled = bool(enabled)
         if mode_name == "auto_digger":
             if auto_digger_enabled == enabled:
                 return
             auto_digger_enabled = enabled
-            print(f"Auto digger {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+            print(f"Auto dig {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         elif mode_name == "left_extend":
             if test_excavation_left_extend_active == enabled:
                 return
@@ -1785,7 +1787,12 @@ def main():
             if test_excavation_lower_active == enabled:
                 return
             test_excavation_lower_active = enabled
-            print(f"Excavation lower simulation {'ON' if enabled else 'OFF'} via {source}.")
+            if enabled:
+                test_excavation_lower_cycle_started_at = time.time()
+                print(f"Excavation lower cycle STARTED via {source} (5s down, 5s up).")
+            else:
+                test_excavation_lower_cycle_started_at = 0.0
+                print(f"Excavation lower cycle STOPPED via {source}.")
         elif mode_name == "door_open":
             if enabled:
                 test_door_close_active = False
@@ -1807,6 +1814,7 @@ def main():
     def stop_all_actuators(source="button"):
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
         changed = (
             test_excavation_left_extend_active
@@ -1820,6 +1828,7 @@ def main():
         test_excavation_right_extend_active = False
         test_excavation_dig_active = False
         test_excavation_lower_active = False
+        test_excavation_lower_cycle_started_at = 0.0
         test_door_open_active = False
         test_door_close_active = False
         if changed:
@@ -2373,7 +2382,7 @@ def main():
                 },
                 {
                     "id": "auto_digger",
-                    "label": "Enable Digger",
+                    "label": "Auto Dig",
                     "command": "auto_digger",
                     "active": bool(auto_digger_enabled),
                     "enabled": True,
@@ -2513,7 +2522,7 @@ def main():
                 },
                 {
                     "id": "test_excavation_lower",
-                    "label": "Lower Sim",
+                    "label": "Lower Cycle",
                     "command": "test_excavation_lower",
                     "active": bool(test_excavation_lower_active),
                     "enabled": True,
@@ -3403,6 +3412,7 @@ def main():
         nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
         nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
         nonlocal status_cmd_enabled, status_cmd_fwd, status_cmd_turn, status_cmd_duration
+        nonlocal test_excavation_lower_active, test_excavation_lower_cycle_started_at
         if sd is None:
             return
         now = time.time()
@@ -3421,6 +3431,19 @@ def main():
             nonlocal nt_last_auto_push
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
+            lower_cycle_elapsed = 0.0
+            lower_cycle_active = bool(test_excavation_lower_active)
+            if lower_cycle_active:
+                if test_excavation_lower_cycle_started_at <= 0.0:
+                    test_excavation_lower_cycle_started_at = now
+                lower_cycle_elapsed = max(0.0, now - float(test_excavation_lower_cycle_started_at))
+                if lower_cycle_elapsed >= 10.0:
+                    test_excavation_lower_active = False
+                    test_excavation_lower_cycle_started_at = 0.0
+                    lower_cycle_active = False
+                    lower_cycle_elapsed = 0.0
+                    print("Excavation lower cycle completed.")
+                    publish_map_ui_state(force=True)
             mining_state_value = mining.state.value
             auto_dig_active = auto_digger_enabled and enabled and mining.state == auto_mining.MiningState.DIGGING
             playback_cmd = dig_profile_playback_cmd if (
@@ -3429,7 +3452,7 @@ def main():
             excavator_enabled = test_excavation_dig_active or (
                 bool(playback_cmd.get("digger_on")) if playback_cmd is not None else auto_dig_active
             )
-            excavator_lower_requested = test_excavation_lower_active or (
+            excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
@@ -3454,7 +3477,16 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
-            sd.putBoolean("Jetson/AutomationEnabled", enabled)
+            mechanism_request_active = bool(
+                test_excavation_dig_active
+                or lower_cycle_active
+                or test_excavation_left_extend_active
+                or test_excavation_right_extend_active
+                or door_open_enabled
+                or door_close_enabled
+            )
+            automation_request_active = bool(enabled or mechanism_request_active)
+            sd.putBoolean("Jetson/AutomationEnabled", automation_request_active)
             sd.putString("Jetson/MiningState", mining_state_value)
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
@@ -3464,7 +3496,7 @@ def main():
             sd.putBoolean("Jetson/DoorActuatorsOpen", bool(door_open_enabled and not door_close_enabled))
             sd.putBoolean("Jetson/DoorActuatorsClose", bool(door_close_enabled and not door_open_enabled))
             # Robot-side code may scale command by these keys.
-            if enabled:
+            if automation_request_active:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
                 sd.putNumber("Jetson/TurnSpeed", float(args.nt_turn_scale))
             else:
@@ -3559,6 +3591,8 @@ def main():
 
     def mix_ds_drive(fwd, turn):
         if not args.ds_joystick:
+            return float(fwd), float(turn)
+        if args.main_rover_mode:
             return float(fwd), float(turn)
         mixed_fwd = max(-1.0, min(1.0, float(fwd) + float(ds_joystick_fwd)))
         mixed_turn = max(-1.0, min(1.0, float(turn) + float(ds_joystick_turn)))
@@ -4201,7 +4235,7 @@ def main():
         )
         draw_control_button(
             auto_digger_rect,
-            "Enable Digger: ON" if auto_digger_enabled else "Enable Digger",
+            "Auto Dig: ON" if auto_digger_enabled else "Auto Dig",
             True,
             auto_digger_enabled,
             (0, 140, 60),
@@ -4295,7 +4329,7 @@ def main():
         door_close_rect = grid_rect(actuators_body_y, 2, 1)
         draw_control_button(
             test_excavation_lower_rect,
-            "Lower Sim: ON" if test_excavation_lower_active else "Lower Sim",
+            "Lower Cycle: ON" if test_excavation_lower_active else "Lower Cycle",
             True,
             test_excavation_lower_active,
             (140, 70, 140),
@@ -5543,7 +5577,7 @@ def main():
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
                                 continue
-                            if driver_priority_active and not manual_mode:
+                            if driver_priority_active:
                                 # Let the RoboRIO/Xbox path own the drivetrain while the driver is actively commanding it.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
