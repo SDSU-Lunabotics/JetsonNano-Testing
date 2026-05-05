@@ -127,6 +127,9 @@ cmd+=(--area-save-every "${AREA_SAVE_EVERY:-30.0}")
 cmd+=(--tracking-max-pose-jump-m "${TRACKING_MAX_POSE_JUMP_M:-0.80}")
 cmd+=(--tracking-max-heading-jump-deg "${TRACKING_MAX_HEADING_JUMP_DEG:-55.0}")
 cmd+=(--tracking-recover-stable-frames "${TRACKING_RECOVER_STABLE_FRAMES:-6}")
+cmd+=(--recovery-save-every "${RECOVERY_SAVE_EVERY:-1.0}")
+if [[ "${RECOVERY_LOAD:-1}" != "1" ]]; then cmd+=(--no-recovery-load); fi
+if [[ "${RECOVERY_NT_MIRROR:-1}" != "1" ]]; then cmd+=(--no-recovery-nt-mirror); fi
 cmd+=(--localize-turn-speed "${LOCALIZE_TURN_SPEED:-0.25}")
 cmd+=(--localize-scan-sec "${LOCALIZE_SCAN_SEC:-8.0}")
 cmd+=(--localize-max-sec "${LOCALIZE_MAX_SEC:-20.0}")
@@ -217,6 +220,7 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   elif [[ "${CAMERA_MOUNT:-front}" != "rear" ]]; then
     cmd+=(--drive-heading-flip)
   fi
+  if [[ "${HARD_DRIVE_FLIP:-0}" == "1" ]]; then cmd+=(--hard-drive-flip); fi
   if [[ "${DS_JOYSTICK:-1}" == "1" ]]; then cmd+=(--ds-joystick); fi
   cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
   cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")
@@ -286,10 +290,18 @@ if [[ "${LANDMARK_MEMORY:-1}" == "1" ]]; then
 else
   cmd+=(--no-landmark-memory)
 fi
+cmd+=(--landmark-classes "${LANDMARK_CLASSES:-backpack,rock,stone,boulder,obstacle}")
 cmd+=(--landmark-path "${LANDMARK_PATH:-${SCRIPT_DIR}/zed_landmarks.json}")
 cmd+=(--landmark-assoc-m "${LANDMARK_ASSOC_M:-0.45}")
 cmd+=(--landmark-min-hits "${LANDMARK_MIN_HITS:-2}")
 cmd+=(--landmark-save-every "${LANDMARK_SAVE_EVERY:-5.0}")
+if [[ "${LANDMARK_RELOCALIZE:-1}" == "1" ]]; then
+  cmd+=(--landmark-relocalize)
+else
+  cmd+=(--no-landmark-relocalize)
+fi
+cmd+=(--landmark-relocalize-max-offset-m "${LANDMARK_RELOCALIZE_MAX_OFFSET_M:-4.0}")
+cmd+=(--landmark-relocalize-alpha "${LANDMARK_RELOCALIZE_ALPHA:-0.65}")
 
 cd "${REPO_ROOT}"
 echo "Running: ${cmd[*]} $*"

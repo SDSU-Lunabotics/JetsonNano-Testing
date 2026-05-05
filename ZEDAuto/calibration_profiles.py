@@ -41,6 +41,10 @@ class DriveCalibrationManager:
         self.flip_checked = False
         self.last_result = "Calibration idle."
         self.last_saved_flip = None
+        self.last_saved_hard_drive_flip = None
+        self.last_saved_display_heading_flip = None
+        self.last_saved_camera_map_angle_deg = None
+        self.last_saved_camera_deposit_angle_deg = None
         self.min_progress_m = 0.35
         self.goal_tol_m = 0.30
         self.timeout_sec = 10.0
@@ -52,6 +56,10 @@ class DriveCalibrationManager:
             {
                 "version": 1,
                 "drive_heading_flip": None,
+                "hard_drive_flip": None,
+                "display_heading_flip": None,
+                "camera_map_angle_deg": None,
+                "camera_deposit_angle_deg": None,
                 "updated_ms": 0,
                 "last_result": self.last_result,
             },
@@ -59,19 +67,66 @@ class DriveCalibrationManager:
         value = data.get("drive_heading_flip")
         if isinstance(value, bool):
             self.last_saved_flip = bool(value)
+        hard_flip = data.get("hard_drive_flip")
+        if isinstance(hard_flip, bool):
+            self.last_saved_hard_drive_flip = bool(hard_flip)
+        display_flip = data.get("display_heading_flip")
+        if isinstance(display_flip, bool):
+            self.last_saved_display_heading_flip = bool(display_flip)
+        map_angle = data.get("camera_map_angle_deg")
+        if isinstance(map_angle, (int, float)):
+            self.last_saved_camera_map_angle_deg = float(map_angle)
+        deposit_angle = data.get("camera_deposit_angle_deg")
+        if isinstance(deposit_angle, (int, float)):
+            self.last_saved_camera_deposit_angle_deg = float(deposit_angle)
         self.last_result = str(data.get("last_result", self.last_result))
 
-    def save_result(self, drive_heading_flip, result_text):
-        self.last_saved_flip = bool(drive_heading_flip)
-        self.last_result = str(result_text)
+    def _write_settings(self):
         _write_json_atomic(
             self.path,
             {
                 "version": 1,
-                "drive_heading_flip": bool(drive_heading_flip),
+                "drive_heading_flip": self.last_saved_flip,
+                "hard_drive_flip": self.last_saved_hard_drive_flip,
+                "display_heading_flip": self.last_saved_display_heading_flip,
+                "camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
+                "camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,
                 "updated_ms": int(time.time() * 1000),
                 "last_result": self.last_result,
             },
+        )
+
+    def save_runtime_settings(
+        self,
+        drive_heading_flip,
+        hard_drive_flip,
+        display_heading_flip,
+        camera_map_angle_deg,
+        camera_deposit_angle_deg,
+        result_text,
+    ):
+        self.last_saved_flip = None if drive_heading_flip is None else bool(drive_heading_flip)
+        self.last_saved_hard_drive_flip = None if hard_drive_flip is None else bool(hard_drive_flip)
+        self.last_saved_display_heading_flip = (
+            None if display_heading_flip is None else bool(display_heading_flip)
+        )
+        self.last_saved_camera_map_angle_deg = (
+            None if camera_map_angle_deg is None else float(camera_map_angle_deg)
+        )
+        self.last_saved_camera_deposit_angle_deg = (
+            None if camera_deposit_angle_deg is None else float(camera_deposit_angle_deg)
+        )
+        self.last_result = str(result_text)
+        self._write_settings()
+
+    def save_result(self, drive_heading_flip, result_text):
+        self.save_runtime_settings(
+            drive_heading_flip,
+            self.last_saved_hard_drive_flip,
+            self.last_saved_display_heading_flip,
+            self.last_saved_camera_map_angle_deg,
+            self.last_saved_camera_deposit_angle_deg,
+            result_text,
         )
 
     def set_active(self, enabled):
@@ -158,6 +213,10 @@ class DriveCalibrationManager:
             "target_cell": list(self.target_cell) if self.target_cell is not None else None,
             "last_result": self.last_result,
             "saved_drive_heading_flip": self.last_saved_flip,
+            "saved_hard_drive_flip": self.last_saved_hard_drive_flip,
+            "saved_display_heading_flip": self.last_saved_display_heading_flip,
+            "saved_camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
+            "saved_camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,
         }
 
 
