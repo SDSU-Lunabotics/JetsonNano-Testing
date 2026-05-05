@@ -2552,6 +2552,13 @@ def main():
                     "enabled": bool(reset_map_confirm),
                 },
                 {
+                    "id": "auto_run",
+                    "label": "Stop Auto Run" if _mining_active else "Start Auto Run",
+                    "command": "auto_run",
+                    "active": bool(_mining_active),
+                    "enabled": True,
+                },
+                {
                     "id": "auto_digger",
                     "label": "Auto Dig",
                     "command": "auto_digger",
@@ -3479,7 +3486,27 @@ def main():
             return
 
         action = str(payload.get("action", "") or "").strip()
-        if action == "paint_safe":
+        if action == "auto_run":
+            mining_running = mining.state in (
+                auto_mining.MiningState.PLAN_SWEEP,
+                auto_mining.MiningState.NAVIGATE_DIG,
+                auto_mining.MiningState.DIGGING,
+                auto_mining.MiningState.BACKUP,
+                auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                auto_mining.MiningState.DEPOSITING,
+            )
+            clear_navigation_goal()
+            manual_mode = False
+            manual_fwd = 0.0
+            manual_turn = 0.0
+            if mining_running:
+                mining.abort()
+                print("Auto Run: ABORTED via external command")
+            else:
+                emergency_stop = False
+                mining.start_run()
+                print("Auto Run: START requested via external command")
+        elif action == "paint_safe":
             set_brush_tool(None if paint_safe_mode else "paint_safe")
             print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
         elif action == "erase_safe":

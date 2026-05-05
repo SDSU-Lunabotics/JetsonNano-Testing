@@ -48,6 +48,7 @@ _SUPPORTED_UI_COMMANDS = {
     "main_rover_mode",
     "camera_view",
     "set_control_mode",
+    "auto_run",
     "auto_digger",
     "camera_overlay",
     "drive_heading_flip",
@@ -95,6 +96,7 @@ def _default_ui_controls() -> List[MapUiControl]:
         MapUiControl(id="paint_safe", label="Paint Safe", command="paint_safe"),
         MapUiControl(id="erase_safe", label="Erase Safe", command="erase_safe"),
         MapUiControl(id="clear_all", label="Clear All", command="clear_all"),
+        MapUiControl(id="auto_run", label="Start Auto Run", command="auto_run"),
         MapUiControl(id="draw_excav_zone", label="Draw Excav Zone", command="draw_excav_zone"),
         MapUiControl(id="draw_deposit_zone", label="Draw Deposit Zone", command="draw_deposit_zone"),
     ]
