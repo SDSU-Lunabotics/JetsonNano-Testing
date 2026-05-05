@@ -48,6 +48,10 @@ class DriveCalibrationState(BaseModel):
     target_cell: Optional[List[int]] = None
     last_result: Optional[str] = None
     saved_drive_heading_flip: Optional[bool] = None
+    saved_hard_drive_flip: Optional[bool] = None
+    saved_display_heading_flip: Optional[bool] = None
+    saved_camera_map_angle_deg: Optional[float] = None
+    saved_camera_deposit_angle_deg: Optional[float] = None
 
 
 class MapUiStateResponse(BaseModel):
@@ -73,6 +77,10 @@ class MapUiCommandRequest(BaseModel):
             "direct_nav, main_rover_mode, camera_view, set_control_mode, auto_run, draw_excav_zone, "
             "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius."
             "auto_digger, camera_overlay, drive_heading_flip, display_heading_flip, direct_nav, "
+            "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
+            "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius, "
+            "auto_digger, camera_overlay, drive_heading_flip, hard_drive_flip, "
+            "camera_view_flip, display_heading_flip, "
             "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
             "dig_phase_cycle, dig_record_dig, dig_record_retract, dig_record_stop, "
             "dig_profile_prev, dig_profile_next, dig_profile_use, dig_profile_delete, "

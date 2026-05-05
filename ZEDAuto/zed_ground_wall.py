@@ -444,6 +444,11 @@ def main():
     parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     parser.add_argument(
+        "--hard-drive-flip",
+        action="store_true",
+        help="Invert the actual drivetrain forward/turn commands sent to the RoboRIO.",
+    )
+    parser.add_argument(
         "--main-rover-mode",
         action="store_true",
         dest="main_rover_mode",
@@ -613,6 +618,11 @@ def main():
     parser.add_argument("--rock-stamp", type=float, default=6.0, help="Obstacle evidence to stamp per detected rock cell")
     parser.add_argument("--rock-classes", default="rock,stone,boulder", help="Comma-separated class names to treat as rocks")
     parser.add_argument(
+        "--landmark-classes",
+        default="backpack,rock,stone,boulder,obstacle",
+        help="Comma-separated YOLO class names to save as persistent map landmarks.",
+    )
+    parser.add_argument(
         "--landmark-memory",
         action="store_true",
         default=True,
@@ -623,6 +633,30 @@ def main():
     parser.add_argument("--landmark-assoc-m", type=float, default=0.45, help="Merge detections into an existing landmark within this distance")
     parser.add_argument("--landmark-min-hits", type=int, default=2, help="Minimum repeated detections before drawing a landmark")
     parser.add_argument("--landmark-save-every", type=float, default=5.0, help="Seconds between landmark memory saves")
+    parser.add_argument(
+        "--landmark-relocalize",
+        action="store_true",
+        default=True,
+        help="Use saved landmarks plus fallback heading to correct the map pose when tracking is lost.",
+    )
+    parser.add_argument(
+        "--no-landmark-relocalize",
+        action="store_false",
+        dest="landmark_relocalize",
+        help="Disable landmark-based pose correction while tracking is lost.",
+    )
+    parser.add_argument(
+        "--landmark-relocalize-max-offset-m",
+        type=float,
+        default=4.0,
+        help="Maximum XY correction allowed from a single landmark match while tracking is lost.",
+    )
+    parser.add_argument(
+        "--landmark-relocalize-alpha",
+        type=float,
+        default=0.65,
+        help="Smoothing factor (0-1) for landmark-based pose correction while tracking is lost.",
+    )
     args = parser.parse_args()
 
     if args.rviz_config is None:
@@ -775,15 +809,23 @@ def main():
     mapping_mode = "complex" if args.complex else "simple"
     print(f"Mapping mode: {mapping_mode}")
 
+    def _parse_class_name_set(csv_text):
+        return {token.strip().lower() for token in str(csv_text or "").split(",") if token.strip()}
+
     # Rock detection via custom YOLO model
     rock_model = None
     rock_last_frame = -999999
-    rock_class_names = set(n.strip().lower() for n in args.rock_classes.split(",") if n.strip())
+    rock_class_names = _parse_class_name_set(args.rock_classes)
+    landmark_class_names = _parse_class_name_set(args.landmark_classes)
     if args.rock_model:
         try:
             from ultralytics import YOLO as _YOLO
             rock_model = _YOLO(args.rock_model)
-            print(f"Rock detection model loaded: {args.rock_model}  classes={rock_class_names}")
+            print(
+                "Rock detection model loaded: "
+                f"{args.rock_model}  obstacle_classes={rock_class_names} "
+                f"landmark_classes={landmark_class_names}"
+            )
         except Exception as _rock_exc:
             print(f"[WARN] Could not load rock model '{args.rock_model}': {_rock_exc}")
             rock_model = None
@@ -853,6 +895,8 @@ def main():
     recovery_pending_alignment = False
     recovery_alignment_offset_t = np.zeros(3, dtype=np.float32)
     recovery_alignment_yaw_deg = 0.0
+    recovery_loaded_from_checkpoint = False
+    recovery_jump_reject_count = 0
 
     def map_x_from_zed(x):
         # ZED +X is camera-right, while the occupancy map image mirrors X for display.
@@ -1039,6 +1083,18 @@ def main():
             forward = -forward
         return forward
 
+    def camera_rotation_from_forward_world(forward_world):
+        if forward_world is None:
+            return None
+        forward = np.array(forward_world, dtype=np.float32).reshape(3,)
+        norm_xz = float(np.linalg.norm(forward[[0, 2]]))
+        if norm_xz <= 1e-6:
+            return None
+        forward[0] /= norm_xz
+        forward[2] /= norm_xz
+        yaw_deg = math.degrees(math.atan2(float(forward[0]), float(forward[2])))
+        return yaw_rotation_matrix_deg(yaw_deg)
+
     def apply_recovery_alignment(R_world_cam, t_world_cam):
         if (
             np.linalg.norm(recovery_alignment_offset_t) <= 1e-6
@@ -1126,6 +1182,7 @@ def main():
         f"servo_track={'on' if args.camera_servo_track else 'off'} "
         f"servo_invert={'on' if args.camera_servo_invert else 'off'} "
         f"heading_flip={'on' if args.drive_heading_flip else 'off'} "
+        f"hard_drive_flip={'on' if args.hard_drive_flip else 'off'} "
         f"display_heading_flip={'on' if args.display_heading_flip else 'off'}"
     )
 
@@ -1163,6 +1220,14 @@ def main():
     dig_profile_playback_cmd = None
     if drive_calibration.last_saved_flip is not None:
         args.drive_heading_flip = bool(drive_calibration.last_saved_flip)
+    if drive_calibration.last_saved_hard_drive_flip is not None:
+        args.hard_drive_flip = bool(drive_calibration.last_saved_hard_drive_flip)
+    if drive_calibration.last_saved_display_heading_flip is not None:
+        args.display_heading_flip = bool(drive_calibration.last_saved_display_heading_flip)
+    if drive_calibration.last_saved_camera_map_angle_deg is not None:
+        args.camera_map_angle_deg = float(drive_calibration.last_saved_camera_map_angle_deg)
+    if drive_calibration.last_saved_camera_deposit_angle_deg is not None:
+        args.camera_deposit_angle_deg = float(drive_calibration.last_saved_camera_deposit_angle_deg)
 
     emergency_stop = False
     sd = None
@@ -1175,6 +1240,7 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", bool(emergency_stop))
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
             sd.putString("Jetson/MiningState", mining.state.value)
             sd.putBoolean("Jetson/ExcavatorEnabled", False)
             sd.putBoolean("Jetson/ConveyorEnabled", False)
@@ -1252,6 +1318,7 @@ def main():
     test_excavation_right_extend_active = False
     test_excavation_dig_active = False
     test_excavation_lower_active = False
+    test_excavation_lower_cycle_started_at = 0.0
     test_door_open_active = False
     test_door_close_active = False
     actuator_left_extension_pct = None
@@ -1291,8 +1358,11 @@ def main():
     last_localization_log = 0.0
     localization_scan_autostart_blocked_until = 0.0
     landmark_memory = {"version": 1, "landmarks": []}
+    landmark_pose_override_t_map = None
+    landmark_pose_override_R_world_cam = None
     landmark_dirty = False
     last_landmark_save = time.time()
+    last_landmark_relocalize_log = 0.0
     map_size_input_text = ""      # user-typed map size string e.g. "6x8" (feet)
     map_size_input_focused = False
     dig_name_input_text = ""
@@ -1511,6 +1581,7 @@ def main():
             navx_sign_locked = bool(recovery_checkpoint.get("navx_sign_locked", navx_sign_locked))
             have_valid_tracking_pose = bool(recovery_checkpoint.get("have_valid_tracking_pose", True))
             recovery_pending_alignment = bool(tracking_enabled and have_valid_tracking_pose)
+            recovery_loaded_from_checkpoint = True
             goal_payload = recovery_checkpoint.get("goal_cell")
             if isinstance(goal_payload, (list, tuple)) and len(goal_payload) == 2:
                 try:
@@ -1646,6 +1717,74 @@ def main():
                 cv2.LINE_AA,
             )
 
+    def try_landmark_relocalization(label, point_cam, base_t_map, fallback_forward_world=None):
+        nonlocal landmark_pose_override_t_map, landmark_pose_override_R_world_cam, last_landmark_relocalize_log
+        if (not args.landmark_memory) or (not args.landmark_relocalize):
+            return False
+        if label not in landmark_class_names:
+            return False
+        if point_cam is None or base_t_map is None:
+            return False
+        candidates = []
+        min_hits = max(1, int(args.landmark_min_hits))
+        for item in landmark_memory.get("landmarks", []):
+            if str(item.get("label", "")).strip().lower() != label:
+                continue
+            if int(item.get("hits", 0)) < min_hits:
+                continue
+            candidates.append(item)
+        if not candidates:
+            return False
+
+        est_R_world_cam = camera_rotation_from_forward_world(fallback_forward_world)
+        if est_R_world_cam is None:
+            est_R_world_cam = np.array(last_valid_R_world_cam, dtype=np.float32).reshape(3, 3)
+        rel_world = (est_R_world_cam @ np.array(point_cam, dtype=np.float32).reshape(3, 1)).reshape(3,)
+
+        base_t = np.array(base_t_map, dtype=np.float32).reshape(3,)
+        max_offset_m = max(0.20, float(args.landmark_relocalize_max_offset_m))
+        best_item = None
+        best_candidate_t = None
+        best_offset_m = None
+        for item in candidates:
+            candidate_t = np.array(base_t, dtype=np.float32)
+            candidate_t[0] = -float(item.get("x", 0.0)) - float(rel_world[0])
+            candidate_t[2] = float(item.get("z", 0.0)) - float(rel_world[2])
+            offset_m = math.hypot(float(candidate_t[0] - base_t[0]), float(candidate_t[2] - base_t[2]))
+            if offset_m > max_offset_m:
+                continue
+            if (
+                best_offset_m is None
+                or offset_m < best_offset_m
+                or (
+                    abs(offset_m - best_offset_m) <= 1e-6
+                    and int(item.get("hits", 0)) > int(best_item.get("hits", 0))
+                )
+            ):
+                best_item = item
+                best_candidate_t = candidate_t
+                best_offset_m = offset_m
+
+        if best_item is None or best_candidate_t is None:
+            return False
+
+        alpha = max(0.0, min(1.0, float(args.landmark_relocalize_alpha)))
+        corrected_t = np.array(base_t, dtype=np.float32)
+        corrected_t[0] = float((1.0 - alpha) * base_t[0] + alpha * best_candidate_t[0])
+        corrected_t[2] = float((1.0 - alpha) * base_t[2] + alpha * best_candidate_t[2])
+        landmark_pose_override_t_map = corrected_t
+        landmark_pose_override_R_world_cam = est_R_world_cam.astype(np.float32)
+        now = time.time()
+        if (now - last_landmark_relocalize_log) >= 0.75:
+            print(
+                "Landmark relocalization: "
+                f"{label} -> {best_item.get('id', label)} "
+                f"offset={best_offset_m:.2f}m "
+                f"map=({map_x_from_zed(corrected_t[0]):+.2f}, {corrected_t[2]:+.2f})"
+            )
+            last_landmark_relocalize_log = now
+        return True
+
     def start_localization_scan(reason="manual"):
         nonlocal localization_scan_active, localization_scan_started
         nonlocal localization_scan_started_lost, localization_scan_reason
@@ -1744,19 +1883,21 @@ def main():
         if sd is not None:
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
         print(f"Main rover drive mode: {'ON' if args.main_rover_mode else 'OFF'}")
 
     def set_excavation_test_mode(mode_name, enabled, source="button"):
         nonlocal auto_digger_enabled
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
         enabled = bool(enabled)
         if mode_name == "auto_digger":
             if auto_digger_enabled == enabled:
                 return
             auto_digger_enabled = enabled
-            print(f"Auto digger {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+            print(f"Auto dig {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         elif mode_name == "left_extend":
             if test_excavation_left_extend_active == enabled:
                 return
@@ -1776,7 +1917,12 @@ def main():
             if test_excavation_lower_active == enabled:
                 return
             test_excavation_lower_active = enabled
-            print(f"Excavation lower simulation {'ON' if enabled else 'OFF'} via {source}.")
+            if enabled:
+                test_excavation_lower_cycle_started_at = time.time()
+                print(f"Excavation lower cycle STARTED via {source} (5s down, 5s up).")
+            else:
+                test_excavation_lower_cycle_started_at = 0.0
+                print(f"Excavation lower cycle STOPPED via {source}.")
         elif mode_name == "door_open":
             if enabled:
                 test_door_close_active = False
@@ -1798,6 +1944,7 @@ def main():
     def stop_all_actuators(source="button"):
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
         changed = (
             test_excavation_left_extend_active
@@ -1811,6 +1958,7 @@ def main():
         test_excavation_right_extend_active = False
         test_excavation_dig_active = False
         test_excavation_lower_active = False
+        test_excavation_lower_cycle_started_at = 0.0
         test_door_open_active = False
         test_door_close_active = False
         if changed:
@@ -1914,16 +2062,38 @@ def main():
         print(f"Camera overlay {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def save_calibration_settings(result_text):
+        drive_calibration.save_runtime_settings(
+            bool(args.drive_heading_flip),
+            bool(args.hard_drive_flip),
+            bool(args.display_heading_flip),
+            float(args.camera_map_angle_deg),
+            float(args.camera_deposit_angle_deg),
+            result_text,
+        )
+
     def set_drive_heading_flip(enabled, source="button"):
         enabled = bool(enabled)
         if bool(args.drive_heading_flip) == enabled:
             return
         args.drive_heading_flip = enabled
-        drive_calibration.save_result(
-            bool(args.drive_heading_flip),
-            f"Drive heading flip set {'ON' if args.drive_heading_flip else 'OFF'} via {source}.",
+        save_calibration_settings(
+            f"Drive heading flip set {'ON' if args.drive_heading_flip else 'OFF'} via {source}."
         )
         print(f"Drive heading flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_hard_drive_flip(enabled, source="button"):
+        enabled = bool(enabled)
+        if bool(args.hard_drive_flip) == enabled:
+            return
+        args.hard_drive_flip = enabled
+        if sd is not None:
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
+        save_calibration_settings(
+            f"Hard drive flip set {'ON' if args.hard_drive_flip else 'OFF'} via {source}."
+        )
+        print(f"Hard drive flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
     def set_display_heading_flip(enabled, source="button"):
@@ -1931,7 +2101,31 @@ def main():
         if bool(args.display_heading_flip) == enabled:
             return
         args.display_heading_flip = enabled
+        save_calibration_settings(
+            f"Display heading arrow flip set {'ON' if args.display_heading_flip else 'OFF'} via {source}."
+        )
         print(f"Display heading arrow flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def flip_camera_view_calibration(source="button"):
+        refresh_camera_servo_state()
+        target_is_map = abs(angle_error_deg(servo_command_angle_deg, args.camera_map_angle_deg)) <= 2.0
+        was_map_view = bool(servo_map_view or target_is_map)
+        args.camera_map_angle_deg, args.camera_deposit_angle_deg = (
+            float(args.camera_deposit_angle_deg),
+            float(args.camera_map_angle_deg),
+        )
+        result_text = (
+            f"Camera map/deposit directions flipped via {source}. "
+            f"Map={float(args.camera_map_angle_deg):.0f} Deposit={float(args.camera_deposit_angle_deg):.0f}."
+        )
+        save_calibration_settings(result_text)
+        if args.camera_servo_track and sd is not None:
+            if was_map_view:
+                request_camera_map_view("camera flip")
+            else:
+                request_camera_deposit_view("camera flip")
+        print(result_text)
         publish_map_ui_state(force=True)
 
     def sync_selected_dig_profile():
@@ -2124,6 +2318,7 @@ def main():
         nonlocal path_plan_mode
         nonlocal emergency_stop, reset_map_confirm, landmark_memory, landmark_dirty, last_save
         nonlocal lock_green_applied, lock_green_locked_count, mining_goal_active
+        nonlocal landmark_pose_override_t_map, landmark_pose_override_R_world_cam
         occ_map.free_counts[:] = 0.0
         occ_map.occ_counts[:] = 0.0
         occ_map.hole_counts[:] = 0.0
@@ -2141,6 +2336,8 @@ def main():
         emergency_stop = True
         reset_map_confirm = False
         landmark_memory = {"version": 1, "landmarks": []}
+        landmark_pose_override_t_map = None
+        landmark_pose_override_R_world_cam = None
         landmark_dirty = True
         try:
             occ_map.save(args.map_save_path)
@@ -2363,7 +2560,7 @@ def main():
                 },
                 {
                     "id": "auto_digger",
-                    "label": "Enable Digger",
+                    "label": "Auto Dig",
                     "command": "auto_digger",
                     "active": bool(auto_digger_enabled),
                     "enabled": True,
@@ -2380,6 +2577,20 @@ def main():
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
                     "active": bool(args.drive_heading_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "hard_drive_flip",
+                    "label": "Hard Flip",
+                    "command": "hard_drive_flip",
+                    "active": bool(args.hard_drive_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "camera_view_flip",
+                    "label": "Flip Map/Depo",
+                    "command": "camera_view_flip",
+                    "active": False,
                     "enabled": True,
                 },
                 {
@@ -2496,7 +2707,7 @@ def main():
                 },
                 {
                     "id": "test_excavation_lower",
-                    "label": "Lower Sim",
+                    "label": "Lower Cycle",
                     "command": "test_excavation_lower",
                     "active": bool(test_excavation_lower_active),
                     "enabled": True,
@@ -2679,6 +2890,8 @@ def main():
         r0, c0 = display_rover
         cv2.circle(frame, (c0, r0), max(2, int(args.map_camera_size)), (0, 180, 255), -1)
         rover_half_cells = max(1.0, float(args.rover_size_m) / (2.0 * float(occ_map.map_res_m)))
+        front_edge_pts = None
+        nose_pt = None
         if heading_vec_rc is None:
             rr = int(round(rover_half_cells))
             box_pts = np.array(
@@ -2701,6 +2914,12 @@ def main():
             p2 = center + fwd_v * rover_half_cells - right_v * rover_half_cells
             p3 = center - fwd_v * rover_half_cells - right_v * rover_half_cells
             p4 = center - fwd_v * rover_half_cells + right_v * rover_half_cells
+            front_edge_pts = (
+                (int(round(p1[1])), int(round(p1[0]))),
+                (int(round(p2[1])), int(round(p2[0]))),
+            )
+            nose = center + fwd_v * (rover_half_cells + max(2.0, float(args.map_camera_size) * 0.8))
+            nose_pt = (int(round(nose[1])), int(round(nose[0])))
             box_pts = np.array(
                 [
                     [int(round(p1[1])), int(round(p1[0]))],
@@ -2717,6 +2936,10 @@ def main():
             )
             cv2.arrowedLine(frame, (c0, r0), end_pt, (0, 255, 255), 2, cv2.LINE_AA, tipLength=0.3)
         cv2.polylines(frame, [box_pts], True, (0, 220, 255), 1, cv2.LINE_AA)
+        if front_edge_pts is not None:
+            cv2.line(frame, front_edge_pts[0], front_edge_pts[1], (0, 255, 120), 2, cv2.LINE_AA)
+        if nose_pt is not None:
+            cv2.circle(frame, nose_pt, 3, (0, 255, 120), -1)
 
     def on_map_click(event, x, y, flags, param):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
@@ -3044,6 +3267,18 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_drive_heading_flip(not args.drive_heading_flip, "button")
                 return
+        rect = status_button_rects.get("hard_drive_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_hard_drive_flip(not args.hard_drive_flip, "button")
+                return
+        rect = status_button_rects.get("camera_view_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                flip_camera_view_calibration("button")
+                return
         rect = status_button_rects.get("display_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3330,6 +3565,10 @@ def main():
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
+        elif action == "hard_drive_flip":
+            set_hard_drive_flip(not args.hard_drive_flip, "external command")
+        elif action == "camera_view_flip":
+            flip_camera_view_calibration("external command")
         elif action == "display_heading_flip":
             set_display_heading_flip(not args.display_heading_flip, "external command")
         elif action == "drive_calibration_mode":
@@ -3394,9 +3633,15 @@ def main():
         nonlocal nt_command_seq, nt_ready_stuck_since, nt_last_auto_push
         nonlocal nt_ready_high, nt_ready_clear_time, last_drive_debug_time
         nonlocal status_cmd_enabled, status_cmd_fwd, status_cmd_turn, status_cmd_duration
+        nonlocal test_excavation_lower_active, test_excavation_lower_cycle_started_at
         if sd is None:
             return
         now = time.time()
+        fwd = float(fwd)
+        turn = float(turn)
+        if args.hard_drive_flip:
+            fwd = -fwd
+            turn = -turn
         enabled = bool(enabled)
         status_cmd_enabled = bool(enabled)
         status_cmd_fwd = float(fwd)
@@ -3405,8 +3650,22 @@ def main():
 
         def push_automation_state(force=False):
             nonlocal nt_last_auto_push
+            nonlocal test_excavation_lower_active, test_excavation_lower_cycle_started_at
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
+            lower_cycle_elapsed = 0.0
+            lower_cycle_active = bool(test_excavation_lower_active)
+            if lower_cycle_active:
+                if test_excavation_lower_cycle_started_at <= 0.0:
+                    test_excavation_lower_cycle_started_at = now
+                lower_cycle_elapsed = max(0.0, now - float(test_excavation_lower_cycle_started_at))
+                if lower_cycle_elapsed >= 10.0:
+                    test_excavation_lower_active = False
+                    test_excavation_lower_cycle_started_at = 0.0
+                    lower_cycle_active = False
+                    lower_cycle_elapsed = 0.0
+                    print("Excavation lower cycle completed.")
+                    publish_map_ui_state(force=True)
             mining_state_value = mining.state.value
             auto_dig_active = auto_digger_enabled and enabled and mining.state == auto_mining.MiningState.DIGGING
             playback_cmd = dig_profile_playback_cmd if (
@@ -3415,7 +3674,7 @@ def main():
             excavator_enabled = test_excavation_dig_active or (
                 bool(playback_cmd.get("digger_on")) if playback_cmd is not None else auto_dig_active
             )
-            excavator_lower_requested = test_excavation_lower_active or (
+            excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
@@ -3440,7 +3699,17 @@ def main():
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
-            sd.putBoolean("Jetson/AutomationEnabled", enabled)
+            sd.putBoolean("Drive/MainRoverHardFlip", bool(args.hard_drive_flip))
+            mechanism_request_active = bool(
+                test_excavation_dig_active
+                or lower_cycle_active
+                or test_excavation_left_extend_active
+                or test_excavation_right_extend_active
+                or door_open_enabled
+                or door_close_enabled
+            )
+            automation_request_active = bool(enabled or mechanism_request_active)
+            sd.putBoolean("Jetson/AutomationEnabled", automation_request_active)
             sd.putString("Jetson/MiningState", mining_state_value)
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
@@ -3450,7 +3719,7 @@ def main():
             sd.putBoolean("Jetson/DoorActuatorsOpen", bool(door_open_enabled and not door_close_enabled))
             sd.putBoolean("Jetson/DoorActuatorsClose", bool(door_close_enabled and not door_open_enabled))
             # Robot-side code may scale command by these keys.
-            if enabled:
+            if automation_request_active:
                 sd.putNumber("Jetson/Speed", float(args.nt_forward_scale))
                 sd.putNumber("Jetson/TurnSpeed", float(args.nt_turn_scale))
             else:
@@ -3545,6 +3814,8 @@ def main():
 
     def mix_ds_drive(fwd, turn):
         if not args.ds_joystick:
+            return float(fwd), float(turn)
+        if args.main_rover_mode:
             return float(fwd), float(turn)
         mixed_fwd = max(-1.0, min(1.0, float(fwd) + float(ds_joystick_fwd)))
         mixed_turn = max(-1.0, min(1.0, float(turn) + float(ds_joystick_turn)))
@@ -3732,8 +4003,11 @@ def main():
                 0.44,
             )
             servo_info_y = 222
+        landmark_status = f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved"
+        if tracking_enabled and (not tracking_pose_ok) and landmark_pose_override_t_map is not None:
+            landmark_status += " | pose hold: landmark"
         put_line(
-            f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved",
+            landmark_status,
             servo_info_y,
             (190, 190, 190),
             0.45,
@@ -4187,7 +4461,7 @@ def main():
         )
         draw_control_button(
             auto_digger_rect,
-            "Enable Digger: ON" if auto_digger_enabled else "Enable Digger",
+            "Auto Dig: ON" if auto_digger_enabled else "Auto Dig",
             True,
             auto_digger_enabled,
             (0, 140, 60),
@@ -4208,6 +4482,8 @@ def main():
         drive_calibration_cancel_rect = grid_rect(cal_body_y, 0, 1)
         drive_heading_flip_rect = grid_rect(cal_body_y, 0, 2)
         display_heading_flip_rect = grid_rect(cal_body_y, 1, 0)
+        hard_drive_flip_rect = grid_rect(cal_body_y, 1, 1)
+        camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4237,6 +4513,22 @@ def main():
             bool(args.display_heading_flip),
             (140, 80, 180),
             (220, 150, 255),
+        )
+        draw_control_button(
+            hard_drive_flip_rect,
+            "Hard Flip: ON" if args.hard_drive_flip else "Hard Flip",
+            True,
+            bool(args.hard_drive_flip),
+            (160, 40, 40),
+            (255, 120, 120),
+        )
+        draw_control_button(
+            camera_view_flip_rect,
+            "Flip Map/Depo",
+            True,
+            False,
+            (100, 90, 20),
+            (220, 210, 120),
         )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
@@ -4272,7 +4564,7 @@ def main():
         door_close_rect = grid_rect(actuators_body_y, 2, 1)
         draw_control_button(
             test_excavation_lower_rect,
-            "Lower Sim: ON" if test_excavation_lower_active else "Lower Sim",
+            "Lower Cycle: ON" if test_excavation_lower_active else "Lower Cycle",
             True,
             test_excavation_lower_active,
             (140, 70, 140),
@@ -4484,6 +4776,8 @@ def main():
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
+            ("hard_drive_flip", hard_drive_flip_rect),
+            ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
             ("drive_calibration_cancel", drive_calibration_cancel_rect),
@@ -4746,6 +5040,41 @@ def main():
                                 f"{float(args.navx_heading_max_mismatch_deg):.1f}deg"
                             )
                     if jump_reason is not None:
+                        if recovery_loaded_from_checkpoint or recovery_pending_alignment:
+                            recovery_jump_reject_count += 1
+                            if recovery_jump_reject_count >= 5:
+                                print(
+                                    "Startup recovery pose kept being rejected; "
+                                    "clearing saved recovery alignment and waiting for fresh tracking."
+                                )
+                                have_valid_tracking_pose = False
+                                tracking_prev_ok = False
+                                tracking_loss_warned = False
+                                tracking_recover_stable_count = 0
+                                recovery_pending_alignment = False
+                                recovery_loaded_from_checkpoint = False
+                                recovery_alignment_offset_t = np.zeros(3, dtype=np.float32)
+                                recovery_alignment_yaw_deg = 0.0
+                                last_valid_R_world_cam = np.eye(3, dtype=np.float32)
+                                last_valid_t_world_cam = np.zeros(3, dtype=np.float32)
+                                last_valid_rover_forward_world = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+                                last_valid_rover_right_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+                                last_valid_imu_rotation = None
+                                last_valid_navx_yaw_deg = None
+                                map_origin_set = False
+                                map_origin_t = np.zeros(3, dtype=np.float32)
+                                goal_cell = None
+                                path_cells = None
+                                last_path_cells = None
+                                last_start = None
+                                last_goal = None
+                                last_path_plan_time = 0.0
+                                jump_reason = None
+                        else:
+                            recovery_jump_reject_count = 0
+                    else:
+                        recovery_jump_reject_count = 0
+                    if jump_reason is not None:
                         tracking_pose_ok = False
                         tracking_recover_stable_count = 0
                         R_world_cam = last_valid_R_world_cam
@@ -4779,6 +5108,8 @@ def main():
                         update_navx_sign_calibration(navx_yaw_deg, candidate_rover_forward_world)
                     have_valid_tracking_pose = True
                     tracking_loss_warned = False
+                    landmark_pose_override_t_map = None
+                    landmark_pose_override_R_world_cam = None
                     if not args.complex and not map_origin_set:
                         map_origin_t = np.array(t_world_cam, dtype=np.float32)
                         map_origin_set = True
@@ -5068,6 +5399,12 @@ def main():
                     t_map = np.array(t_world_cam, dtype=np.float32) - map_origin_t
                 else:
                     t_map = np.array(t_world_cam, dtype=np.float32)
+                if tracking_enabled and (not tracking_pose_ok) and landmark_pose_override_t_map is not None:
+                    t_map = np.array(landmark_pose_override_t_map, dtype=np.float32).reshape(3,)
+                    if landmark_pose_override_R_world_cam is not None:
+                        R_world_cam = np.array(landmark_pose_override_R_world_cam, dtype=np.float32).reshape(3, 3)
+                    if not camera_map_pause_reason:
+                        camera_map_pause_reason = "TRACKING LOST - LANDMARK HOLD"
                 rover_pos_map, rover_forward_world, rover_right_world = rover_pose_from_camera(
                     R_world_cam,
                     t_map,
@@ -5086,67 +5423,113 @@ def main():
                         z = xyz_world[:, 2]
                         occ_map.update(x, z, ground_mask, obstacle_mask, hole_mask)
 
-                        # Object detection: persist static objects, keep people as live-only markers.
-                        if ((not driver_priority_active)
-                                and (rock_model is not None)
-                                and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
-                            rock_last_frame = frame_idx
-                            try:
-                                _img_raw = image_left.get_data()
-                                if _img_raw is not None:
-                                    if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
-                                        _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
-                                    elif _img_raw.ndim == 3 and _img_raw.shape[2] == 3:
-                                        _img_bgr = _img_raw
-                                    else:
-                                        _img_bgr = None
-                                    if _img_bgr is not None:
-                                        _results = rock_model.predict(
-                                            source=_img_bgr,
-                                            conf=args.rock_conf,
-                                            verbose=False,
-                                        )[0]
-                                        _names = _results.names if hasattr(_results, "names") else {}
-                                        _ih, _iw = _img_bgr.shape[:2]
-                                        _cld_h, _cld_w = cloud.shape[:2]
-                                        for _det in (_results.boxes or []):
-                                            _lbl = str(_names.get(int(_det.cls[0]), "")).lower()
-                                            _conf = float(_det.conf[0]) if hasattr(_det, "conf") else float(args.rock_conf)
-                                            _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
-                                            # Centre pixel of bounding box
-                                            _cx = int((_x1 + _x2) / 2)
-                                            _cy = int((_y1 + _y2) / 2)
-                                            # Map pixel → point cloud index
-                                            _pc_c = int(_cx * _cld_w / max(1, _iw))
-                                            _pc_r = int(_cy * _cld_h / max(1, _ih))
-                                            _pc_r = max(0, min(_cld_h - 1, _pc_r))
-                                            _pc_c = max(0, min(_cld_w - 1, _pc_c))
-                                            _pt = cloud[_pc_r, _pc_c, :3]
-                                            if not np.isfinite(_pt).all():
-                                                continue
-                                            _pt_w = (R_world_cam @ _pt.astype(np.float32)) + t_map
-                                            _rc = map_world_to_grid(_pt_w[0], _pt_w[2])
-                                            if _rc is None:
-                                                continue
-                                            _rr, _cc = _rc
-                                            if _lbl in rock_class_names:
-                                                # Static object: persist on map
-                                                _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
-                                                _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
-                                                occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
-                                                occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
-                                                if (not tracking_enabled) or tracking_pose_ok:
-                                                    record_static_landmark(
-                                                        _lbl,
-                                                        map_x_from_zed(_pt_w[0]),
-                                                        float(_pt_w[2]),
-                                                        _conf,
-                                                    )
-                                            elif _lbl in {"person", "people", "human", "pedestrian"}:
-                                                # Dynamic object: show as live marker only (handled elsewhere)
-                                                pass
-                            except Exception as _rock_err:
-                                pass  # never crash the main loop on detection errors
+                    # Object detection: persist configured landmarks, stamp configured obstacles,
+                    # and use saved landmarks to correct the held map pose when tracking is lost.
+                    if ((not driver_priority_active)
+                            and (rock_model is not None)
+                            and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
+                        rock_last_frame = frame_idx
+                        try:
+                            _img_raw = image_left.get_data()
+                            if _img_raw is not None:
+                                if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
+                                    _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
+                                elif _img_raw.ndim == 3 and _img_raw.shape[2] == 3:
+                                    _img_bgr = _img_raw
+                                else:
+                                    _img_bgr = None
+                                if _img_bgr is not None:
+                                    _results = rock_model.predict(
+                                        source=_img_bgr,
+                                        conf=args.rock_conf,
+                                        verbose=False,
+                                    )[0]
+                                    _names = _results.names if hasattr(_results, "names") else {}
+                                    _ih, _iw = _img_bgr.shape[:2]
+                                    _cld_h, _cld_w = cloud.shape[:2]
+                                    _det_R_world_cam = np.array(R_world_cam, dtype=np.float32).reshape(3, 3)
+                                    _det_t_map = np.array(t_map, dtype=np.float32).reshape(3,)
+                                    _landmark_pose_changed = False
+                                    for _det in (_results.boxes or []):
+                                        _lbl = str(_names.get(int(_det.cls[0]), "")).strip().lower()
+                                        if not _lbl:
+                                            continue
+                                        _conf = float(_det.conf[0]) if hasattr(_det, "conf") else float(args.rock_conf)
+                                        _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
+                                        _cx = int((_x1 + _x2) / 2)
+                                        _cy = int((_y1 + _y2) / 2)
+                                        _pc_c = int(_cx * _cld_w / max(1, _iw))
+                                        _pc_r = int(_cy * _cld_h / max(1, _ih))
+                                        _pc_r = max(0, min(_cld_h - 1, _pc_r))
+                                        _pc_c = max(0, min(_cld_w - 1, _pc_c))
+                                        _pt = cloud[_pc_r, _pc_c, :3]
+                                        if not np.isfinite(_pt).all():
+                                            continue
+
+                                        _is_landmark = _lbl in landmark_class_names
+                                        _is_obstacle = _lbl in rock_class_names
+                                        if (
+                                            _is_landmark
+                                            and tracking_enabled
+                                            and (not tracking_pose_ok)
+                                            and try_landmark_relocalization(
+                                                _lbl,
+                                                _pt,
+                                                _det_t_map,
+                                                fallback_forward_world=heading_fallback_forward_world,
+                                            )
+                                        ):
+                                            _landmark_pose_changed = True
+                                            _det_t_map = np.array(landmark_pose_override_t_map, dtype=np.float32).reshape(3,)
+                                            _det_R_world_cam = np.array(
+                                                landmark_pose_override_R_world_cam,
+                                                dtype=np.float32,
+                                            ).reshape(3, 3)
+
+                                        _pt_w = (_det_R_world_cam @ _pt.astype(np.float32)) + _det_t_map
+                                        _rc = map_world_to_grid(_pt_w[0], _pt_w[2])
+                                        if _rc is None:
+                                            continue
+                                        _rr, _cc = _rc
+
+                                        if _is_obstacle and map_integration_ok:
+                                            _r0 = max(0, _rr - 1); _r1 = min(occ_map.grid_h - 1, _rr + 1)
+                                            _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
+                                            occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
+                                            occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+
+                                        if _is_landmark and (
+                                            ((not tracking_enabled) or tracking_pose_ok)
+                                            or (landmark_pose_override_t_map is not None)
+                                        ):
+                                            record_static_landmark(
+                                                _lbl,
+                                                map_x_from_zed(_pt_w[0]),
+                                                float(_pt_w[2]),
+                                                _conf,
+                                            )
+
+                                    if _landmark_pose_changed:
+                                        t_map = np.array(landmark_pose_override_t_map, dtype=np.float32).reshape(3,)
+                                        R_world_cam = np.array(
+                                            landmark_pose_override_R_world_cam,
+                                            dtype=np.float32,
+                                        ).reshape(3, 3)
+                                        rover_pos_map, rover_forward_world, rover_right_world = rover_pose_from_camera(
+                                            R_world_cam,
+                                            t_map,
+                                            current_mount_yaw_deg,
+                                        )
+                                        cam_row_col = map_world_to_grid(t_map[0], t_map[2])
+                                        rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
+                                        drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
+                                        if drive_origin_pos_map is not None:
+                                            drive_origin_row_col = map_world_to_grid(
+                                                drive_origin_pos_map[0],
+                                                drive_origin_pos_map[2],
+                                            )
+                        except Exception:
+                            pass  # never crash the main loop on detection errors
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
                     # Smooth mode: remove isolated red-dot noise from display.
                     if smooth_map_enabled and map_vis is not None:
@@ -5484,7 +5867,7 @@ def main():
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
                                 continue
-                            if driver_priority_active and not manual_mode:
+                            if driver_priority_active:
                                 # Let the RoboRIO/Xbox path own the drivetrain while the driver is actively commanding it.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
