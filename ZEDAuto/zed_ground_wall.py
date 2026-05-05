@@ -2471,6 +2471,14 @@ def main():
         selected_tool = current_selected_tool()
         dig_ui_state = dig_profiles.ui_state()
         drive_cal_state = drive_calibration.ui_state()
+        mining_active = mining.state not in (
+            auto_mining.MiningState.IDLE,
+            auto_mining.MiningState.DRAW_EXCAV,
+            auto_mining.MiningState.DRAW_DEPOSIT,
+            auto_mining.MiningState.PICK_DIG_START,
+            auto_mining.MiningState.DONE,
+            auto_mining.MiningState.ABORTED,
+        )
         payload = {
             "available": True,
             "source": "zed_ground_wall",
@@ -2553,9 +2561,9 @@ def main():
                 },
                 {
                     "id": "auto_run",
-                    "label": "Stop Auto Run" if _mining_active else "Start Auto Run",
+                    "label": "Stop Auto Run" if mining_active else "Start Auto Run",
                     "command": "auto_run",
-                    "active": bool(_mining_active),
+                    "active": bool(mining_active),
                     "enabled": True,
                 },
                 {
