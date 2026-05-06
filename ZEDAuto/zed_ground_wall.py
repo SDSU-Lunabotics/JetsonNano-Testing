@@ -1319,6 +1319,7 @@ def main():
     test_excavation_dig_active = False
     test_excavation_lower_active = False
     test_excavation_lower_cycle_started_at = 0.0
+    test_deposition_active = False
     test_door_open_active = False
     test_door_close_active = False
     actuator_left_extension_pct = None
@@ -1891,6 +1892,7 @@ def main():
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
         nonlocal test_excavation_lower_cycle_started_at
+        nonlocal test_deposition_active
         nonlocal test_door_open_active, test_door_close_active
         enabled = bool(enabled)
         if mode_name == "auto_digger":
@@ -1923,6 +1925,11 @@ def main():
             else:
                 test_excavation_lower_cycle_started_at = 0.0
                 print(f"Excavation lower cycle STOPPED via {source}.")
+        elif mode_name == "deposition":
+            if test_deposition_active == enabled:
+                return
+            test_deposition_active = enabled
+            print(f"Deposition conveyor {'ON' if enabled else 'OFF'} via {source}.")
         elif mode_name == "door_open":
             if enabled:
                 test_door_close_active = False
@@ -1945,12 +1952,14 @@ def main():
         nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
         nonlocal test_excavation_dig_active, test_excavation_lower_active
         nonlocal test_excavation_lower_cycle_started_at
+        nonlocal test_deposition_active
         nonlocal test_door_open_active, test_door_close_active
         changed = (
             test_excavation_left_extend_active
             or test_excavation_right_extend_active
             or test_excavation_dig_active
             or test_excavation_lower_active
+            or test_deposition_active
             or test_door_open_active
             or test_door_close_active
         )
@@ -1959,6 +1968,7 @@ def main():
         test_excavation_dig_active = False
         test_excavation_lower_active = False
         test_excavation_lower_cycle_started_at = 0.0
+        test_deposition_active = False
         test_door_open_active = False
         test_door_close_active = False
         if changed:
@@ -2499,6 +2509,7 @@ def main():
                 "right_extend_command": bool(test_excavation_right_extend_active),
                 "dig_command": bool(test_excavation_dig_active),
                 "lower_command": bool(test_excavation_lower_active),
+                "deposition_command": bool(test_deposition_active),
                 "door_open_command": bool(test_door_open_active),
                 "door_close_command": bool(test_door_close_active),
             },
@@ -2718,6 +2729,13 @@ def main():
                     "label": "Lower Cycle",
                     "command": "test_excavation_lower",
                     "active": bool(test_excavation_lower_active),
+                    "enabled": True,
+                },
+                {
+                    "id": "test_deposition",
+                    "label": "Conveyor: ON" if test_deposition_active else "Test Conveyor",
+                    "command": "test_deposition",
+                    "active": bool(test_deposition_active),
                     "enabled": True,
                 },
                 {
@@ -3551,6 +3569,16 @@ def main():
             set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "external command")
         elif action == "test_excavation_lower":
             set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
+        elif action == "test_deposition":
+            set_excavation_test_mode("deposition", not test_deposition_active, "external command")
+        elif action == "motor_excavator_start":
+            set_excavation_test_mode("dig", True, "motor endpoint")
+        elif action == "motor_excavator_stop":
+            set_excavation_test_mode("dig", False, "motor endpoint")
+        elif action in ("motor_deposition_start", "motor_conveyor_start"):
+            set_excavation_test_mode("deposition", True, "motor endpoint")
+        elif action in ("motor_deposition_stop", "motor_conveyor_stop"):
+            set_excavation_test_mode("deposition", False, "motor endpoint")
         elif action == "door_open":
             set_excavation_test_mode("door_open", not test_door_open_active, "external command")
         elif action == "door_close":
@@ -3685,7 +3713,7 @@ def main():
             excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
-            conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
+            conveyor_enabled = test_deposition_active or (enabled and mining.state == auto_mining.MiningState.DEPOSITING)
             if playback_cmd is not None:
                 left_extend_enabled = test_excavation_left_extend_active or bool(playback_cmd.get("left_extend_on", False))
                 right_extend_enabled = test_excavation_right_extend_active or bool(playback_cmd.get("right_extend_on", False))
@@ -3713,6 +3741,7 @@ def main():
                 or lower_cycle_active
                 or test_excavation_left_extend_active
                 or test_excavation_right_extend_active
+                or conveyor_enabled
                 or door_open_enabled
                 or door_close_enabled
             )
