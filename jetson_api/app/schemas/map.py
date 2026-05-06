@@ -86,7 +86,7 @@ class MapUiCommandRequest(BaseModel):
             "dig_profile_prev, dig_profile_next, dig_profile_use, dig_profile_delete, "
             "test_excavation_dig, "
             "test_excavation_left_extend, test_excavation_right_extend, "
-            "test_excavation_lower, test_deposition, door_open, door_close, stop_actuators, "
+            "test_excavation_lower, door_open, door_close, stop_actuators, "
             "main_rover_mode, camera_view, draw_excav_zone, draw_deposit_zone, "
             "pick_dig_start, brush_minus, brush_plus, set_brush_radius."
         )
