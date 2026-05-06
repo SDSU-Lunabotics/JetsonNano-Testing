@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.schemas.common import Fault, FaultCode, MotorId
@@ -19,6 +21,32 @@ from app.schemas.motors import (
 )
 from app.services.state_service import now_ms
 from app.services.roborio_bridge_service import roborio_bridge_service
+from app.core.settings import settings
+
+
+def _write_zed_motor_command(action: str, *, motor_id: str, mode: str, value: Any = None, duration_ms: Any = None) -> int:
+    command_seq = now_ms()
+    target = Path(settings.map_waypoint_command_file)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(f"{target.suffix}.tmp")
+    tmp.write_text(
+        json.dumps(
+            {
+                "seq": command_seq,
+                "type": "ui_action",
+                "action": action,
+                "motor_id": motor_id,
+                "mode": mode,
+                "value": value,
+                "duration_ms": duration_ms,
+                "source": "jetson_api_motor_endpoint",
+                "timestamp_ms": command_seq,
+            }
+        ),
+        encoding="utf-8",
+    )
+    tmp.replace(target)
+    return command_seq
 
 
 class MotorService:
@@ -91,19 +119,44 @@ class MotorService:
         )
 
     def command_motor(self, motor_id: MotorId, req: MotorCommandRequest) -> MotorCommandResponse:
-        response = roborio_bridge_service.command_motor(
-            motor_id=motor_id.value,
-            mode=req.mode,
-            value=req.value,
-            duration_ms=req.duration_ms,
-        )
+        command_seq = None
+        if motor_id in (MotorId.excavator, MotorId.deposition):
+            is_start = req.mode != "stop" and (req.value is None or float(req.value) != 0.0)
+            action_motor = "deposition" if motor_id == MotorId.deposition else "excavator"
+            action = f"motor_{action_motor}_{'start' if is_start else 'stop'}"
+            command_seq = _write_zed_motor_command(
+                action,
+                motor_id=motor_id.value,
+                mode=req.mode,
+                value=req.value,
+                duration_ms=req.duration_ms,
+            )
+
+        try:
+            response = roborio_bridge_service.command_motor(
+                motor_id=motor_id.value,
+                mode=req.mode,
+                value=req.value,
+                duration_ms=req.duration_ms,
+            )
+        except ValueError:
+            if command_seq is None:
+                raise
+            response = {
+                "ok": True,
+                "motor_id": motor_id.value,
+                "mode": req.mode,
+                "value": req.value,
+                "duration_ms": req.duration_ms,
+                "timestamp_ms": command_seq,
+            }
         return MotorCommandResponse(
             ok=bool(response.get("ok", False)),
             motor_id=str(response.get("motor_id", motor_id.value)),
             mode=str(response.get("mode", req.mode)),
             value=_optional_float(response.get("value")),
             duration_ms=_optional_int(response.get("duration_ms")),
-            request_id=_optional_float(response.get("request_id")),
+            request_id=_optional_float(response.get("request_id")) or _optional_float(command_seq),
             timestamp_ms=int(response.get("timestamp_ms") or now_ms()),
         )
 
