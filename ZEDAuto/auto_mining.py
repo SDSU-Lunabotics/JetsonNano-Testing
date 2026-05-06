@@ -7,6 +7,7 @@ and deposit cycles using the live occupancy map.
 Zone setup (on the map window):
   Use the Draw Excav Zone button, then click 4 corners  - define excavation zone
   Use the Draw Deposit Zone button, then click 4 corners - define deposit zone
+  Use the Berm Left/Right buttons                      - stamp the official berm box
   Use the Pick Dig Start button, then click inside excavation - choose first strip
   Press 'r'                                                - start automated run
   Press 't'                                                - abort run at any time
@@ -90,6 +91,7 @@ class MiningAutomation:
         self.excav_corners_rc = []    # set after 4 clicks in DRAW_EXCAV
         self.deposit_corners_rc = []  # set after 4 clicks in DRAW_DEPOSIT
         self._click_buffer = []       # accumulates corners while drawing
+        self.deposit_zone_preset_side = None
 
         # Dig sweep
         self.dig_points_rc = []       # boustrophedon waypoints inside excav zone
@@ -159,6 +161,7 @@ class MiningAutomation:
             print("[Mining] Excavation zone defined.")
         else:
             self.deposit_corners_rc = corners
+            self.deposit_zone_preset_side = None
             self._deposit_approach_rc = None   # invalidate cached approach point
             print("[Mining] Deposit zone defined.")
 
@@ -180,6 +183,62 @@ class MiningAutomation:
     def start_draw_deposit(self):
         """Begin collecting four map clicks for the deposit zone."""
         self._start_draw(MiningState.DRAW_DEPOSIT, "deposit")
+
+    def set_deposit_zone_preset(self, side, occ_map):
+        """Stamp the official berm scoring box using the configured arena side."""
+        side_name = str(side or "").strip().lower()
+        if side_name not in ("left", "right"):
+            print(f"[Mining] Invalid berm preset side: {side}")
+            return False
+        if self._zones_edit_blocked():
+            print(f"[Mining] Cannot redefine zones while running "
+                  f"(state={self.state.value}). Press 't' to abort first.")
+            return False
+
+        center_x = self._cfg_float(
+            f"berm_{side_name}_center_x_m",
+            -6.80 if side_name == "left" else 6.80,
+        )
+        center_z = self._cfg_float("berm_center_z_m", 3.57)
+        width_x = max(0.10, self._cfg_float("berm_width_m", 1.50))
+        depth_z = max(0.10, self._cfg_float("berm_depth_m", 0.90))
+
+        half_w = 0.5 * width_x
+        half_d = 0.5 * depth_z
+        corners_world = [
+            (center_x - half_w, center_z - half_d),
+            (center_x + half_w, center_z - half_d),
+            (center_x + half_w, center_z + half_d),
+            (center_x - half_w, center_z + half_d),
+        ]
+
+        corners_rc = []
+        for world_x, world_z in corners_world:
+            rc = occ_map.world_to_grid(float(world_x), float(world_z))
+            if rc is None:
+                print(
+                    "[Mining] Berm preset is outside the current map bounds. "
+                    "This preset assumes the map frame is aligned to the UCF field "
+                    "origin at the divider/ingress corner."
+                )
+                return False
+            corners_rc.append(rc)
+
+        self.deposit_corners_rc = corners_rc
+        self.deposit_zone_preset_side = side_name
+        self._deposit_approach_rc = None
+        self.state = MiningState.IDLE
+        self._click_buffer = []
+        self.save_zones(occ_map)
+        print(
+            f"[Mining] Deposit zone set from {side_name} arena berm preset "
+            f"(center x={center_x:+.2f}m, z={center_z:.2f}m, size {width_x:.2f}m x {depth_z:.2f}m)."
+        )
+        print(
+            "[Mining] Preset assumes the occupancy map is field-aligned from starting-zone "
+            "localization; use landmarks for drift correction, not for absolute field placement."
+        )
+        return True
 
     def start_pick_dig_start(self):
         """Begin collecting one map click for the preferred dig start."""
@@ -551,6 +610,8 @@ class MiningAutomation:
                 "excav":   _rc_to_world(self.excav_corners_rc),
                 "deposit": _rc_to_world(self.deposit_corners_rc),
             }
+            if self.deposit_zone_preset_side:
+                data["deposit_zone_preset"] = str(self.deposit_zone_preset_side)
             if self.preferred_start_rc is not None:
                 w_start = occ_map.grid_to_world(
                     self.preferred_start_rc[0],
@@ -594,6 +655,8 @@ class MiningAutomation:
                 if len(rc) == 4:
                     self.deposit_corners_rc = rc
                     loaded = True
+            preset_side = str(data.get("deposit_zone_preset", "")).strip().lower()
+            self.deposit_zone_preset_side = preset_side if preset_side in ("left", "right") else None
             if "dig_start" in data and len(data["dig_start"]) == 2:
                 rc = occ_map.world_to_grid(
                     float(data["dig_start"][0]),
@@ -610,8 +673,8 @@ class MiningAutomation:
     # Internal helpers
     # -----------------------------------------------------------------------
 
-    def _start_draw(self, draw_state, name):
-        blocked = (
+    def _zones_edit_blocked(self):
+        return self.state in (
             MiningState.PLAN_SWEEP,
             MiningState.NAVIGATE_DIG,
             MiningState.DIGGING,
@@ -619,7 +682,9 @@ class MiningAutomation:
             MiningState.NAVIGATE_DEPOSIT,
             MiningState.DEPOSITING,
         )
-        if self.state in blocked:
+
+    def _start_draw(self, draw_state, name):
+        if self._zones_edit_blocked():
             print(f"[Mining] Cannot redefine zones while running "
                   f"(state={self.state.value}). Press 't' to abort first.")
             return
@@ -628,15 +693,7 @@ class MiningAutomation:
         print(f"[Mining] Drawing {name} zone — click 4 corners on the map.")
 
     def _start_pick_dig_start(self):
-        blocked = (
-            MiningState.PLAN_SWEEP,
-            MiningState.NAVIGATE_DIG,
-            MiningState.DIGGING,
-            MiningState.BACKUP,
-            MiningState.NAVIGATE_DEPOSIT,
-            MiningState.DEPOSITING,
-        )
-        if self.state in blocked:
+        if self._zones_edit_blocked():
             print(f"[Mining] Cannot pick dig start while running "
                   f"(state={self.state.value}). Press 't' to abort first.")
             return
@@ -699,6 +756,14 @@ class MiningAutomation:
         if isinstance(value, str):
             return value.strip().lower() not in ("0", "false", "no", "off", "")
         return bool(value)
+
+    def _cfg_float(self, key, default):
+        """Parse float-like config values from env/config dictionaries."""
+        value = self.cfg.get(key, default)
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
 
     @staticmethod
     def _poly_centroid(corners_rc):

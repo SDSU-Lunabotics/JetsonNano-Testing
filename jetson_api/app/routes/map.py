@@ -77,6 +77,8 @@ _SUPPORTED_UI_COMMANDS = {
     "camera_view",
     "draw_excav_zone",
     "draw_deposit_zone",
+    "set_berm_left",
+    "set_berm_right",
     "pick_dig_start",
     "brush_minus",
     "brush_plus",
@@ -97,6 +99,8 @@ def _default_ui_controls() -> List[MapUiControl]:
         MapUiControl(id="clear_all", label="Clear All", command="clear_all"),
         MapUiControl(id="draw_excav_zone", label="Draw Excav Zone", command="draw_excav_zone"),
         MapUiControl(id="draw_deposit_zone", label="Draw Deposit Zone", command="draw_deposit_zone"),
+        MapUiControl(id="set_berm_left", label="Berm: Left", command="set_berm_left"),
+        MapUiControl(id="set_berm_right", label="Berm: Right", command="set_berm_right"),
     ]
 
 

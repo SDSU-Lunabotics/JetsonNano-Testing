@@ -28,6 +28,8 @@ except Exception:
 
 STATUS_PANEL_W = int(os.getenv("ZED_STATUS_PANEL_W", "820"))
 STATUS_PANEL_H = int(os.getenv("ZED_STATUS_PANEL_H", "980"))
+DEFAULT_CAMERA_MAP_ANGLE_DEG = 180.0
+DEFAULT_CAMERA_DEPOSIT_ANGLE_DEG = 0.0
 
 LEFT_KEYS = {81, 2424832, 65361, 63234}
 UP_KEYS = {82, 2490368, 65362, 63232}
@@ -932,6 +934,17 @@ def main():
             err += 360.0
         return err
 
+    def camera_view_flip_active():
+        normal_error = (
+            abs(angle_error_deg(args.camera_map_angle_deg, DEFAULT_CAMERA_MAP_ANGLE_DEG))
+            + abs(angle_error_deg(args.camera_deposit_angle_deg, DEFAULT_CAMERA_DEPOSIT_ANGLE_DEG))
+        )
+        flipped_error = (
+            abs(angle_error_deg(args.camera_map_angle_deg, DEFAULT_CAMERA_DEPOSIT_ANGLE_DEG))
+            + abs(angle_error_deg(args.camera_deposit_angle_deg, DEFAULT_CAMERA_MAP_ANGLE_DEG))
+        )
+        return flipped_error < normal_error
+
     def servo_raw_to_logical(angle_deg):
         angle_deg = max(0.0, min(180.0, float(angle_deg)))
         if args.camera_servo_invert:
@@ -1209,6 +1222,11 @@ def main():
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
         "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
         "rover_size_m":          float(args.rover_size_m),
+        "berm_left_center_x_m":  float(os.getenv("MINING_BERM_LEFT_CENTER_X_M",   "-6.80")),
+        "berm_right_center_x_m": float(os.getenv("MINING_BERM_RIGHT_CENTER_X_M",  "6.80")),
+        "berm_center_z_m":       float(os.getenv("MINING_BERM_CENTER_Z_M",        "3.57")),
+        "berm_width_m":          float(os.getenv("MINING_BERM_WIDTH_M",           "1.50")),
+        "berm_depth_m":          float(os.getenv("MINING_BERM_DEPTH_M",           "0.90")),
         "zones_path":            os.getenv("MINING_ZONES_PATH",
                                            os.path.join(SCRIPT_DIR, "mining_zones.json")),
     }
@@ -1323,6 +1341,12 @@ def main():
     test_door_close_active = False
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
+    actuator_left_counts = None
+    actuator_right_counts = None
+    actuator_left_inches = None
+    actuator_right_inches = None
+    actuator_bottom_diff_counts = None
+    actuator_bottom_position_calibrated = None
     direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_fwd_cmd = 0.0
@@ -1869,6 +1893,10 @@ def main():
             return "draw_deposit_zone"
         if mining.state == auto_mining.MiningState.PICK_DIG_START:
             return "pick_dig_start"
+        if mining.deposit_zone_preset_side == "left":
+            return "set_berm_left"
+        if mining.deposit_zone_preset_side == "right":
+            return "set_berm_right"
         return None
 
     def clear_manual_paint():
@@ -1977,10 +2005,24 @@ def main():
                 return value
         return None
 
+    def _read_first_nt_bool(keys):
+        if sd is None:
+            return None
+        for key in keys:
+            try:
+                return bool(sd.getBoolean(key, False))
+            except Exception:
+                continue
+        return None
+
     def refresh_actuator_feedback():
         nonlocal actuator_left_extension_pct, actuator_right_extension_pct
+        nonlocal actuator_left_counts, actuator_right_counts
+        nonlocal actuator_left_inches, actuator_right_inches
+        nonlocal actuator_bottom_diff_counts, actuator_bottom_position_calibrated
         left_pct = _read_first_nt_number(
             (
+                "Excav/BotLeftExtensionPct",
                 "Jetson/ExcavatorLeftExtensionPct",
                 "Jetson/LeftActuatorExtensionPct",
                 "Excavator/LeftExtensionPct",
@@ -1988,9 +2030,50 @@ def main():
         )
         right_pct = _read_first_nt_number(
             (
+                "Excav/BotRightExtensionPct",
                 "Jetson/ExcavatorRightExtensionPct",
                 "Jetson/RightActuatorExtensionPct",
                 "Excavator/RightExtensionPct",
+            )
+        )
+        actuator_left_counts = _read_first_nt_number(
+            (
+                "Excav/BotLeftCounts",
+                "Jetson/ExcavatorLeftCounts",
+                "Jetson/LeftActuatorCounts",
+            )
+        )
+        actuator_right_counts = _read_first_nt_number(
+            (
+                "Excav/BotRightCounts",
+                "Jetson/ExcavatorRightCounts",
+                "Jetson/RightActuatorCounts",
+            )
+        )
+        actuator_left_inches = _read_first_nt_number(
+            (
+                "Excav/BotLeftInches",
+                "Jetson/ExcavatorLeftInches",
+                "Jetson/LeftActuatorInches",
+            )
+        )
+        actuator_right_inches = _read_first_nt_number(
+            (
+                "Excav/BotRightInches",
+                "Jetson/ExcavatorRightInches",
+                "Jetson/RightActuatorInches",
+            )
+        )
+        actuator_bottom_diff_counts = _read_first_nt_number(
+            (
+                "Excav/BottomDiffCounts",
+                "Jetson/ExcavatorBottomDiffCounts",
+            )
+        )
+        actuator_bottom_position_calibrated = _read_first_nt_bool(
+            (
+                "Excav/BottomPositionCalibrated",
+                "Jetson/ExcavatorBottomPositionCalibrated",
             )
         )
         actuator_left_extension_pct = None if left_pct is None else max(0.0, min(100.0, left_pct))
@@ -2581,9 +2664,9 @@ def main():
                 },
                 {
                     "id": "camera_view_flip",
-                    "label": "Flip Map/Depo",
+                    "label": "Flip Map/Depo: ON" if camera_view_flip_active() else "Flip Map/Depo",
                     "command": "camera_view_flip",
-                    "active": False,
+                    "active": bool(camera_view_flip_active()),
                     "enabled": True,
                 },
                 {
@@ -2756,6 +2839,20 @@ def main():
                     "label": "Draw Deposit Zone",
                     "command": "draw_deposit_zone",
                     "active": mining.state == auto_mining.MiningState.DRAW_DEPOSIT,
+                    "enabled": bool(button_enabled),
+                },
+                {
+                    "id": "set_berm_left",
+                    "label": "Berm: Left",
+                    "command": "set_berm_left",
+                    "active": mining.deposit_zone_preset_side == "left",
+                    "enabled": bool(button_enabled),
+                },
+                {
+                    "id": "set_berm_right",
+                    "label": "Berm: Right",
+                    "command": "set_berm_right",
+                    "active": mining.deposit_zone_preset_side == "right",
                     "enabled": bool(button_enabled),
                 },
                 {
@@ -3581,6 +3678,14 @@ def main():
             if mining_buttons_enabled():
                 set_brush_tool(None)
                 mining.start_draw_deposit()
+        elif action == "set_berm_left":
+            if mining_buttons_enabled():
+                set_brush_tool(None)
+                mining.set_deposit_zone_preset("left", occ_map)
+        elif action == "set_berm_right":
+            if mining_buttons_enabled():
+                set_brush_tool(None)
+                mining.set_deposit_zone_preset("right", occ_map)
         elif action == "pick_dig_start":
             if mining_buttons_enabled() and mining.excav_corners_rc:
                 set_brush_tool(None)
@@ -4086,11 +4191,24 @@ def main():
         refresh_actuator_feedback()
         left_pct_text = "n/a" if actuator_left_extension_pct is None else f"{actuator_left_extension_pct:.0f}%"
         right_pct_text = "n/a" if actuator_right_extension_pct is None else f"{actuator_right_extension_pct:.0f}%"
+        left_counts_text = "n/a" if actuator_left_counts is None else f"{int(round(actuator_left_counts))}"
+        right_counts_text = "n/a" if actuator_right_counts is None else f"{int(round(actuator_right_counts))}"
+        hall_state_text = (
+            "Hall sensors: OK"
+            if (actuator_left_counts is not None and actuator_right_counts is not None)
+            else "Hall sensors: no data"
+        )
         put_line(
             f"Actuator extension: Left {left_pct_text} | Right {right_pct_text}",
             servo_info_y + 360,
             (200, 240, 255),
             0.46,
+        )
+        put_line(
+            f"{hall_state_text} | counts L {left_counts_text} | R {right_counts_text}",
+            servo_info_y + 378,
+            (170, 255, 170) if (actuator_left_counts is not None and actuator_right_counts is not None) else (190, 190, 190),
+            0.43,
         )
 
         def draw_pct_bar(x0, y0, width, height, label, value, active):
@@ -4116,15 +4234,15 @@ def main():
             )
 
         pct_bar_w = max(180, min(260, panel_w - 220))
-        draw_pct_bar(16, servo_info_y + 376, pct_bar_w, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
-        draw_pct_bar(16, servo_info_y + 404, pct_bar_w, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
+        draw_pct_bar(16, servo_info_y + 398, pct_bar_w, 18, "Left actuator", actuator_left_extension_pct, test_excavation_left_extend_active)
+        draw_pct_bar(16, servo_info_y + 426, pct_bar_w, 18, "Right actuator", actuator_right_extension_pct, test_excavation_right_extend_active)
         put_line(
             "Dig profile name — click field, type a name, recording uses style+phase automatically",
-            servo_info_y + 444,
+            servo_info_y + 466,
             (170, 200, 230),
             0.44,
         )
-        dig_name_rect = (16, servo_info_y + 454, panel_w - 16, servo_info_y + 494)
+        dig_name_rect = (16, servo_info_y + 476, panel_w - 16, servo_info_y + 516)
         status_button_rects["dig_name_input"] = dig_name_rect
         dig_name_border = (100, 220, 255) if dig_name_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (dig_name_rect[0], dig_name_rect[1]), (dig_name_rect[2], dig_name_rect[3]), (40, 40, 40), -1)
@@ -4497,9 +4615,9 @@ def main():
         )
         draw_control_button(
             camera_view_flip_rect,
-            "Flip Map/Depo",
+            "Flip Map/Depo: ON" if camera_view_flip_active() else "Flip Map/Depo",
             True,
-            False,
+            bool(camera_view_flip_active()),
             (100, 90, 20),
             (220, 210, 120),
         )
@@ -4519,7 +4637,7 @@ def main():
         )
         cursor_y += cal_section_h + card_gap
 
-        actuators_section_h = 72 + 3 * (button_h + 10) + 52
+        actuators_section_h = 72 + 3 * (button_h + 10) + 102
         actuators_body_y = section_frame(
             cursor_y,
             actuators_section_h,
@@ -4595,6 +4713,49 @@ def main():
         put_control_line(
             door_mode_text,
             actuators_body_y + 3 * (button_h + 10) + 10,
+            (220, 232, 255),
+            0.41,
+            x=card_x0 + card_inner,
+        )
+        hall_counts_color = (
+            (170, 255, 170)
+            if (actuator_left_counts is not None and actuator_right_counts is not None)
+            else (190, 190, 190)
+        )
+        hall_counts_text = (
+            f"Hall counts: L {int(round(actuator_left_counts)) if actuator_left_counts is not None else 'n/a'}"
+            f" | R {int(round(actuator_right_counts)) if actuator_right_counts is not None else 'n/a'}"
+        )
+        hall_inches_text = (
+            f"Travel: L {actuator_left_inches:.2f} in | R {actuator_right_inches:.2f} in"
+            if (actuator_left_inches is not None and actuator_right_inches is not None)
+            else "Travel: L n/a | R n/a"
+        )
+        hall_meta_parts = []
+        if actuator_bottom_diff_counts is not None:
+            hall_meta_parts.append(f"diff {int(round(actuator_bottom_diff_counts))}")
+        if actuator_bottom_position_calibrated is not None:
+            hall_meta_parts.append(
+                "home set" if actuator_bottom_position_calibrated else "home unset"
+            )
+        hall_meta_text = "Hall feedback: " + (" | ".join(hall_meta_parts) if hall_meta_parts else "status unavailable")
+        put_control_line(
+            hall_counts_text,
+            actuators_body_y + 3 * (button_h + 10) + 30,
+            hall_counts_color,
+            0.41,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            hall_inches_text,
+            actuators_body_y + 3 * (button_h + 10) + 50,
+            (220, 232, 255),
+            0.41,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            hall_meta_text,
+            actuators_body_y + 3 * (button_h + 10) + 70,
             (220, 232, 255),
             0.41,
             x=card_x0 + card_inner,
