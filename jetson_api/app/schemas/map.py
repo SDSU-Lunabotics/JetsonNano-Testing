@@ -94,7 +94,8 @@ class MapUiCommandRequest(BaseModel):
             "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius."
             "auto_digger, camera_overlay, drive_heading_flip, display_heading_flip, direct_nav, "
             "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
-            "draw_deposit_zone, pick_dig_start, brush_minus, brush_plus, set_brush_radius, "
+            "draw_deposit_zone, set_berm_left, set_berm_right, pick_dig_start, "
+            "brush_minus, brush_plus, set_brush_radius, "
             "auto_digger, camera_overlay, drive_heading_flip, hard_drive_flip, "
             "camera_view_flip, display_heading_flip, "
             "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
@@ -104,7 +105,8 @@ class MapUiCommandRequest(BaseModel):
             "test_excavation_left_extend, test_excavation_right_extend, "
             "test_excavation_lower, door_open, door_close, stop_actuators, "
             "main_rover_mode, camera_view, draw_excav_zone, draw_deposit_zone, "
-            "pick_dig_start, brush_minus, brush_plus, set_brush_radius."
+            "set_berm_left, set_berm_right, pick_dig_start, brush_minus, "
+            "brush_plus, set_brush_radius."
         )
     )
     source: Optional[str] = None
