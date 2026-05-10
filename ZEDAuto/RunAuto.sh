@@ -263,6 +263,22 @@ if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
   cmd+=(--map-publish-timeout-ms "${MAP_PUBLISH_TIMEOUT_MS:-250}")
   cmd+=(--map-publish-source "${MAP_PUBLISH_SOURCE:-zed_ground_wall}")
 fi
+if [[ "${AUTO_START_LIDAR:-0}" == "1" ]]; then
+  cmd+=(--auto-start-lidar)
+  cmd+=(--lidar-host "${LIDAR_HOST:-10.0.8.60}")
+  cmd+=(--lidar-pose-file "${LIDAR_POSE_FILE:-/tmp/lidar_pose.json}")
+  cmd+=(--lidar-overlay-file "${LIDAR_OVERLAY_FILE:-/tmp/lidar_overlay.json}")
+  cmd+=(--lidar-overlay-stride "${LIDAR_OVERLAY_STRIDE:-1}")
+  if [[ -n "${LIDAR_PYTHON:-}" ]]; then cmd+=(--lidar-python "${LIDAR_PYTHON}"); fi
+  if [[ -n "${LIDAR_SCRIPT_PATH:-}" ]]; then cmd+=(--lidar-script "${LIDAR_SCRIPT_PATH}"); fi
+  if [[ "${LIDAR_WEBUI:-1}" == "1" ]]; then
+    cmd+=(--lidar-webui)
+    cmd+=(--lidar-viewer-id "${LIDAR_VIEWER_ID:-view}")
+  else
+    cmd+=(--lidar-no-webui)
+    cmd+=(--lidar-port "${LIDAR_PORT:-2111}")
+  fi
+fi
 if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
 if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 if [[ "${MANUAL_START:-0}" == "1" ]]; then cmd+=(--manual-start); fi

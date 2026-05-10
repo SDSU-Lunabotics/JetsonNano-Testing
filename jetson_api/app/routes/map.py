@@ -50,6 +50,7 @@ _SUPPORTED_UI_COMMANDS = {
     "set_control_mode",
     "auto_digger",
     "camera_overlay",
+    "lidar_view",
     "drive_heading_flip",
     "hard_drive_flip",
     "camera_view_flip",

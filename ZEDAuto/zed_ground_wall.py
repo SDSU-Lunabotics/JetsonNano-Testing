@@ -11,6 +11,7 @@ import argparse
 import os
 import math
 import json
+import subprocess
 import numpy as np
 
 try:
@@ -557,6 +558,19 @@ def main():
     parser.add_argument("--stream-view", default="both", choices=["camera", "map", "both"], help="Which view to stream")
     parser.add_argument("--map-command-file", default=os.path.join(SCRIPT_DIR, "zed_map_command.json"), help="Path to UI-issued map waypoint command file")
     parser.add_argument("--map-ui-state-file", default=os.path.join(SCRIPT_DIR, "zed_map_ui_state.json"), help="Path to published UI state JSON for remote map controls")
+    parser.add_argument("--lidar-overlay-file", default="/tmp/lidar_overlay.json", help="Path to world-frame LiDAR overlay JSON produced by the lidar visualizer")
+    parser.add_argument("--lidar-overlay-max-age", type=float, default=1.0, help="Maximum LiDAR overlay age in seconds before it is treated as stale")
+    parser.add_argument("--auto-start-lidar", action="store_true", help="Launch the lidar overlay companion process automatically")
+    parser.add_argument("--lidar-script", default=os.path.join(os.path.dirname(SCRIPT_DIR), "lidar", "main.py"), help="Path to the lidar companion script")
+    parser.add_argument("--lidar-python", default=sys.executable, help="Python executable used to launch the lidar companion")
+    parser.add_argument("--lidar-host", default="10.0.8.60", help="Host/IP passed to the lidar companion")
+    parser.add_argument("--lidar-port", type=int, default=2111, help="TCP port passed to the lidar companion in direct-scan mode")
+    parser.add_argument("--lidar-webui", action="store_true", dest="lidar_webui", help="Launch the lidar companion in web UI stream mode")
+    parser.add_argument("--lidar-no-webui", action="store_false", dest="lidar_webui", help="Launch the lidar companion in direct SOPAS mode")
+    parser.set_defaults(lidar_webui=True)
+    parser.add_argument("--lidar-viewer-id", default="view", help="Viewer ID passed to the lidar companion in web UI mode")
+    parser.add_argument("--lidar-pose-file", default="/tmp/lidar_pose.json", help="Pose JSON path shared with the lidar companion")
+    parser.add_argument("--lidar-overlay-stride", type=int, default=1, help="Publish every Nth LiDAR point when auto-starting the companion")
     parser.add_argument("--drive-calibration-file", default=os.path.join(SCRIPT_DIR, "zed_drive_calibration.json"), help="Path to saved drive-calibration JSON")
     parser.add_argument("--dig-profiles-path", default=os.path.join(SCRIPT_DIR, "zed_dig_profiles.json"), help="Path to recorded dig profile library JSON")
     parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
@@ -806,6 +820,51 @@ def main():
                 source=args.map_publish_source,
             )
             print(f"Map publish enabled: {args.map_publish_url}")
+
+    lidar_process = None
+
+    def _start_lidar_companion():
+        lidar_script = os.path.abspath(args.lidar_script)
+        lidar_python = args.lidar_python or sys.executable
+        if not os.path.exists(lidar_script):
+            print(f"[WARN] LiDAR companion script not found: {lidar_script}")
+            return None
+
+        cmd = [
+            lidar_python,
+            lidar_script,
+            "--host",
+            str(args.lidar_host),
+            "--pose-file",
+            str(args.lidar_pose_file),
+            "--overlay-file",
+            str(args.lidar_overlay_file),
+            "--overlay-stride",
+            str(max(1, int(args.lidar_overlay_stride))),
+            "--headless",
+        ]
+        if args.lidar_webui:
+            cmd.extend(["--webui", "--viewer-id", str(args.lidar_viewer_id)])
+        else:
+            cmd.extend(["--port", str(args.lidar_port)])
+
+        try:
+            env = os.environ.copy()
+            env.setdefault("MPLBACKEND", "Agg")
+            proc = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(lidar_script),
+                env=env,
+            )
+        except Exception as exc:
+            print(f"[WARN] Failed to start LiDAR companion: {exc}")
+            return None
+
+        print(f"LiDAR companion started: {' '.join(cmd)}")
+        return proc
+
+    if args.auto_start_lidar:
+        lidar_process = _start_lidar_companion()
 
     print("Running. Press Ctrl+C to exit.")
     mapping_mode = "complex" if args.complex else "simple"
@@ -1331,6 +1390,7 @@ def main():
     status_target_cell = None
     status_target_world = None
     camera_overlay_enabled = True
+    lidar_view_enabled = bool(args.auto_start_lidar)
     auto_digger_enabled = False
     test_excavation_left_extend_active = False
     test_excavation_right_extend_active = False
@@ -1399,6 +1459,13 @@ def main():
     lock_green_locked_count = 0
     last_map_command_seq = 0
     last_map_ui_state_write = 0.0
+    lidar_overlay_cached_mtime = None
+    lidar_overlay_points_world = []
+    lidar_overlay_pose_xy = None
+    lidar_overlay_last_timestamp = 0.0
+    lidar_overlay_live = False
+    lidar_overlay_point_count = 0
+    lidar_overlay_last_error_log = 0.0
 
     def _write_json_atomic(path, payload):
         if not path:
@@ -1413,6 +1480,90 @@ def main():
             os.replace(tmp_path, path)
         except Exception:
             pass
+
+    def load_lidar_overlay(force=False):
+        nonlocal lidar_overlay_cached_mtime, lidar_overlay_points_world
+        nonlocal lidar_overlay_pose_xy, lidar_overlay_last_timestamp
+        nonlocal lidar_overlay_live, lidar_overlay_point_count, lidar_overlay_last_error_log
+        path = args.lidar_overlay_file
+        if not path:
+            lidar_overlay_points_world = []
+            lidar_overlay_pose_xy = None
+            lidar_overlay_last_timestamp = 0.0
+            lidar_overlay_live = False
+            lidar_overlay_point_count = 0
+            return
+
+        try:
+            stat = os.stat(path)
+        except OSError:
+            lidar_overlay_points_world = []
+            lidar_overlay_pose_xy = None
+            lidar_overlay_last_timestamp = 0.0
+            lidar_overlay_live = False
+            lidar_overlay_point_count = 0
+            lidar_overlay_cached_mtime = None
+            return
+
+        now = time.time()
+        if (not force) and lidar_overlay_cached_mtime == stat.st_mtime:
+            lidar_overlay_live = (
+                lidar_overlay_last_timestamp > 0.0
+                and (now - float(lidar_overlay_last_timestamp)) <= float(args.lidar_overlay_max_age)
+            )
+            lidar_overlay_point_count = int(len(lidar_overlay_points_world))
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception as exc:
+            if (now - lidar_overlay_last_error_log) >= 5.0:
+                print(f"LiDAR overlay read failed: {exc}")
+                lidar_overlay_last_error_log = now
+            lidar_overlay_points_world = []
+            lidar_overlay_pose_xy = None
+            lidar_overlay_last_timestamp = 0.0
+            lidar_overlay_live = False
+            lidar_overlay_point_count = 0
+            return
+
+        points_world = []
+        for item in payload.get("points_world", []):
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            try:
+                px = float(item[0])
+                py = float(item[1])
+            except Exception:
+                continue
+            if not (np.isfinite(px) and np.isfinite(py)):
+                continue
+            points_world.append((px, py))
+
+        pose_payload = payload.get("pose")
+        pose_xy = None
+        if isinstance(pose_payload, dict):
+            try:
+                pose_x = float(pose_payload.get("x"))
+                pose_y = float(pose_payload.get("y"))
+                if np.isfinite(pose_x) and np.isfinite(pose_y):
+                    pose_xy = (pose_x, pose_y)
+            except Exception:
+                pose_xy = None
+
+        source_ts = payload.get("timestamp", stat.st_mtime)
+        try:
+            source_ts = float(source_ts)
+        except Exception:
+            source_ts = float(stat.st_mtime)
+
+        lidar_overlay_cached_mtime = stat.st_mtime
+        lidar_overlay_points_world = points_world
+        lidar_overlay_pose_xy = pose_xy
+        lidar_overlay_last_timestamp = source_ts
+        lidar_overlay_live = (now - source_ts) <= float(args.lidar_overlay_max_age)
+        lidar_overlay_point_count = int(len(points_world))
 
     def _json_vec3(value):
         arr = np.array(value, dtype=np.float32).reshape(3,)
@@ -2145,6 +2296,17 @@ def main():
         print(f"Camera overlay {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_lidar_view_enabled(enabled, source="button"):
+        nonlocal lidar_view_enabled
+        enabled = bool(enabled)
+        if lidar_view_enabled == enabled:
+            return
+        lidar_view_enabled = enabled
+        if enabled:
+            load_lidar_overlay(force=True)
+        print(f"LiDAR overlay view {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def save_calibration_settings(result_text):
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
@@ -2649,6 +2811,13 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "lidar_view",
+                    "label": "LiDAR View",
+                    "command": "lidar_view",
+                    "active": bool(lidar_view_enabled),
+                    "enabled": True,
+                },
+                {
                     "id": "drive_heading_flip",
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
@@ -2929,6 +3098,37 @@ def main():
         cv2.circle(frame, (dc, dr), 3, color, -1)
         if is_person:
             cv2.circle(frame, (dc, dr), 6, color, 1)
+
+    def draw_lidar_overlay(frame):
+        if frame is None or (not lidar_view_enabled):
+            return
+        load_lidar_overlay()
+        if not lidar_overlay_points_world:
+            return
+
+        h, w = frame.shape[:2]
+        dot_color = (255, 255, 0)
+        for world_x_m, world_y_m in lidar_overlay_points_world:
+            rc = map_world_to_grid(world_x_m, world_y_m)
+            if rc is None:
+                continue
+            display_cell = display_cell_for_map_cell(rc[0], rc[1], frame)
+            if display_cell is None:
+                continue
+            dr, dc = display_cell
+            r0 = max(0, dr - 1)
+            r1 = min(h, dr + 2)
+            c0 = max(0, dc - 1)
+            c1 = min(w, dc + 2)
+            frame[r0:r1, c0:c1, :] = dot_color
+
+        if lidar_overlay_pose_xy is not None:
+            rc = map_world_to_grid(lidar_overlay_pose_xy[0], lidar_overlay_pose_xy[1])
+            if rc is not None:
+                display_cell = display_cell_for_map_cell(rc[0], rc[1], frame)
+                if display_cell is not None:
+                    dr, dc = display_cell
+                    cv2.drawMarker(frame, (dc, dr), (255, 180, 0), cv2.MARKER_CROSS, 10, 1, cv2.LINE_AA)
 
     def heading_vec_from_world(rover_pos_world, forward_world):
         if rover_pos_world is None or forward_world is None:
@@ -3351,6 +3551,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_camera_overlay_enabled(not camera_overlay_enabled, "button")
                 return
+        rect = status_button_rects.get("lidar_view")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_view_enabled(not lidar_view_enabled, "button")
+                return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3633,6 +3839,8 @@ def main():
             toggle_camera_view()
         elif action == "camera_overlay":
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
+        elif action == "lidar_view":
+            set_lidar_view_enabled(not lidar_view_enabled, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -4055,9 +4263,15 @@ def main():
         map_state = "ACTIVE" if map_integration_ok else "PAUSED"
         map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
         map_mode = "COMPLEX" if args.complex else "SIMPLE"
+        if not lidar_view_enabled:
+            lidar_state = "OFF"
+        elif lidar_overlay_live:
+            lidar_state = f"ON {lidar_overlay_point_count}pts"
+        else:
+            lidar_state = "STALE"
         map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
         put_line(
-            f"Map: {map_state} {map_mode} | Follow: {'ON' if follow_rover_map else 'OFF'} | View: {map_view_mode} | Pts: {last_map_point_count}",
+            f"Map: {map_state} {map_mode} | Follow: {'ON' if follow_rover_map else 'OFF'} | View: {map_view_mode} | Pts: {last_map_point_count} | LiDAR: {lidar_state}",
             168,
             map_state_color,
             0.46,
@@ -4501,7 +4715,7 @@ def main():
             )
         cursor_y += map_section_h + card_gap
 
-        zones_section_h = 72 + 2 * (button_h + 10) + 20
+        zones_section_h = 72 + 3 * (button_h + 10) + 20
         zones_body_y = section_frame(
             cursor_y,
             zones_section_h,
@@ -4516,6 +4730,7 @@ def main():
         camera_view_rect = grid_rect(zones_body_y, 1, 0)
         camera_overlay_rect = grid_rect(zones_body_y, 1, 1)
         auto_digger_rect = grid_rect(zones_body_y, 1, 2)
+        lidar_view_rect = grid_rect(zones_body_y, 2, 0)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -4557,6 +4772,14 @@ def main():
             auto_digger_enabled,
             (0, 140, 60),
             (110, 255, 150),
+        )
+        draw_control_button(
+            lidar_view_rect,
+            "LiDAR View: ON" if lidar_view_enabled else "LiDAR View",
+            True,
+            lidar_view_enabled,
+            (0, 130, 180),
+            (120, 240, 255),
         )
         cursor_y += zones_section_h + card_gap
 
@@ -4909,6 +5132,7 @@ def main():
             ("main_rover_mode", main_rover_rect),
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
+            ("lidar_view", lidar_view_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -5078,6 +5302,19 @@ def main():
                 )
             # Update camera pose (world frame) if tracking is enabled.
             if tracking_enabled:
+                # --- Write ZED pose for lidar integration ---
+                try:
+                    # Use last_valid_t_world_cam (x, y) and heading from last_valid_rover_forward_world
+                    x = float(last_valid_t_world_cam[0])
+                    y = float(last_valid_t_world_cam[2])  # Z is forward in world frame
+                    heading_rad = math.atan2(
+                        float(last_valid_rover_forward_world[2]),
+                        float(last_valid_rover_forward_world[0])
+                    )
+                    import zed_utils
+                    zed_utils.write_lidar_pose_json(x, y, heading_rad)
+                except Exception as exc:
+                    print(f"[LidarPose] Failed to write pose: {exc}")
                 raw_R_world_cam, raw_t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(
                     zed, sl, pose, pose_warned
                 )
@@ -5932,6 +6169,7 @@ def main():
                     # Optional display-only map recentering around rover.
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
+                    draw_lidar_overlay(map_vis)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if map_red_only_view:
@@ -6240,6 +6478,7 @@ def main():
                             )
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
+                    draw_lidar_overlay(map_vis)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if map_red_only_view:
@@ -6619,6 +6858,17 @@ def main():
             "controls": [],
         },
     )
+    if lidar_process is not None:
+        try:
+            if lidar_process.poll() is None:
+                lidar_process.terminate()
+                try:
+                    lidar_process.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    lidar_process.kill()
+                    lidar_process.wait(timeout=2.0)
+        except Exception:
+            pass
     if camera_heartbeat is not None:
         camera_heartbeat.stop()
     if camera_publisher is not None:
