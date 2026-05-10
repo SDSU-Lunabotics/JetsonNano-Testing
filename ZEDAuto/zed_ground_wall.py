@@ -5311,7 +5311,6 @@ def main():
                         float(last_valid_rover_forward_world[2]),
                         float(last_valid_rover_forward_world[0])
                     )
-                    import zed_utils
                     zed_utils.write_lidar_pose_json(x, y, heading_rad)
                 except Exception as exc:
                     print(f"[LidarPose] Failed to write pose: {exc}")
