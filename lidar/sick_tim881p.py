@@ -2,7 +2,7 @@
 SICK TIM881P-2100101 LiDAR driver using SOPAS CoLa A protocol over TCP/IP.
 
 Default network settings:
-    IP   : 10.0.8.60
+    IP   : 10.0.9.60
   Port : 2111  (CoLa A / ASCII)
 
 Protocol overview
@@ -46,12 +46,12 @@ class SickTIM881P:
 
     Usage (single-shot polling)::
 
-        with SickTIM881P(host='10.0.8.60') as lidar:
+        with SickTIM881P(host='10.0.9.60') as lidar:
             scan = lidar.poll_scan()
 
     Usage (continuous stream)::
 
-        with SickTIM881P(host='10.0.8.60') as lidar:
+        with SickTIM881P(host='10.0.9.60') as lidar:
             lidar.start_continuous_scan()
             while True:
                 scan = lidar.read_continuous_scan()
@@ -60,7 +60,7 @@ class SickTIM881P:
     _STX = b'\x02'
     _ETX = b'\x03'
 
-    DEFAULT_HOST = '10.0.8.60'
+    DEFAULT_HOST = '10.0.9.60'
     DEFAULT_PORT = 2111
 
     def __init__(

@@ -12,7 +12,7 @@ from sick_tim881p import SickTIM881P
 
 def main():
     parser = argparse.ArgumentParser(description='Live LiDAR points')
-    parser.add_argument('--host', default='10.0.8.60', help='Sensor IP')
+    parser.add_argument('--host', default='10.0.9.60', help='Sensor IP')
     parser.add_argument('--port', default=2111, type=int, help='SOPAS port')
     parser.add_argument('--max-range', default=10.0, type=float, help='Max range in metres')
     parser.add_argument('--continuous', action='store_true', help='Use continuous stream')

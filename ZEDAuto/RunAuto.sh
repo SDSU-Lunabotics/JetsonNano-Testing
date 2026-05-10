@@ -265,7 +265,7 @@ if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
 fi
 if [[ "${AUTO_START_LIDAR:-0}" == "1" ]]; then
   cmd+=(--auto-start-lidar)
-  cmd+=(--lidar-host "${LIDAR_HOST:-10.0.8.60}")
+  cmd+=(--lidar-host "${LIDAR_HOST:-10.0.9.60}")
   cmd+=(--lidar-pose-file "${LIDAR_POSE_FILE:-/tmp/lidar_pose.json}")
   cmd+=(--lidar-overlay-file "${LIDAR_OVERLAY_FILE:-/tmp/lidar_overlay.json}")
   cmd+=(--lidar-overlay-stride "${LIDAR_OVERLAY_STRIDE:-1}")

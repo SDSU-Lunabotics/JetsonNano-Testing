@@ -563,7 +563,7 @@ def main():
     parser.add_argument("--auto-start-lidar", action="store_true", help="Launch the lidar overlay companion process automatically")
     parser.add_argument("--lidar-script", default=os.path.join(os.path.dirname(SCRIPT_DIR), "lidar", "main.py"), help="Path to the lidar companion script")
     parser.add_argument("--lidar-python", default=sys.executable, help="Python executable used to launch the lidar companion")
-    parser.add_argument("--lidar-host", default="10.0.8.60", help="Host/IP passed to the lidar companion")
+    parser.add_argument("--lidar-host", default="10.0.9.60", help="Host/IP passed to the lidar companion")
     parser.add_argument("--lidar-port", type=int, default=2111, help="TCP port passed to the lidar companion in direct-scan mode")
     parser.add_argument("--lidar-webui", action="store_true", dest="lidar_webui", help="Launch the lidar companion in web UI stream mode")
     parser.add_argument("--lidar-no-webui", action="store_false", dest="lidar_webui", help="Launch the lidar companion in direct SOPAS mode")

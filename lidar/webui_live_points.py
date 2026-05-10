@@ -4,7 +4,7 @@ Read live scan points from the TiM881P web UI websocket feed (crownJSON).
 This mirrors what the browser scan viewer uses, avoiding SOPAS desktop tools.
 
 Example:
-    python webui_live_points.py --host 10.0.8.60 --viewer-id view
+    python webui_live_points.py --host 10.0.9.60 --viewer-id view
 """
 
 from __future__ import annotations
@@ -325,7 +325,7 @@ class WebUIScanSource(CrownJSONClient):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read live points from TiM881P web UI websocket feed")
-    parser.add_argument("--host", default="10.0.8.60", help="Sensor web host (default: 10.0.8.60)")
+    parser.add_argument("--host", default="10.0.9.60", help="Sensor web host (default: 10.0.9.60)")
     parser.add_argument("--viewer-id", default="view", help="Viewer ID used by UI (default: view)")
     args = parser.parse_args()
 

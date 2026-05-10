@@ -4,17 +4,17 @@ Live 2-D LiDAR mapping application for the SICK TIM881P-2100101.
 Usage
 -----
 # Real hardware (set your sensor's IP):
-    python main.py --host 10.0.8.60
+    python main.py --host 10.0.9.60
 
 # Browser/web UI stream from the device:
-    python main.py --webui --host 10.0.8.60
+    python main.py --webui --host 10.0.9.60
 
 # Demo / simulation (no hardware required):
     python main.py --demo
 
 Options
 -------
-    --host HOST        Sensor IP address       (default: 10.0.8.60)
+    --host HOST        Sensor IP address       (default: 10.0.9.60)
   --port PORT        SOPAS TCP port          (default: 2111)
   --demo             Run with simulated data
   --map-size M       Map edge in metres      (default: 12.0)
@@ -457,7 +457,7 @@ def _parse_args() -> argparse.Namespace:
         description='Live 2-D LiDAR map for SICK TIM881P-2100101',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument('--host',       default='10.0.8.60', help='Sensor IP address')
+    p.add_argument('--host',       default='10.0.9.60', help='Sensor IP address')
     p.add_argument('--port',       default=2111, type=int, help='SOPAS TCP port')
     p.add_argument('--demo',       action='store_true',    help='Run with simulated data')
     p.add_argument('--webui',      action='store_true',    help='Use the device web UI websocket stream')
