@@ -1391,6 +1391,7 @@ def main():
     status_target_world = None
     camera_overlay_enabled = True
     lidar_view_enabled = bool(args.auto_start_lidar)
+    lidar_only_view = False
     auto_digger_enabled = False
     test_excavation_left_extend_active = False
     test_excavation_right_extend_active = False
@@ -2307,6 +2308,17 @@ def main():
         print(f"LiDAR overlay view {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_lidar_only_view_enabled(enabled, source="button"):
+        nonlocal lidar_only_view
+        enabled = bool(enabled)
+        if lidar_only_view == enabled:
+            return
+        lidar_only_view = enabled
+        if enabled and (not lidar_view_enabled):
+            set_lidar_view_enabled(True, source)
+        print(f"LiDAR-only view {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def save_calibration_settings(result_text):
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
@@ -2818,6 +2830,13 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "lidar_only_view",
+                    "label": "LiDAR Only",
+                    "command": "lidar_only_view",
+                    "active": bool(lidar_only_view),
+                    "enabled": True,
+                },
+                {
                     "id": "drive_heading_flip",
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
@@ -3103,12 +3122,12 @@ def main():
         if frame is None or (not lidar_view_enabled):
             return
         load_lidar_overlay()
-        if not lidar_overlay_points_world:
+        if (not lidar_overlay_live) or (not lidar_overlay_points_world):
             return
 
         h, w = frame.shape[:2]
-        outline_color = (0, 255, 255)
-        center_color = (210, 255, 255)
+        fill_color = (0, 255, 255)
+        center_color = (255, 255, 255)
         shadow_color = (0, 0, 0)
         for world_x_m, world_y_m in lidar_overlay_points_world:
             rc = map_world_to_grid(world_x_m, world_y_m)
@@ -3122,9 +3141,9 @@ def main():
                 frame[dr, dc, :] = center_color
                 continue
 
-            # Draw a dark backing first so LiDAR points remain visible over bright map pixels.
+            # Draw a dark backing first so live LiDAR points stay visible over the map.
             cv2.circle(frame, (dc, dr), 3, shadow_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, (dc, dr), 2, outline_color, 1, cv2.LINE_AA)
+            cv2.circle(frame, (dc, dr), 2, fill_color, -1, cv2.LINE_AA)
             frame[dr, dc, :] = center_color
 
         if lidar_overlay_pose_xy is not None:
@@ -3562,6 +3581,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_lidar_view_enabled(not lidar_view_enabled, "button")
                 return
+        rect = status_button_rects.get("lidar_only_view")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_only_view_enabled(not lidar_only_view, "button")
+                return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3846,6 +3871,8 @@ def main():
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
         elif action == "lidar_view":
             set_lidar_view_enabled(not lidar_view_enabled, "external command")
+        elif action == "lidar_only_view":
+            set_lidar_only_view_enabled(not lidar_only_view, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -4266,7 +4293,10 @@ def main():
             0.50,
         )
         map_state = "ACTIVE" if map_integration_ok else "PAUSED"
-        map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
+        if lidar_only_view:
+            map_view_mode = "LIDAR-ONLY"
+        else:
+            map_view_mode = "RED-ONLY" if map_red_only_view else "NORMAL"
         map_mode = "COMPLEX" if args.complex else "SIMPLE"
         if not lidar_view_enabled:
             lidar_state = "OFF"
@@ -4736,6 +4766,7 @@ def main():
         camera_overlay_rect = grid_rect(zones_body_y, 1, 1)
         auto_digger_rect = grid_rect(zones_body_y, 1, 2)
         lidar_view_rect = grid_rect(zones_body_y, 2, 0)
+        lidar_only_rect = grid_rect(zones_body_y, 2, 1)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -4785,6 +4816,14 @@ def main():
             lidar_view_enabled,
             (0, 130, 180),
             (120, 240, 255),
+        )
+        draw_control_button(
+            lidar_only_rect,
+            "LiDAR Only: ON" if lidar_only_view else "LiDAR Only",
+            True,
+            lidar_only_view,
+            (0, 110, 155),
+            (140, 255, 255),
         )
         cursor_y += zones_section_h + card_gap
 
@@ -5138,6 +5177,7 @@ def main():
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
             ("lidar_view", lidar_view_rect),
+            ("lidar_only_view", lidar_only_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -6144,7 +6184,9 @@ def main():
                     # it scrolls correctly with the follow-rover map view).
                     mining.render_overlay(map_vis, occ_map)
 
-                    if args.heatmap:
+                    if lidar_only_view:
+                        map_vis[:] = 0
+                    elif args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
                             mode=args.heatmap_mode,
@@ -6173,7 +6215,6 @@ def main():
                     # Optional display-only map recentering around rover.
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
-                    draw_lidar_overlay(map_vis)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if map_red_only_view:
@@ -6187,6 +6228,7 @@ def main():
                             1,
                             cv2.LINE_AA,
                         )
+                    draw_lidar_overlay(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
@@ -6468,7 +6510,9 @@ def main():
                         mesh_viewer.poll()
                 else:
                     map_vis = occ_map.render(whole_mode=whole_map_enabled)
-                    if args.heatmap:
+                    if lidar_only_view:
+                        map_vis[:] = 0
+                    elif args.heatmap:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
                             mode=args.heatmap_mode,
@@ -6482,7 +6526,6 @@ def main():
                             )
                     map_vis, map_view_shift_r, map_view_shift_c = apply_map_view(map_vis, rover_row_col)
                     draw_rover_overlay(map_vis, rover_row_col, cam_row_col, rover_heading_vec_rc)
-                    draw_lidar_overlay(map_vis)
                     mining.render_status_banner(map_vis)
                     draw_localization_banner(map_vis)
                     if map_red_only_view:
@@ -6496,6 +6539,7 @@ def main():
                             1,
                             cv2.LINE_AA,
                         )
+                    draw_lidar_overlay(map_vis)
                     if args.heatmap and args.heatmap_window and heatmap_vis is not None:
                         heatmap_vis, _, _ = apply_map_view(heatmap_vis, rover_row_col)
 
@@ -6657,6 +6701,7 @@ def main():
                     draw_landmarks(display_map_vis)
                     for pr, pc_col, is_p in human_person_map_points:
                         draw_live_detection_marker(display_map_vis, pr, pc_col, is_p)
+                    draw_lidar_overlay(display_map_vis)
                     if args.map_scale > 1:
                         display_map_vis = cv2.resize(
                             display_map_vis,
@@ -6676,7 +6721,8 @@ def main():
                         draw_landmarks(map_window_vis)
                         for pr, pc_col, is_p in human_person_map_points:
                             draw_live_detection_marker(map_window_vis, pr, pc_col, is_p)
-                        if map_red_only_view:
+                        draw_lidar_overlay(map_window_vis)
+                        if map_red_only_view and (not lidar_only_view):
                             # Red-only map mode for easier obstacle inspection.
                             map_window_vis[:, :, 0] = 0
                             map_window_vis[:, :, 1] = 0

@@ -77,7 +77,7 @@ class MapUiCommandRequest(BaseModel):
             "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
             "draw_deposit_zone, set_berm_left, set_berm_right, pick_dig_start, "
             "brush_minus, brush_plus, set_brush_radius, "
-            "auto_digger, camera_overlay, lidar_view, drive_heading_flip, hard_drive_flip, "
+            "auto_digger, camera_overlay, lidar_view, lidar_only_view, drive_heading_flip, hard_drive_flip, "
             "camera_view_flip, display_heading_flip, "
             "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
             "dig_phase_cycle, dig_record_dig, dig_record_retract, dig_record_stop, "
