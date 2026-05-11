@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -50,6 +51,10 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+
+def _wrap_angle_array(angle_rad: np.ndarray) -> np.ndarray:
+    return np.arctan2(np.sin(angle_rad), np.cos(angle_rad))
 
 
 def _write_json_atomic(path: str, payload: dict) -> None:
@@ -222,6 +227,7 @@ class _AppState:
         self.pose_source = None
         self.args     = args
         self.frame    = 0
+        self.sensor_yaw_offset_rad = math.radians(float(args.sensor_yaw_offset_deg))
         self._last_webui_warn_ts = 0.0
         self._interactive = bool(fig is not None and ax_polar is not None and ax_map is not None)
         self.img = None
@@ -302,12 +308,18 @@ class _AppState:
                 if pose_fresh:
                     self.mapper.sensor_x_m = float(pose_x_m)
                     self.mapper.sensor_y_m = float(pose_y_m)
-                self.mapper.set_external_yaw(pose_yaw_rad, is_fresh=pose_fresh)
+                self.mapper.set_external_yaw(
+                    pose_yaw_rad + self.sensor_yaw_offset_rad,
+                    is_fresh=pose_fresh,
+                )
 
         if self.yaw_source is not None:
             yaw_rad, yaw_fresh = self.yaw_source.read_yaw_rad()
             if yaw_rad is not None:
-                self.mapper.set_external_yaw(yaw_rad, is_fresh=yaw_fresh)
+                self.mapper.set_external_yaw(
+                    yaw_rad + self.sensor_yaw_offset_rad,
+                    is_fresh=yaw_fresh,
+                )
 
         # ── Update mapper ───────────────────────────────────────────────────
         self.mapper.update(scan)
@@ -377,6 +389,26 @@ class _AppState:
 
         angles = angles[valid]
         dists = dists[valid]
+        overlay_fov_deg = float(self.args.overlay_fov_deg)
+        if 0.0 < overlay_fov_deg < 359.0:
+            half_fov_rad = math.radians(overlay_fov_deg * 0.5)
+            forward_rel = _wrap_angle_array(angles + self.sensor_yaw_offset_rad)
+            keep = np.abs(forward_rel) <= half_fov_rad
+            if not np.any(keep):
+                payload = {
+                    'timestamp': time.time(),
+                    'pose': {
+                        'x': float(self.mapper.sensor_x_m),
+                        'y': float(self.mapper.sensor_y_m),
+                        'yaw_rad': float(self.mapper.sensor_yaw_rad),
+                    },
+                    'point_count': 0,
+                    'points_world': [],
+                }
+                _write_json_atomic(self.args.overlay_file, payload)
+                return
+            angles = angles[keep]
+            dists = dists[keep]
         local_x = dists * np.cos(angles)
         local_y = dists * np.sin(angles)
 
@@ -485,6 +517,10 @@ def _parse_args() -> argparse.Namespace:
                    help='Write live world-frame LiDAR overlay points to this JSON file')
     p.add_argument('--overlay-stride', default=1, type=int,
                    help='Keep every Nth valid point when publishing overlay JSON')
+    p.add_argument('--overlay-fov-deg', default=140.0, type=float,
+                   help='Forward-facing field of view in degrees kept in overlay JSON; set <=0 to disable cropping')
+    p.add_argument('--sensor-yaw-offset-deg', default=0.0, type=float,
+                   help='Fixed yaw offset from rover forward to LiDAR forward')
     p.add_argument('--headless', action='store_true',
                    help='Run without opening the matplotlib viewer window')
     p.add_argument('--save',       default=None, metavar='FILE',

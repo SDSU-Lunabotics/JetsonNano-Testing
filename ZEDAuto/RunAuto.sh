@@ -271,6 +271,8 @@ if [[ "${AUTO_START_LIDAR:-1}" == "1" ]]; then
   cmd+=(--lidar-pose-file "${LIDAR_POSE_FILE:-/tmp/lidar_pose.json}")
   cmd+=(--lidar-overlay-file "${LIDAR_OVERLAY_FILE:-/tmp/lidar_overlay.json}")
   cmd+=(--lidar-overlay-stride "${LIDAR_OVERLAY_STRIDE:-1}")
+  cmd+=(--lidar-overlay-fov-deg "${LIDAR_OVERLAY_FOV_DEG:-140}")
+  cmd+=(--lidar-yaw-offset-deg "${LIDAR_YAW_OFFSET_DEG:-0}")
   if [[ -n "${LIDAR_PYTHON:-}" ]]; then cmd+=(--lidar-python "${LIDAR_PYTHON}"); fi
   if [[ -n "${LIDAR_SCRIPT_PATH:-}" ]]; then cmd+=(--lidar-script "${LIDAR_SCRIPT_PATH}"); fi
   if [[ "${LIDAR_WEBUI:-1}" == "1" ]]; then

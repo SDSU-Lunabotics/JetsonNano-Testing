@@ -571,6 +571,8 @@ def main():
     parser.add_argument("--lidar-viewer-id", default="view", help="Viewer ID passed to the lidar companion in web UI mode")
     parser.add_argument("--lidar-pose-file", default="/tmp/lidar_pose.json", help="Pose JSON path shared with the lidar companion")
     parser.add_argument("--lidar-overlay-stride", type=int, default=1, help="Publish every Nth LiDAR point when auto-starting the companion")
+    parser.add_argument("--lidar-overlay-fov-deg", type=float, default=140.0, help="Forward-facing LiDAR overlay field of view in degrees; set <=0 to disable cropping")
+    parser.add_argument("--lidar-yaw-offset-deg", type=float, default=0.0, help="Fixed yaw offset from rover forward to LiDAR forward")
     parser.add_argument("--drive-calibration-file", default=os.path.join(SCRIPT_DIR, "zed_drive_calibration.json"), help="Path to saved drive-calibration JSON")
     parser.add_argument("--dig-profiles-path", default=os.path.join(SCRIPT_DIR, "zed_dig_profiles.json"), help="Path to recorded dig profile library JSON")
     parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
@@ -841,6 +843,10 @@ def main():
             str(args.lidar_overlay_file),
             "--overlay-stride",
             str(max(1, int(args.lidar_overlay_stride))),
+            "--overlay-fov-deg",
+            str(float(args.lidar_overlay_fov_deg)),
+            "--sensor-yaw-offset-deg",
+            str(float(args.lidar_yaw_offset_deg)),
             "--headless",
         ]
         if args.lidar_webui:
