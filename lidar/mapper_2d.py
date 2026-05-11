@@ -28,6 +28,7 @@ class Mapper2D:
     ----------
     map_size_m   : Side length of the square map in metres.
     resolution_m : Size of one grid cell in metres.
+    min_range_m  : Measurements at or below this distance are discarded.
     max_range_m  : Measurements beyond this distance are discarded.
     """
 
@@ -35,9 +36,11 @@ class Mapper2D:
         self,
         map_size_m: float = 12.0,
         resolution_m: float = 0.05,
+        min_range_m: float = 0.4572,
         max_range_m: float = 10.0,
     ) -> None:
         self.resolution   = resolution_m
+        self.min_range_m  = min_range_m
         self.max_range_m  = max_range_m
         self.grid_size    = int(map_size_m / resolution_m)
 
@@ -111,7 +114,7 @@ class Mapper2D:
         dists  = np.asarray(scan.distances_mm, dtype=np.float32) / 1000.0  # → metres
 
         # Reject out-of-range or zero readings
-        valid = (dists > 0.05) & (dists < self.max_range_m)
+        valid = (dists > self.min_range_m) & (dists < self.max_range_m)
         angles = angles[valid]
         dists  = dists[valid]
 
@@ -228,7 +231,7 @@ class Mapper2D:
 
         # Use moderately far points for localization; near points are noisier and dynamic.
         ranges = np.sqrt(local_x * local_x + local_y * local_y)
-        keep = (ranges > 0.4) & (ranges < self.max_range_m * 0.95)
+        keep = (ranges > self.min_range_m) & (ranges < self.max_range_m * 0.95)
         if np.count_nonzero(keep) < 80:
             self.localization_score = 0.0
             return
@@ -590,7 +593,7 @@ class Mapper2D:
         """
         angles = np.deg2rad(scan.angles_deg)
         dists  = np.asarray(scan.distances_mm) / 1000.0
-        valid  = (dists > 0.05) & (dists < self.max_range_m)
+        valid  = (dists > self.min_range_m) & (dists < self.max_range_m)
         x = dists[valid] * np.cos(angles[valid])
         y = dists[valid] * np.sin(angles[valid])
         return x, y

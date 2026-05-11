@@ -1479,8 +1479,8 @@ def main():
     lidar_overlay_align_offset_xy = np.zeros(2, dtype=np.float32)
     lidar_overlay_align_mode = False
     lidar_overlay_align_source_xy = None
-    lidar_overlay_inverted = False
-    lidar_overlay_rotation_deg = 0.0
+    lidar_overlay_inverted = True
+    lidar_overlay_rotation_deg = -84.2
 
     def _write_json_atomic(path, payload):
         if not path:

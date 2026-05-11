@@ -374,7 +374,8 @@ class _AppState:
 
         angles = np.deg2rad(scan.angles_deg)
         dists = np.asarray(scan.distances_mm, dtype=np.float32) / 1000.0
-        valid = (dists > 0.05) & (dists < self.args.max_range)
+        min_range_m = max(0.05, float(self.args.min_range))
+        valid = (dists > min_range_m) & (dists < self.args.max_range)
         if not np.any(valid):
             payload = {
                 'timestamp': time.time(),
@@ -446,7 +447,8 @@ class _AppState:
     def _compute_dynamic_overlay(self, scan: ScanData) -> np.ndarray:
         angles = np.deg2rad(scan.angles_deg)
         dists = np.asarray(scan.distances_mm, dtype=np.float32) / 1000.0
-        valid = (dists > 0.05) & (dists < self.args.max_range)
+        min_range_m = max(0.05, float(self.args.min_range))
+        valid = (dists > min_range_m) & (dists < self.args.max_range)
         if not np.any(valid):
             return np.empty((0, 2), dtype=np.float32)
 
@@ -510,6 +512,8 @@ def _parse_args() -> argparse.Namespace:
                    help='Grid cell size (metres)')
     p.add_argument('--max-range',  default=10.0, type=float, metavar='D',
                    help='Max valid measurement range (metres)')
+    p.add_argument('--min-range',  default=0.4572, type=float, metavar='D',
+                   help='Min valid measurement range (metres); closer returns are ignored')
     p.add_argument('--interval',   default=100, type=int,
                    help='Animation interval in milliseconds')
     p.add_argument('--yaw-file',   default=None,
@@ -547,6 +551,7 @@ def main() -> None:
     mapper = Mapper2D(
         map_size_m=args.map_size,
         resolution_m=args.resolution,
+        min_range_m=args.min_range,
         max_range_m=args.max_range,
     )
 
