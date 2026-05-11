@@ -1467,12 +1467,18 @@ def main():
     last_map_command_seq = 0
     last_map_ui_state_write = 0.0
     lidar_overlay_cached_mtime = None
+    lidar_overlay_points_world_raw = []
+    lidar_overlay_pose_xy_raw = None
     lidar_overlay_points_world = []
     lidar_overlay_pose_xy = None
     lidar_overlay_last_timestamp = 0.0
     lidar_overlay_live = False
     lidar_overlay_point_count = 0
     lidar_overlay_last_error_log = 0.0
+    lidar_overlay_align_offset_xy = np.zeros(2, dtype=np.float32)
+    lidar_overlay_align_mode = False
+    lidar_overlay_align_source_xy = None
+    lidar_overlay_inverted = False
 
     def _write_json_atomic(path, payload):
         if not path:
@@ -1488,12 +1494,41 @@ def main():
         except Exception:
             pass
 
+    def _apply_lidar_overlay_alignment():
+        nonlocal lidar_overlay_points_world, lidar_overlay_pose_xy, lidar_overlay_point_count
+        points_world = list(lidar_overlay_points_world_raw)
+        pose_xy = lidar_overlay_pose_xy_raw
+        if lidar_overlay_inverted and pose_xy is not None:
+            cx = float(pose_xy[0])
+            cy = float(pose_xy[1])
+            points_world = [
+                ((2.0 * cx) - float(px), (2.0 * cy) - float(py))
+                for px, py in points_world
+            ]
+        off_x = float(lidar_overlay_align_offset_xy[0])
+        off_y = float(lidar_overlay_align_offset_xy[1])
+        lidar_overlay_points_world = [
+            (float(px) + off_x, float(py) + off_y)
+            for px, py in points_world
+        ]
+        if lidar_overlay_pose_xy_raw is not None:
+            lidar_overlay_pose_xy = (
+                float(lidar_overlay_pose_xy_raw[0]) + off_x,
+                float(lidar_overlay_pose_xy_raw[1]) + off_y,
+            )
+        else:
+            lidar_overlay_pose_xy = None
+        lidar_overlay_point_count = int(len(lidar_overlay_points_world))
+
     def load_lidar_overlay(force=False):
-        nonlocal lidar_overlay_cached_mtime, lidar_overlay_points_world
+        nonlocal lidar_overlay_cached_mtime, lidar_overlay_points_world_raw
+        nonlocal lidar_overlay_pose_xy_raw, lidar_overlay_points_world
         nonlocal lidar_overlay_pose_xy, lidar_overlay_last_timestamp
         nonlocal lidar_overlay_live, lidar_overlay_point_count, lidar_overlay_last_error_log
         path = args.lidar_overlay_file
         if not path:
+            lidar_overlay_points_world_raw = []
+            lidar_overlay_pose_xy_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1504,6 +1539,8 @@ def main():
         try:
             stat = os.stat(path)
         except OSError:
+            lidar_overlay_points_world_raw = []
+            lidar_overlay_pose_xy_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1518,7 +1555,7 @@ def main():
                 lidar_overlay_last_timestamp > 0.0
                 and (now - float(lidar_overlay_last_timestamp)) <= float(args.lidar_overlay_max_age)
             )
-            lidar_overlay_point_count = int(len(lidar_overlay_points_world))
+            _apply_lidar_overlay_alignment()
             return
 
         try:
@@ -1528,6 +1565,8 @@ def main():
             if (now - lidar_overlay_last_error_log) >= 5.0:
                 print(f"LiDAR overlay read failed: {exc}")
                 lidar_overlay_last_error_log = now
+            lidar_overlay_points_world_raw = []
+            lidar_overlay_pose_xy_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1566,11 +1605,11 @@ def main():
             source_ts = float(stat.st_mtime)
 
         lidar_overlay_cached_mtime = stat.st_mtime
-        lidar_overlay_points_world = points_world
-        lidar_overlay_pose_xy = pose_xy
+        lidar_overlay_points_world_raw = points_world
+        lidar_overlay_pose_xy_raw = pose_xy
         lidar_overlay_last_timestamp = source_ts
         lidar_overlay_live = (now - source_ts) <= float(args.lidar_overlay_max_age)
-        lidar_overlay_point_count = int(len(points_world))
+        _apply_lidar_overlay_alignment()
 
     def _json_vec3(value):
         arr = np.array(value, dtype=np.float32).reshape(3,)
@@ -2325,6 +2364,41 @@ def main():
         print(f"LiDAR-only view {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_lidar_inverted(enabled, source="button"):
+        nonlocal lidar_overlay_inverted
+        enabled = bool(enabled)
+        if lidar_overlay_inverted == enabled:
+            return
+        lidar_overlay_inverted = enabled
+        _apply_lidar_overlay_alignment()
+        print(f"LiDAR invert {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_lidar_align_mode(enabled, source="button"):
+        nonlocal lidar_overlay_align_mode, lidar_overlay_align_source_xy
+        enabled = bool(enabled)
+        if lidar_overlay_align_mode == enabled and (not enabled):
+            return
+        lidar_overlay_align_mode = enabled
+        lidar_overlay_align_source_xy = None
+        if enabled and (not lidar_view_enabled):
+            set_lidar_view_enabled(True, source)
+        if enabled:
+            load_lidar_overlay(force=True)
+            print("LiDAR align mode ON. Click a LiDAR point, then click where that point should move.")
+        else:
+            print("LiDAR align mode OFF.")
+        publish_map_ui_state(force=True)
+
+    def reset_lidar_overlay_alignment(source="button"):
+        nonlocal lidar_overlay_align_offset_xy, lidar_overlay_align_source_xy, lidar_overlay_align_mode
+        lidar_overlay_align_offset_xy = np.zeros(2, dtype=np.float32)
+        lidar_overlay_align_source_xy = None
+        lidar_overlay_align_mode = False
+        _apply_lidar_overlay_alignment()
+        print(f"LiDAR overlay alignment reset via {source}.")
+        publish_map_ui_state(force=True)
+
     def save_calibration_settings(result_text):
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
@@ -2843,6 +2917,31 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "lidar_invert",
+                    "label": "Invert LiDAR",
+                    "command": "lidar_invert",
+                    "active": bool(lidar_overlay_inverted),
+                    "enabled": True,
+                },
+                {
+                    "id": "lidar_align_mode",
+                    "label": "LiDAR Align",
+                    "command": "lidar_align_mode",
+                    "active": bool(lidar_overlay_align_mode),
+                    "enabled": True,
+                },
+                {
+                    "id": "lidar_align_reset",
+                    "label": "Reset LiDAR",
+                    "command": "lidar_align_reset",
+                    "active": False,
+                    "enabled": bool(
+                        lidar_overlay_align_mode
+                        or lidar_overlay_align_source_xy is not None
+                        or np.linalg.norm(lidar_overlay_align_offset_xy) > 1e-6
+                    ),
+                },
+                {
                     "id": "drive_heading_flip",
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
@@ -3180,6 +3279,13 @@ def main():
                 if display_cell is not None:
                     dr, dc = display_cell
                     cv2.drawMarker(frame, (dc, dr), line_color, cv2.MARKER_CROSS, 16, 2, cv2.LINE_AA)
+        if lidar_overlay_align_source_xy is not None:
+            rc = map_world_to_grid(lidar_overlay_align_source_xy[0], lidar_overlay_align_source_xy[1])
+            if rc is not None:
+                display_cell = display_cell_for_map_cell(rc[0], rc[1], frame)
+                if display_cell is not None:
+                    dr, dc = display_cell
+                    cv2.drawMarker(frame, (dc, dr), (255, 0, 255), cv2.MARKER_TILTED_CROSS, 18, 2, cv2.LINE_AA)
 
     def heading_vec_from_world(rover_pos_world, forward_world):
         if rover_pos_world is None or forward_world is None:
@@ -3286,6 +3392,7 @@ def main():
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal
         nonlocal emergency_stop, last_path_plan_time, map_view_shift_r, map_view_shift_c, map_scale_live
         nonlocal path_plan_mode, mining_goal_active
+        nonlocal lidar_overlay_align_source_xy, lidar_overlay_align_offset_xy, lidar_overlay_align_mode
         if last_map_window_shape is not None:
             x, y = window_to_image_coords("ZED Occupancy Map (XZ)", x, y, last_map_window_shape)
         if event == cv2.EVENT_RBUTTONDOWN:
@@ -3299,6 +3406,55 @@ def main():
         row = int(y / scale) - int(map_view_shift_r)
         col = int(x / scale) - int(map_view_shift_c)
         if row < 0 or row >= occ_map.grid_h or col < 0 or col >= occ_map.grid_w:
+            return
+        if event == cv2.EVENT_LBUTTONDOWN and lidar_overlay_align_mode:
+            load_lidar_overlay(force=True)
+            if (not lidar_overlay_live) or (not lidar_overlay_points_world):
+                print("LiDAR align: no live overlay points available.")
+                return
+            clicked_world = occ_map.grid_to_world(row, col)
+            if clicked_world is None:
+                return
+            click_x, click_z = float(clicked_world[0]), float(clicked_world[1])
+            if lidar_overlay_align_source_xy is None:
+                best_pt = None
+                best_dist_sq = None
+                for px, pz in lidar_overlay_points_world:
+                    dist_sq = (float(px) - click_x) ** 2 + (float(pz) - click_z) ** 2
+                    if best_dist_sq is None or dist_sq < best_dist_sq:
+                        best_dist_sq = dist_sq
+                        best_pt = (float(px), float(pz))
+                max_pick_dist_m = 0.75
+                if best_pt is None or best_dist_sq is None or best_dist_sq > (max_pick_dist_m * max_pick_dist_m):
+                    print("LiDAR align: click closer to a visible LiDAR line to pick the source point.")
+                    return
+                lidar_overlay_align_source_xy = best_pt
+                print(
+                    "LiDAR align source selected at "
+                    f"x={best_pt[0]:+.2f}, z={best_pt[1]:+.2f}. Click destination."
+                )
+                publish_map_ui_state(force=True)
+                return
+            src_x, src_z = lidar_overlay_align_source_xy
+            delta_x = click_x - float(src_x)
+            delta_z = click_z - float(src_z)
+            lidar_overlay_align_offset_xy = np.array(
+                [
+                    float(lidar_overlay_align_offset_xy[0]) + delta_x,
+                    float(lidar_overlay_align_offset_xy[1]) + delta_z,
+                ],
+                dtype=np.float32,
+            )
+            lidar_overlay_align_source_xy = None
+            lidar_overlay_align_mode = False
+            _apply_lidar_overlay_alignment()
+            print(
+                "LiDAR overlay aligned by "
+                f"dx={delta_x:+.2f}m dz={delta_z:+.2f}m "
+                f"(total {float(lidar_overlay_align_offset_xy[0]):+.2f}, "
+                f"{float(lidar_overlay_align_offset_xy[1]):+.2f})."
+            )
+            publish_map_ui_state(force=True)
             return
         if event == cv2.EVENT_LBUTTONDOWN and mining.state in (
             auto_mining.MiningState.DRAW_EXCAV,
@@ -3614,6 +3770,24 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_lidar_only_view_enabled(not lidar_only_view, "button")
                 return
+        rect = status_button_rects.get("lidar_invert")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_inverted(not lidar_overlay_inverted, "button")
+                return
+        rect = status_button_rects.get("lidar_align_mode")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_align_mode(not lidar_overlay_align_mode, "button")
+                return
+        rect = status_button_rects.get("lidar_align_reset")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                reset_lidar_overlay_alignment("button")
+                return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3900,6 +4074,12 @@ def main():
             set_lidar_view_enabled(not lidar_view_enabled, "external command")
         elif action == "lidar_only_view":
             set_lidar_only_view_enabled(not lidar_only_view, "external command")
+        elif action == "lidar_invert":
+            set_lidar_inverted(not lidar_overlay_inverted, "external command")
+        elif action == "lidar_align_mode":
+            set_lidar_align_mode(not lidar_overlay_align_mode, "external command")
+        elif action == "lidar_align_reset":
+            reset_lidar_overlay_alignment("external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -4328,9 +4508,9 @@ def main():
         if not lidar_view_enabled:
             lidar_state = "OFF"
         elif lidar_overlay_live:
-            lidar_state = f"ON {lidar_overlay_point_count}pts"
+            lidar_state = f"ON {lidar_overlay_point_count}pts" + (" INV" if lidar_overlay_inverted else "")
         else:
-            lidar_state = "STALE"
+            lidar_state = "STALE" + (" INV" if lidar_overlay_inverted else "")
         map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
         put_line(
             f"Map: {map_state} {map_mode} | Follow: {'ON' if follow_rover_map else 'OFF'} | View: {map_view_mode} | Pts: {last_map_point_count} | LiDAR: {lidar_state}",
@@ -4794,6 +4974,7 @@ def main():
         auto_digger_rect = grid_rect(zones_body_y, 1, 2)
         lidar_view_rect = grid_rect(zones_body_y, 2, 0)
         lidar_only_rect = grid_rect(zones_body_y, 2, 1)
+        lidar_invert_rect = grid_rect(zones_body_y, 2, 2)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -4852,9 +5033,17 @@ def main():
             (0, 110, 155),
             (140, 255, 255),
         )
+        draw_control_button(
+            lidar_invert_rect,
+            "Invert LiDAR: ON" if lidar_overlay_inverted else "Invert LiDAR",
+            True,
+            bool(lidar_overlay_inverted),
+            (180, 120, 0),
+            (255, 230, 120),
+        )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 2 * (button_h + 10) + 70
+        cal_section_h = 72 + 3 * (button_h + 10) + 84
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -4869,6 +5058,8 @@ def main():
         display_heading_flip_rect = grid_rect(cal_body_y, 1, 0)
         hard_drive_flip_rect = grid_rect(cal_body_y, 1, 1)
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
+        lidar_align_mode_rect = grid_rect(cal_body_y, 2, 0)
+        lidar_align_reset_rect = grid_rect(cal_body_y, 2, 1)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4915,16 +5106,44 @@ def main():
             (100, 90, 20),
             (220, 210, 120),
         )
+        draw_control_button(
+            lidar_align_mode_rect,
+            "LiDAR Align: ON" if lidar_overlay_align_mode else "LiDAR Align",
+            True,
+            bool(lidar_overlay_align_mode),
+            (140, 70, 170),
+            (255, 170, 255),
+        )
+        draw_control_button(
+            lidar_align_reset_rect,
+            "Reset LiDAR",
+            bool(
+                lidar_overlay_align_mode
+                or lidar_overlay_align_source_xy is not None
+                or np.linalg.norm(lidar_overlay_align_offset_xy) > 1e-6
+            ),
+            False,
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
-            cal_body_y + 2 * (button_h + 10) + 14,
+            cal_body_y + 3 * (button_h + 10) + 14,
             (180, 220, 255),
             0.44,
             x=card_x0 + card_inner,
         )
+        lidar_align_status = (
+            "LiDAR align: PICK TARGET"
+            if lidar_overlay_align_source_xy is not None
+            else ("LiDAR align: PICK SOURCE" if lidar_overlay_align_mode else "LiDAR align: OFF")
+        )
         put_control_line(
-            drive_calibration.last_result[:88],
-            cal_body_y + 2 * (button_h + 10) + 38,
+            (
+                f"{drive_calibration.last_result[:44]} | "
+                f"{lidar_align_status} | "
+                f"offset=({float(lidar_overlay_align_offset_xy[0]):+.2f}, "
+                f"{float(lidar_overlay_align_offset_xy[1]):+.2f})"
+            )[:88],
+            cal_body_y + 3 * (button_h + 10) + 38,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5205,6 +5424,9 @@ def main():
             ("camera_overlay", camera_overlay_rect),
             ("lidar_view", lidar_view_rect),
             ("lidar_only_view", lidar_only_rect),
+            ("lidar_invert", lidar_invert_rect),
+            ("lidar_align_mode", lidar_align_mode_rect),
+            ("lidar_align_reset", lidar_align_reset_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
