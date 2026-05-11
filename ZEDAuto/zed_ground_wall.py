@@ -3162,11 +3162,10 @@ def main():
                 pts = np.array([(c, r) for r, c in segment], dtype=np.int32).reshape((-1, 1, 2))
                 cv2.polylines(frame, [pts], False, line_color, line_thickness, cv2.LINE_AA)
 
-        point_radius = 1 if lidar_only_view else 0
         for dr, dc in display_points:
             frame[dr, dc, :] = core_color
-            if point_radius > 0:
-                cv2.circle(frame, (dc, dr), point_radius, point_color, -1, cv2.LINE_AA)
+            if 0 <= dr < h and 0 <= dc < w:
+                frame[dr, dc, :] = point_color
 
         if lidar_overlay_pose_xy is not None:
             rc = map_world_to_grid(lidar_overlay_pose_xy[0], lidar_overlay_pose_xy[1])
