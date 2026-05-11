@@ -2004,30 +2004,30 @@ def main():
         nonlocal actuator_bottom_position_calibrated, actuator_sync_fault
         left_pct = _read_first_nt_number(
             (
-                "Jetson/ExcavatorLeftExtensionPct",
                 "Excav/BotLeftExtensionPct",
+                "Jetson/ExcavatorLeftExtensionPct",
                 "Jetson/LeftActuatorExtensionPct",
                 "Excavator/LeftExtensionPct",
             )
         )
         right_pct = _read_first_nt_number(
             (
-                "Jetson/ExcavatorRightExtensionPct",
                 "Excav/BotRightExtensionPct",
+                "Jetson/ExcavatorRightExtensionPct",
                 "Jetson/RightActuatorExtensionPct",
                 "Excavator/RightExtensionPct",
             )
         )
         left_inches = _read_first_nt_number(
             (
-                "Jetson/ExcavatorLeftExtensionInches",
                 "Excav/BotLeftInches",
+                "Jetson/ExcavatorLeftExtensionInches",
             )
         )
         right_inches = _read_first_nt_number(
             (
-                "Jetson/ExcavatorRightExtensionInches",
                 "Excav/BotRightInches",
+                "Jetson/ExcavatorRightExtensionInches",
             )
         )
         actuator_left_extension_pct = None if left_pct is None else max(0.0, min(100.0, left_pct))
@@ -2036,8 +2036,8 @@ def main():
         actuator_right_extension_inches = right_inches
         actuator_bottom_position_calibrated = _read_first_nt_boolean(
             (
-                "Jetson/ExcavatorBottomPositionCalibrated",
                 "Excav/BottomPositionCalibrated",
+                "Jetson/ExcavatorBottomPositionCalibrated",
             )
         )
         actuator_sync_fault = _read_first_nt_boolean(("Excav/SyncFault",))

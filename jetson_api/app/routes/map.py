@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.map import (
+    ActuatorUiState,
     DriveCalibrationState,
     MapFrameIngestResponse,
     MapStreamStatus,
@@ -142,6 +143,14 @@ def _read_ui_state() -> MapUiStateResponse:
         except Exception:
             drive_calibration = None
 
+    actuators = None
+    actuators_raw = payload.get("actuators")
+    if isinstance(actuators_raw, dict):
+        try:
+            actuators = ActuatorUiState(**actuators_raw)
+        except Exception:
+            actuators = None
+
     return MapUiStateResponse(
         available=bool(payload.get("available", True)),
         source=payload.get("source"),
@@ -154,6 +163,7 @@ def _read_ui_state() -> MapUiStateResponse:
         brush_radius_min=payload.get("brush_radius_min"),
         brush_radius_max=payload.get("brush_radius_max"),
         drive_calibration=drive_calibration,
+        actuators=actuators,
         controls=controls,
     )
 
