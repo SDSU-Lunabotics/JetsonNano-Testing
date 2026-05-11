@@ -526,7 +526,7 @@ def _parse_args() -> argparse.Namespace:
                    help='Write live world-frame LiDAR overlay points to this JSON file')
     p.add_argument('--overlay-stride', default=1, type=int,
                    help='Keep every Nth valid point when publishing overlay JSON')
-    p.add_argument('--overlay-fov-deg', default=140.0, type=float,
+    p.add_argument('--overlay-fov-deg', default=0.0, type=float,
                    help='Forward-facing field of view in degrees kept in overlay JSON; set <=0 to disable cropping')
     p.add_argument('--sensor-yaw-offset-deg', default=0.0, type=float,
                    help='Fixed yaw offset from rover forward to LiDAR forward')

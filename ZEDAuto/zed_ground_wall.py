@@ -571,7 +571,7 @@ def main():
     parser.add_argument("--lidar-viewer-id", default="view", help="Viewer ID passed to the lidar companion in web UI mode")
     parser.add_argument("--lidar-pose-file", default="/tmp/lidar_pose.json", help="Pose JSON path shared with the lidar companion")
     parser.add_argument("--lidar-overlay-stride", type=int, default=1, help="Publish every Nth LiDAR point when auto-starting the companion")
-    parser.add_argument("--lidar-overlay-fov-deg", type=float, default=140.0, help="Forward-facing LiDAR overlay field of view in degrees; set <=0 to disable cropping")
+    parser.add_argument("--lidar-overlay-fov-deg", type=float, default=0.0, help="Forward-facing LiDAR overlay field of view in degrees; set <=0 to disable cropping")
     parser.add_argument("--lidar-yaw-offset-deg", type=float, default=0.0, help="Fixed yaw offset from rover forward to LiDAR forward")
     parser.add_argument("--drive-calibration-file", default=os.path.join(SCRIPT_DIR, "zed_drive_calibration.json"), help="Path to saved drive-calibration JSON")
     parser.add_argument("--dig-profiles-path", default=os.path.join(SCRIPT_DIR, "zed_dig_profiles.json"), help="Path to recorded dig profile library JSON")
@@ -1479,6 +1479,7 @@ def main():
     lidar_overlay_align_mode = False
     lidar_overlay_align_source_xy = None
     lidar_overlay_inverted = False
+    lidar_overlay_rotation_deg = 0.0
 
     def _write_json_atomic(path, payload):
         if not path:
@@ -1505,6 +1506,18 @@ def main():
                 ((2.0 * cx) - float(px), (2.0 * cy) - float(py))
                 for px, py in points_world
             ]
+        if abs(float(lidar_overlay_rotation_deg)) > 1e-6 and pose_xy is not None:
+            cx = float(pose_xy[0])
+            cy = float(pose_xy[1])
+            ang = math.radians(float(lidar_overlay_rotation_deg))
+            c = math.cos(ang)
+            s = math.sin(ang)
+            rotated_points = []
+            for px, py in points_world:
+                dx = float(px) - cx
+                dy = float(py) - cy
+                rotated_points.append((cx + (c * dx - s * dy), cy + (s * dx + c * dy)))
+            points_world = rotated_points
         off_x = float(lidar_overlay_align_offset_xy[0])
         off_y = float(lidar_overlay_align_offset_xy[1])
         lidar_overlay_points_world = [
@@ -2374,6 +2387,19 @@ def main():
         print(f"LiDAR invert {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_lidar_rotation_deg(angle_deg, source="button"):
+        nonlocal lidar_overlay_rotation_deg
+        angle_deg = max(-180.0, min(180.0, float(angle_deg)))
+        if abs(lidar_overlay_rotation_deg - angle_deg) < 0.05:
+            return
+        lidar_overlay_rotation_deg = angle_deg
+        _apply_lidar_overlay_alignment()
+        print(f"LiDAR rotation set to {lidar_overlay_rotation_deg:+.1f} deg via {source}.")
+        publish_map_ui_state(force=True)
+
+    def reset_lidar_overlay_rotation(source="button"):
+        set_lidar_rotation_deg(0.0, source)
+
     def set_lidar_align_mode(enabled, source="button"):
         nonlocal lidar_overlay_align_mode, lidar_overlay_align_source_xy
         enabled = bool(enabled)
@@ -2820,6 +2846,7 @@ def main():
             "brush_radius_min": 1,
             "brush_radius_max": 15,
             "drive_calibration": drive_cal_state,
+            "lidar_rotation_deg": float(lidar_overlay_rotation_deg),
             "dig_profiles": dig_ui_state,
             "actuators": {
                 "left_extension_pct": actuator_left_extension_pct,
@@ -2940,6 +2967,13 @@ def main():
                         or lidar_overlay_align_source_xy is not None
                         or np.linalg.norm(lidar_overlay_align_offset_xy) > 1e-6
                     ),
+                },
+                {
+                    "id": "lidar_rotation_reset",
+                    "label": "Reset LiDAR Rot",
+                    "command": "lidar_rotation_reset",
+                    "active": False,
+                    "enabled": abs(float(lidar_overlay_rotation_deg)) > 1e-3,
                 },
                 {
                     "id": "drive_heading_flip",
@@ -3251,7 +3285,7 @@ def main():
         if len(display_points) >= 2:
             max_link_dist_px = 22.0 if lidar_only_view else 14.0
             max_link_dist_sq = max_link_dist_px * max_link_dist_px
-            line_thickness = 2 if lidar_only_view else 1
+            line_thickness = 3 if lidar_only_view else 2
             segment = [display_points[0]]
             for dr, dc in display_points[1:]:
                 prev_dr, prev_dc = segment[-1]
@@ -3267,10 +3301,15 @@ def main():
                 pts = np.array([(c, r) for r, c in segment], dtype=np.int32).reshape((-1, 1, 2))
                 cv2.polylines(frame, [pts], False, line_color, line_thickness, cv2.LINE_AA)
 
+        point_half_width = 1
         for dr, dc in display_points:
-            frame[dr, dc, :] = core_color
+            r0 = max(0, dr - point_half_width)
+            r1 = min(h, dr + point_half_width + 1)
+            c0 = max(0, dc - point_half_width)
+            c1 = min(w, dc + point_half_width + 1)
+            frame[r0:r1, c0:c1, :] = point_color
             if 0 <= dr < h and 0 <= dc < w:
-                frame[dr, dc, :] = point_color
+                frame[dr, dc, :] = core_color
 
         if lidar_overlay_pose_xy is not None:
             rc = map_world_to_grid(lidar_overlay_pose_xy[0], lidar_overlay_pose_xy[1])
@@ -3623,6 +3662,13 @@ def main():
                 frac = (x - x0) / max(1, x1 - x0)
                 paint_brush_radius = max(1, min(15, int(round(1 + frac * 14))))
                 return
+        rect = status_button_rects.get("lidar_rotation_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = max(0.0, min(1.0, float(x - x0) / max(1, x1 - x0)))
+                set_lidar_rotation_deg(-180.0 + frac * 360.0, "slider")
+                return
         if is_drag:
             return
         rect = status_button_rects.get("dig_name_input")
@@ -3787,6 +3833,24 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 reset_lidar_overlay_alignment("button")
+                return
+        rect = status_button_rects.get("lidar_rotation_reset")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                reset_lidar_overlay_rotation("button")
+                return
+        rect = status_button_rects.get("lidar_rotation_minus")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_rotation_deg(float(lidar_overlay_rotation_deg) - 5.0, "button")
+                return
+        rect = status_button_rects.get("lidar_rotation_plus")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_lidar_rotation_deg(float(lidar_overlay_rotation_deg) + 5.0, "button")
                 return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
@@ -4080,6 +4144,8 @@ def main():
             set_lidar_align_mode(not lidar_overlay_align_mode, "external command")
         elif action == "lidar_align_reset":
             reset_lidar_overlay_alignment("external command")
+        elif action == "lidar_rotation_reset":
+            reset_lidar_overlay_rotation("external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -4508,9 +4574,17 @@ def main():
         if not lidar_view_enabled:
             lidar_state = "OFF"
         elif lidar_overlay_live:
-            lidar_state = f"ON {lidar_overlay_point_count}pts" + (" INV" if lidar_overlay_inverted else "")
+            lidar_state = (
+                f"ON {lidar_overlay_point_count}pts"
+                + (" INV" if lidar_overlay_inverted else "")
+                + (f" ROT{int(round(lidar_overlay_rotation_deg)):+d}" if abs(float(lidar_overlay_rotation_deg)) >= 0.5 else "")
+            )
         else:
-            lidar_state = "STALE" + (" INV" if lidar_overlay_inverted else "")
+            lidar_state = (
+                "STALE"
+                + (" INV" if lidar_overlay_inverted else "")
+                + (f" ROT{int(round(lidar_overlay_rotation_deg)):+d}" if abs(float(lidar_overlay_rotation_deg)) >= 0.5 else "")
+            )
         map_state_color = (170, 255, 170) if map_integration_ok else (0, 180, 255)
         put_line(
             f"Map: {map_state} {map_mode} | Follow: {'ON' if follow_rover_map else 'OFF'} | View: {map_view_mode} | Pts: {last_map_point_count} | LiDAR: {lidar_state}",
@@ -5043,7 +5117,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 3 * (button_h + 10) + 84
+        cal_section_h = 72 + 3 * (button_h + 10) + 166
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -5060,6 +5134,7 @@ def main():
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         lidar_align_mode_rect = grid_rect(cal_body_y, 2, 0)
         lidar_align_reset_rect = grid_rect(cal_body_y, 2, 1)
+        lidar_rotation_reset_rect = grid_rect(cal_body_y, 2, 2)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -5124,6 +5199,12 @@ def main():
             ),
             False,
         )
+        draw_control_button(
+            lidar_rotation_reset_rect,
+            "Rot 0",
+            abs(float(lidar_overlay_rotation_deg)) > 1e-3,
+            False,
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
             cal_body_y + 3 * (button_h + 10) + 14,
@@ -5131,6 +5212,44 @@ def main():
             0.44,
             x=card_x0 + card_inner,
         )
+        rot_slider_y = cal_body_y + 3 * (button_h + 10) + 44
+        rot_slider_h = 52
+        rot_btn_w = 36
+        rot_minus_rect = (card_x0 + card_inner, rot_slider_y + 6, card_x0 + card_inner + rot_btn_w, rot_slider_y + 6 + rot_btn_w)
+        rot_plus_rect = (card_x1 - card_inner - rot_btn_w, rot_slider_y + 6, card_x1 - card_inner, rot_slider_y + 6 + rot_btn_w)
+        rot_slider_x0 = rot_minus_rect[2] + 10
+        rot_slider_x1 = rot_plus_rect[0] - 10
+        lidar_rotation_slider_rect = (rot_slider_x0, rot_slider_y, rot_slider_x1, rot_slider_y + rot_slider_h)
+        put_control_line(
+            f"LiDAR rotation: {float(lidar_overlay_rotation_deg):+.1f} deg",
+            rot_slider_y - 2,
+            (220, 240, 255),
+            0.44,
+            x=card_x0 + card_inner,
+        )
+        cv2.rectangle(controls, (rot_slider_x0, rot_slider_y + 18), (rot_slider_x1, rot_slider_y + 34), (60, 60, 60), -1)
+        cv2.rectangle(controls, (rot_slider_x0, rot_slider_y + 18), (rot_slider_x1, rot_slider_y + 34), (120, 120, 120), 1)
+        center_x = int(round((rot_slider_x0 + rot_slider_x1) * 0.5))
+        cv2.line(controls, (center_x, rot_slider_y + 14), (center_x, rot_slider_y + 38), (180, 180, 180), 1, cv2.LINE_AA)
+        rot_frac = (float(lidar_overlay_rotation_deg) + 180.0) / 360.0
+        rot_knob_x = int(rot_slider_x0 + max(0.0, min(1.0, rot_frac)) * (rot_slider_x1 - rot_slider_x0))
+        cv2.circle(controls, (rot_knob_x, rot_slider_y + 26), 11, (255, 200, 90), -1)
+        cv2.circle(controls, (rot_knob_x, rot_slider_y + 26), 11, (255, 245, 180), 1)
+        for rect, lbl in ((rot_minus_rect, "-"), (rot_plus_rect, "+")):
+            x0b, y0b, x1b, y1b = rect
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (180, 120, 0), -1)
+            cv2.rectangle(controls, (x0b, y0b), (x1b, y1b), (230, 210, 150), 1)
+            tsz, _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            cv2.putText(
+                controls,
+                lbl,
+                (x0b + (x1b - x0b - tsz[0]) // 2, y0b + (y1b - y0b + tsz[1]) // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
         lidar_align_status = (
             "LiDAR align: PICK TARGET"
             if lidar_overlay_align_source_xy is not None
@@ -5143,7 +5262,7 @@ def main():
                 f"offset=({float(lidar_overlay_align_offset_xy[0]):+.2f}, "
                 f"{float(lidar_overlay_align_offset_xy[1]):+.2f})"
             )[:88],
-            cal_body_y + 3 * (button_h + 10) + 38,
+            cal_body_y + 3 * (button_h + 10) + 116,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5427,6 +5546,10 @@ def main():
             ("lidar_invert", lidar_invert_rect),
             ("lidar_align_mode", lidar_align_mode_rect),
             ("lidar_align_reset", lidar_align_reset_rect),
+            ("lidar_rotation_reset", lidar_rotation_reset_rect),
+            ("lidar_rotation_slider", lidar_rotation_slider_rect),
+            ("lidar_rotation_minus", rot_minus_rect),
+            ("lidar_rotation_plus", rot_plus_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
