@@ -1,8 +1,22 @@
 import json
 import time
-def write_lidar_pose_json(x, y, yaw_rad, path="/tmp/lidar_pose.json"):
+def write_lidar_pose_json(
+    x,
+    y,
+    yaw_rad,
+    path="/tmp/lidar_pose.json",
+    *,
+    map_x=None,
+    map_y=None,
+    map_origin_x=None,
+    map_origin_y=None,
+):
     """
-    Write the current pose (x, y, yaw) to a JSON file for lidar integration.
+    Write the current pose for lidar integration.
+
+    `x`/`y` remain the absolute ZED world-frame position for compatibility.
+    When available, `map_x`/`map_y` expose the same pose in the map-local
+    frame that ZEDAuto uses for occupancy rendering.
     """
     payload = {
         "x": float(x),
@@ -10,6 +24,14 @@ def write_lidar_pose_json(x, y, yaw_rad, path="/tmp/lidar_pose.json"):
         "yaw_rad": float(yaw_rad),
         "timestamp": time.time(),
     }
+    if map_x is not None:
+        payload["map_x"] = float(map_x)
+    if map_y is not None:
+        payload["map_y"] = float(map_y)
+    if map_origin_x is not None:
+        payload["map_origin_x"] = float(map_origin_x)
+    if map_origin_y is not None:
+        payload["map_origin_y"] = float(map_origin_y)
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f)

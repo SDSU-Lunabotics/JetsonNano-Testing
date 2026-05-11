@@ -5352,11 +5352,29 @@ def main():
                     # Use last_valid_t_world_cam (x, y) and heading from last_valid_rover_forward_world
                     x = float(last_valid_t_world_cam[0])
                     y = float(last_valid_t_world_cam[2])  # Z is forward in world frame
+                    if (not args.complex) and map_origin_set:
+                        map_x = x - float(map_origin_t[0])
+                        map_y = y - float(map_origin_t[2])
+                        map_origin_x = float(map_origin_t[0])
+                        map_origin_y = float(map_origin_t[2])
+                    else:
+                        map_x = x
+                        map_y = y
+                        map_origin_x = 0.0
+                        map_origin_y = 0.0
                     heading_rad = math.atan2(
                         float(last_valid_rover_forward_world[2]),
                         float(last_valid_rover_forward_world[0])
                     )
-                    zed_utils.write_lidar_pose_json(x, y, heading_rad)
+                    zed_utils.write_lidar_pose_json(
+                        x,
+                        y,
+                        heading_rad,
+                        map_x=map_x,
+                        map_y=map_y,
+                        map_origin_x=map_origin_x,
+                        map_origin_y=map_origin_y,
+                    )
                 except Exception as exc:
                     print(f"[LidarPose] Failed to write pose: {exc}")
                 raw_R_world_cam, raw_t_world_cam, pose_warned, tracking_pose_ok = zed_utils.get_world_transform_with_status(

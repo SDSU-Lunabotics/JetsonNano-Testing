@@ -119,8 +119,14 @@ class ExternalPoseSource:
             return self._last_pose, False
 
         payload = json.loads(text)
-        x_m = float(payload['x'])
-        y_m = float(payload['y'])
+        # Prefer map-local coordinates when ZEDAuto provides them so the
+        # published overlay matches the occupancy-map frame directly.
+        if 'map_x' in payload and 'map_y' in payload:
+            x_m = float(payload['map_x'])
+            y_m = float(payload['map_y'])
+        else:
+            x_m = float(payload['x'])
+            y_m = float(payload['y'])
         if 'yaw_rad' in payload:
             yaw_rad = float(payload['yaw_rad'])
         elif 'yaw_deg' in payload:
