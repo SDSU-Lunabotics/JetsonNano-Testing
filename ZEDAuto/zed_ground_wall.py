@@ -1469,6 +1469,7 @@ def main():
     lidar_overlay_cached_mtime = None
     lidar_overlay_points_world_raw = []
     lidar_overlay_pose_xy_raw = None
+    lidar_overlay_pose_yaw_raw = None
     lidar_overlay_points_world = []
     lidar_overlay_pose_xy = None
     lidar_overlay_last_timestamp = 0.0
@@ -1499,13 +1500,34 @@ def main():
         nonlocal lidar_overlay_points_world, lidar_overlay_pose_xy, lidar_overlay_point_count
         points_world = list(lidar_overlay_points_world_raw)
         pose_xy = lidar_overlay_pose_xy_raw
+        pose_yaw = lidar_overlay_pose_yaw_raw
         if lidar_overlay_inverted and pose_xy is not None:
             cx = float(pose_xy[0])
             cy = float(pose_xy[1])
-            points_world = [
-                ((2.0 * cx) - float(px), (2.0 * cy) - float(py))
-                for px, py in points_world
-            ]
+            if pose_yaw is not None and np.isfinite(float(pose_yaw)):
+                yaw = float(pose_yaw)
+                fx = math.cos(yaw)
+                fy = math.sin(yaw)
+                rx = -math.sin(yaw)
+                ry = math.cos(yaw)
+                mirrored_points = []
+                for px, py in points_world:
+                    dx = float(px) - cx
+                    dy = float(py) - cy
+                    fwd = dx * fx + dy * fy
+                    lat = dx * rx + dy * ry
+                    mirrored_points.append(
+                        (
+                            cx + fwd * fx - lat * rx,
+                            cy + fwd * fy - lat * ry,
+                        )
+                    )
+                points_world = mirrored_points
+            else:
+                points_world = [
+                    ((2.0 * cx) - float(px), float(py))
+                    for px, py in points_world
+                ]
         if abs(float(lidar_overlay_rotation_deg)) > 1e-6 and pose_xy is not None:
             cx = float(pose_xy[0])
             cy = float(pose_xy[1])
@@ -1535,13 +1557,14 @@ def main():
 
     def load_lidar_overlay(force=False):
         nonlocal lidar_overlay_cached_mtime, lidar_overlay_points_world_raw
-        nonlocal lidar_overlay_pose_xy_raw, lidar_overlay_points_world
+        nonlocal lidar_overlay_pose_xy_raw, lidar_overlay_pose_yaw_raw, lidar_overlay_points_world
         nonlocal lidar_overlay_pose_xy, lidar_overlay_last_timestamp
         nonlocal lidar_overlay_live, lidar_overlay_point_count, lidar_overlay_last_error_log
         path = args.lidar_overlay_file
         if not path:
             lidar_overlay_points_world_raw = []
             lidar_overlay_pose_xy_raw = None
+            lidar_overlay_pose_yaw_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1554,6 +1577,7 @@ def main():
         except OSError:
             lidar_overlay_points_world_raw = []
             lidar_overlay_pose_xy_raw = None
+            lidar_overlay_pose_yaw_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1580,6 +1604,7 @@ def main():
                 lidar_overlay_last_error_log = now
             lidar_overlay_points_world_raw = []
             lidar_overlay_pose_xy_raw = None
+            lidar_overlay_pose_yaw_raw = None
             lidar_overlay_points_world = []
             lidar_overlay_pose_xy = None
             lidar_overlay_last_timestamp = 0.0
@@ -1602,6 +1627,7 @@ def main():
 
         pose_payload = payload.get("pose")
         pose_xy = None
+        pose_yaw = None
         if isinstance(pose_payload, dict):
             try:
                 pose_x = float(pose_payload.get("x"))
@@ -1610,6 +1636,14 @@ def main():
                     pose_xy = (pose_x, pose_y)
             except Exception:
                 pose_xy = None
+            try:
+                raw_yaw = pose_payload.get("yaw_rad")
+                if raw_yaw is not None:
+                    raw_yaw = float(raw_yaw)
+                    if np.isfinite(raw_yaw):
+                        pose_yaw = raw_yaw
+            except Exception:
+                pose_yaw = None
 
         source_ts = payload.get("timestamp", stat.st_mtime)
         try:
@@ -1620,6 +1654,7 @@ def main():
         lidar_overlay_cached_mtime = stat.st_mtime
         lidar_overlay_points_world_raw = points_world
         lidar_overlay_pose_xy_raw = pose_xy
+        lidar_overlay_pose_yaw_raw = pose_yaw
         lidar_overlay_last_timestamp = source_ts
         lidar_overlay_live = (now - source_ts) <= float(args.lidar_overlay_max_age)
         _apply_lidar_overlay_alignment()
@@ -5048,7 +5083,6 @@ def main():
         auto_digger_rect = grid_rect(zones_body_y, 1, 2)
         lidar_view_rect = grid_rect(zones_body_y, 2, 0)
         lidar_only_rect = grid_rect(zones_body_y, 2, 1)
-        lidar_invert_rect = grid_rect(zones_body_y, 2, 2)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -5107,14 +5141,6 @@ def main():
             (0, 110, 155),
             (140, 255, 255),
         )
-        draw_control_button(
-            lidar_invert_rect,
-            "Invert LiDAR: ON" if lidar_overlay_inverted else "Invert LiDAR",
-            True,
-            bool(lidar_overlay_inverted),
-            (180, 120, 0),
-            (255, 230, 120),
-        )
         cursor_y += zones_section_h + card_gap
 
         cal_section_h = 72 + 3 * (button_h + 10) + 166
@@ -5134,7 +5160,8 @@ def main():
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         lidar_align_mode_rect = grid_rect(cal_body_y, 2, 0)
         lidar_align_reset_rect = grid_rect(cal_body_y, 2, 1)
-        lidar_rotation_reset_rect = grid_rect(cal_body_y, 2, 2)
+        lidar_invert_rect = grid_rect(cal_body_y, 2, 2)
+        lidar_rotation_reset_rect = None
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -5200,10 +5227,12 @@ def main():
             False,
         )
         draw_control_button(
-            lidar_rotation_reset_rect,
-            "Rot 0",
-            abs(float(lidar_overlay_rotation_deg)) > 1e-3,
-            False,
+            lidar_invert_rect,
+            "Mirror LiDAR: ON" if lidar_overlay_inverted else "Mirror LiDAR",
+            True,
+            bool(lidar_overlay_inverted),
+            (180, 120, 0),
+            (255, 230, 120),
         )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
@@ -5220,6 +5249,7 @@ def main():
         rot_slider_x0 = rot_minus_rect[2] + 10
         rot_slider_x1 = rot_plus_rect[0] - 10
         lidar_rotation_slider_rect = (rot_slider_x0, rot_slider_y, rot_slider_x1, rot_slider_y + rot_slider_h)
+        lidar_rotation_reset_rect = (card_x1 - card_inner - 78, rot_slider_y + 54, card_x1 - card_inner, rot_slider_y + 88)
         put_control_line(
             f"LiDAR rotation: {float(lidar_overlay_rotation_deg):+.1f} deg",
             rot_slider_y - 2,
@@ -5250,6 +5280,12 @@ def main():
                 2,
                 cv2.LINE_AA,
             )
+        draw_control_button(
+            lidar_rotation_reset_rect,
+            "Rot 0",
+            abs(float(lidar_overlay_rotation_deg)) > 1e-3,
+            False,
+        )
         lidar_align_status = (
             "LiDAR align: PICK TARGET"
             if lidar_overlay_align_source_xy is not None
