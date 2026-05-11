@@ -263,7 +263,9 @@ if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
   cmd+=(--map-publish-timeout-ms "${MAP_PUBLISH_TIMEOUT_MS:-250}")
   cmd+=(--map-publish-source "${MAP_PUBLISH_SOURCE:-zed_ground_wall}")
 fi
-if [[ "${AUTO_START_LIDAR:-0}" == "1" ]]; then
+# Auto-start the LiDAR companion by default so RunAuto.sh launches the full
+# ZED + SICK stack for this project. Set AUTO_START_LIDAR=0 to disable.
+if [[ "${AUTO_START_LIDAR:-1}" == "1" ]]; then
   cmd+=(--auto-start-lidar)
   cmd+=(--lidar-host "${LIDAR_HOST:-10.0.9.60}")
   cmd+=(--lidar-pose-file "${LIDAR_POSE_FILE:-/tmp/lidar_pose.json}")

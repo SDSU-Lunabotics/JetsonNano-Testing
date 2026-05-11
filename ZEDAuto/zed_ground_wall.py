@@ -3126,9 +3126,12 @@ def main():
             return
 
         h, w = frame.shape[:2]
-        fill_color = (0, 255, 255)
-        center_color = (255, 255, 255)
+        line_color = (255, 255, 0)
+        fill_color = (255, 255, 0)
+        core_color = (255, 255, 255)
+        glow_color = (90, 220, 220)
         shadow_color = (0, 0, 0)
+        display_points = []
         for world_x_m, world_y_m in lidar_overlay_points_world:
             rc = map_world_to_grid(world_x_m, world_y_m)
             if rc is None:
@@ -3137,14 +3140,32 @@ def main():
             if display_cell is None:
                 continue
             dr, dc = display_cell
-            if dr <= 1 or dr >= (h - 2) or dc <= 1 or dc >= (w - 2):
-                frame[dr, dc, :] = center_color
+            display_points.append((dr, dc))
+            if dr <= 2 or dr >= (h - 3) or dc <= 2 or dc >= (w - 3):
+                frame[dr, dc, :] = core_color
                 continue
 
+        if len(display_points) >= 2:
+            max_link_dist_px = 22.0 if lidar_only_view else 14.0
+            max_link_dist_sq = max_link_dist_px * max_link_dist_px
+            prev_dr, prev_dc = display_points[0]
+            for dr, dc in display_points[1:]:
+                dist_sq = float((dr - prev_dr) * (dr - prev_dr) + (dc - prev_dc) * (dc - prev_dc))
+                if dist_sq <= max_link_dist_sq:
+                    cv2.line(frame, (prev_dc, prev_dr), (dc, dr), glow_color, 3, cv2.LINE_AA)
+                    cv2.line(frame, (prev_dc, prev_dr), (dc, dr), line_color, 1, cv2.LINE_AA)
+                prev_dr, prev_dc = dr, dc
+
+        point_shadow_r = 5 if lidar_only_view else 4
+        point_glow_r = 4 if lidar_only_view else 3
+        point_fill_r = 3 if lidar_only_view else 2
+        point_core_r = 2 if lidar_only_view else 1
+        for dr, dc in display_points:
             # Draw a dark backing first so live LiDAR points stay visible over the map.
-            cv2.circle(frame, (dc, dr), 3, shadow_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, (dc, dr), 2, fill_color, -1, cv2.LINE_AA)
-            frame[dr, dc, :] = center_color
+            cv2.circle(frame, (dc, dr), point_shadow_r, shadow_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, (dc, dr), point_glow_r, glow_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, (dc, dr), point_fill_r, fill_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, (dc, dr), point_core_r, core_color, -1, cv2.LINE_AA)
 
         if lidar_overlay_pose_xy is not None:
             rc = map_world_to_grid(lidar_overlay_pose_xy[0], lidar_overlay_pose_xy[1])
@@ -3152,7 +3173,7 @@ def main():
                 display_cell = display_cell_for_map_cell(rc[0], rc[1], frame)
                 if display_cell is not None:
                     dr, dc = display_cell
-                    cv2.drawMarker(frame, (dc, dr), (0, 255, 255), cv2.MARKER_CROSS, 12, 1, cv2.LINE_AA)
+                    cv2.drawMarker(frame, (dc, dr), line_color, cv2.MARKER_CROSS, 16, 2, cv2.LINE_AA)
 
     def heading_vec_from_world(rover_pos_world, forward_world):
         if rover_pos_world is None or forward_world is None:
