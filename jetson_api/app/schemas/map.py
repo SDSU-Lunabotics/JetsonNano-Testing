@@ -54,6 +54,21 @@ class DriveCalibrationState(BaseModel):
     saved_camera_deposit_angle_deg: Optional[float] = None
 
 
+class ActuatorUiState(BaseModel):
+    left_extension_pct: Optional[float] = None
+    right_extension_pct: Optional[float] = None
+    left_extension_inches: Optional[float] = None
+    right_extension_inches: Optional[float] = None
+    bottom_position_calibrated: Optional[bool] = None
+    sync_fault: Optional[bool] = None
+    left_extend_command: bool = False
+    right_extend_command: bool = False
+    dig_command: bool = False
+    lower_command: bool = False
+    door_open_command: bool = False
+    door_close_command: bool = False
+
+
 class MapUiStateResponse(BaseModel):
     available: bool = False
     source: Optional[str] = None
@@ -66,6 +81,7 @@ class MapUiStateResponse(BaseModel):
     brush_radius_min: Optional[int] = None
     brush_radius_max: Optional[int] = None
     drive_calibration: Optional[DriveCalibrationState] = None
+    actuators: Optional[ActuatorUiState] = None
     controls: List[MapUiControl] = Field(default_factory=list)
 
 

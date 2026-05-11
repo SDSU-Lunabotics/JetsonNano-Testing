@@ -280,25 +280,25 @@ def _parse_motor_warnings(raw_warnings: Any) -> List[MotorWarning]:
 
 
 def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetry:
-    left_extension_inches = _optional_float(values.get("Jetson/ExcavatorLeftExtensionInches"))
+    left_extension_inches = _optional_float(values.get("Excav/BotLeftInches"))
     if left_extension_inches is None:
-        left_extension_inches = _optional_float(values.get("Excav/BotLeftInches"))
+        left_extension_inches = _optional_float(values.get("Jetson/ExcavatorLeftExtensionInches"))
 
-    right_extension_inches = _optional_float(values.get("Jetson/ExcavatorRightExtensionInches"))
+    right_extension_inches = _optional_float(values.get("Excav/BotRightInches"))
     if right_extension_inches is None:
-        right_extension_inches = _optional_float(values.get("Excav/BotRightInches"))
+        right_extension_inches = _optional_float(values.get("Jetson/ExcavatorRightExtensionInches"))
 
-    left_extension_pct = _optional_float(values.get("Jetson/ExcavatorLeftExtensionPct"))
+    left_extension_pct = _optional_float(values.get("Excav/BotLeftExtensionPct"))
     if left_extension_pct is None:
-        left_extension_pct = _optional_float(values.get("Excav/BotLeftExtensionPct"))
+        left_extension_pct = _optional_float(values.get("Jetson/ExcavatorLeftExtensionPct"))
 
-    right_extension_pct = _optional_float(values.get("Jetson/ExcavatorRightExtensionPct"))
+    right_extension_pct = _optional_float(values.get("Excav/BotRightExtensionPct"))
     if right_extension_pct is None:
-        right_extension_pct = _optional_float(values.get("Excav/BotRightExtensionPct"))
+        right_extension_pct = _optional_float(values.get("Jetson/ExcavatorRightExtensionPct"))
 
-    position_calibrated = _optional_bool(values.get("Jetson/ExcavatorBottomPositionCalibrated"))
+    position_calibrated = _optional_bool(values.get("Excav/BottomPositionCalibrated"))
     if position_calibrated is None:
-        position_calibrated = _optional_bool(values.get("Excav/BottomPositionCalibrated"))
+        position_calibrated = _optional_bool(values.get("Jetson/ExcavatorBottomPositionCalibrated"))
 
     return JetsonMotorTelemetry(
         drive=DriveTelemetry(
