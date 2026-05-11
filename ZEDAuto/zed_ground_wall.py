@@ -3126,11 +3126,9 @@ def main():
             return
 
         h, w = frame.shape[:2]
-        line_color = (255, 255, 0)
-        fill_color = (255, 255, 0)
-        core_color = (255, 255, 255)
-        glow_color = (90, 220, 220)
-        shadow_color = (0, 0, 0)
+        line_color = (0, 255, 255)
+        point_color = (0, 255, 255)
+        core_color = (220, 255, 255)
         display_points = []
         for world_x_m, world_y_m in lidar_overlay_points_world:
             rc = map_world_to_grid(world_x_m, world_y_m)
@@ -3148,24 +3146,27 @@ def main():
         if len(display_points) >= 2:
             max_link_dist_px = 22.0 if lidar_only_view else 14.0
             max_link_dist_sq = max_link_dist_px * max_link_dist_px
-            prev_dr, prev_dc = display_points[0]
+            line_thickness = 2 if lidar_only_view else 1
+            segment = [display_points[0]]
             for dr, dc in display_points[1:]:
+                prev_dr, prev_dc = segment[-1]
                 dist_sq = float((dr - prev_dr) * (dr - prev_dr) + (dc - prev_dc) * (dc - prev_dc))
                 if dist_sq <= max_link_dist_sq:
-                    cv2.line(frame, (prev_dc, prev_dr), (dc, dr), glow_color, 3, cv2.LINE_AA)
-                    cv2.line(frame, (prev_dc, prev_dr), (dc, dr), line_color, 1, cv2.LINE_AA)
-                prev_dr, prev_dc = dr, dc
+                    segment.append((dr, dc))
+                    continue
+                if len(segment) >= 2:
+                    pts = np.array([(c, r) for r, c in segment], dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(frame, [pts], False, line_color, line_thickness, cv2.LINE_AA)
+                segment = [(dr, dc)]
+            if len(segment) >= 2:
+                pts = np.array([(c, r) for r, c in segment], dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(frame, [pts], False, line_color, line_thickness, cv2.LINE_AA)
 
-        point_shadow_r = 5 if lidar_only_view else 4
-        point_glow_r = 4 if lidar_only_view else 3
-        point_fill_r = 3 if lidar_only_view else 2
-        point_core_r = 2 if lidar_only_view else 1
+        point_radius = 1 if lidar_only_view else 0
         for dr, dc in display_points:
-            # Draw a dark backing first so live LiDAR points stay visible over the map.
-            cv2.circle(frame, (dc, dr), point_shadow_r, shadow_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, (dc, dr), point_glow_r, glow_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, (dc, dr), point_fill_r, fill_color, -1, cv2.LINE_AA)
-            cv2.circle(frame, (dc, dr), point_core_r, core_color, -1, cv2.LINE_AA)
+            frame[dr, dc, :] = core_color
+            if point_radius > 0:
+                cv2.circle(frame, (dc, dr), point_radius, point_color, -1, cv2.LINE_AA)
 
         if lidar_overlay_pose_xy is not None:
             rc = map_world_to_grid(lidar_overlay_pose_xy[0], lidar_overlay_pose_xy[1])
