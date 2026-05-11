@@ -616,6 +616,9 @@ def main():
     parser.add_argument("--rock-conf", type=float, default=0.35, help="Rock detection confidence threshold")
     parser.add_argument("--rock-every", type=int, default=5, help="Run rock detection every N frames")
     parser.add_argument("--rock-stamp", type=float, default=6.0, help="Obstacle evidence to stamp per detected rock cell")
+    parser.add_argument("--rock-debug", action="store_true", help="Print custom YOLO rock detection decisions")
+    parser.add_argument("--rock-snapshot-dir", default="", help="Directory to save annotated frames when rocks are detected")
+    parser.add_argument("--rock-snapshot-cooldown", type=float, default=2.0, help="Minimum seconds between saved rock snapshots")
     parser.add_argument("--rock-classes", default="rock,stone,boulder", help="Comma-separated class names to treat as rocks")
     parser.add_argument(
         "--landmark-classes",
@@ -815,6 +818,7 @@ def main():
     # Rock detection via custom YOLO model
     rock_model = None
     rock_last_frame = -999999
+    rock_last_snapshot_time = 0.0
     rock_class_names = _parse_class_name_set(args.rock_classes)
     landmark_class_names = _parse_class_name_set(args.landmark_classes)
     if args.rock_model:
@@ -1313,6 +1317,7 @@ def main():
     status_target_cell = None
     status_target_world = None
     camera_overlay_enabled = True
+    rock_overlay_detections = []
     auto_digger_enabled = False
     test_excavation_left_extend_active = False
     test_excavation_right_extend_active = False
@@ -1323,6 +1328,10 @@ def main():
     test_door_close_active = False
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
+    actuator_left_extension_inches = None
+    actuator_right_extension_inches = None
+    actuator_bottom_position_calibrated = None
+    actuator_sync_fault = None
     direct_nav_enabled = False
     last_path_plan_time = 0.0
     last_auto_fwd_cmd = 0.0
@@ -1977,11 +1986,26 @@ def main():
                 return value
         return None
 
+    def _read_first_nt_boolean(keys):
+        if sd is None:
+            return None
+        for key in keys:
+            try:
+                if hasattr(sd, "containsKey") and not sd.containsKey(key):
+                    continue
+                return bool(sd.getBoolean(key, False))
+            except Exception:
+                continue
+        return None
+
     def refresh_actuator_feedback():
         nonlocal actuator_left_extension_pct, actuator_right_extension_pct
+        nonlocal actuator_left_extension_inches, actuator_right_extension_inches
+        nonlocal actuator_bottom_position_calibrated, actuator_sync_fault
         left_pct = _read_first_nt_number(
             (
                 "Jetson/ExcavatorLeftExtensionPct",
+                "Excav/BotLeftExtensionPct",
                 "Jetson/LeftActuatorExtensionPct",
                 "Excavator/LeftExtensionPct",
             )
@@ -1989,12 +2013,34 @@ def main():
         right_pct = _read_first_nt_number(
             (
                 "Jetson/ExcavatorRightExtensionPct",
+                "Excav/BotRightExtensionPct",
                 "Jetson/RightActuatorExtensionPct",
                 "Excavator/RightExtensionPct",
             )
         )
+        left_inches = _read_first_nt_number(
+            (
+                "Jetson/ExcavatorLeftExtensionInches",
+                "Excav/BotLeftInches",
+            )
+        )
+        right_inches = _read_first_nt_number(
+            (
+                "Jetson/ExcavatorRightExtensionInches",
+                "Excav/BotRightInches",
+            )
+        )
         actuator_left_extension_pct = None if left_pct is None else max(0.0, min(100.0, left_pct))
         actuator_right_extension_pct = None if right_pct is None else max(0.0, min(100.0, right_pct))
+        actuator_left_extension_inches = left_inches
+        actuator_right_extension_inches = right_inches
+        actuator_bottom_position_calibrated = _read_first_nt_boolean(
+            (
+                "Jetson/ExcavatorBottomPositionCalibrated",
+                "Excav/BottomPositionCalibrated",
+            )
+        )
+        actuator_sync_fault = _read_first_nt_boolean(("Excav/SyncFault",))
 
     def refresh_camera_servo_state():
         nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
@@ -2495,6 +2541,10 @@ def main():
             "actuators": {
                 "left_extension_pct": actuator_left_extension_pct,
                 "right_extension_pct": actuator_right_extension_pct,
+                "left_extension_inches": actuator_left_extension_inches,
+                "right_extension_inches": actuator_right_extension_inches,
+                "bottom_position_calibrated": actuator_bottom_position_calibrated,
+                "sync_fault": actuator_sync_fault,
                 "left_extend_command": bool(test_excavation_left_extend_active),
                 "right_extend_command": bool(test_excavation_right_extend_active),
                 "dig_command": bool(test_excavation_dig_active),
@@ -4121,11 +4171,19 @@ def main():
         refresh_actuator_feedback()
         left_pct_text = "n/a" if actuator_left_extension_pct is None else f"{actuator_left_extension_pct:.0f}%"
         right_pct_text = "n/a" if actuator_right_extension_pct is None else f"{actuator_right_extension_pct:.0f}%"
+        left_in_text = "n/a" if actuator_left_extension_inches is None else f"{actuator_left_extension_inches:.2f}in"
+        right_in_text = "n/a" if actuator_right_extension_inches is None else f"{actuator_right_extension_inches:.2f}in"
+        cal_text = "CAL" if actuator_bottom_position_calibrated else "UNCAL"
+        if actuator_bottom_position_calibrated is None:
+            cal_text = "CAL?"
+        sync_text = "SYNC FAULT" if actuator_sync_fault else "SYNC OK"
+        if actuator_sync_fault is None:
+            sync_text = "SYNC?"
         put_line(
-            f"Actuator extension: Left {left_pct_text} | Right {right_pct_text}",
+            f"Actuator extension: L {left_in_text} ({left_pct_text}) | R {right_in_text} ({right_pct_text}) | {cal_text} | {sync_text}",
             servo_info_y + 360,
-            (200, 240, 255),
-            0.46,
+            (0, 120, 255) if actuator_sync_fault else (200, 240, 255),
+            0.40,
         )
 
         def draw_pct_bar(x0, y0, width, height, label, value, active):
@@ -5453,17 +5511,82 @@ def main():
                                         verbose=False,
                                     )[0]
                                     _names = _results.names if hasattr(_results, "names") else {}
+                                    _boxes = list(_results.boxes or [])
+                                    if args.rock_debug:
+                                        print(
+                                            "[RockDebug] "
+                                            f"frame={frame_idx} boxes={len(_boxes)} "
+                                            f"map_ok={map_integration_ok} "
+                                            f"tracking_ok={tracking_pose_ok} "
+                                            f"driver_priority={driver_priority_active}"
+                                        )
                                     _ih, _iw = _img_bgr.shape[:2]
                                     _cld_h, _cld_w = cloud.shape[:2]
                                     _det_R_world_cam = np.array(R_world_cam, dtype=np.float32).reshape(3, 3)
                                     _det_t_map = np.array(t_map, dtype=np.float32).reshape(3,)
                                     _landmark_pose_changed = False
-                                    for _det in (_results.boxes or []):
+                                    for _det in _boxes:
                                         _lbl = str(_names.get(int(_det.cls[0]), "")).strip().lower()
                                         if not _lbl:
+                                            if args.rock_debug:
+                                                print("[RockDebug] skip unlabeled detection")
                                             continue
                                         _conf = float(_det.conf[0]) if hasattr(_det, "conf") else float(args.rock_conf)
                                         _x1, _y1, _x2, _y2 = _det.xyxy[0].tolist()
+                                        if _lbl == "rock":
+                                            _now_overlay = time.time()
+                                            rock_overlay_detections = [
+                                                _item
+                                                for _item in rock_overlay_detections
+                                                if (_now_overlay - float(_item.get("time", 0.0))) <= 1.0
+                                            ]
+                                            rock_overlay_detections.append(
+                                                {
+                                                    "time": _now_overlay,
+                                                    "label": _lbl,
+                                                    "conf": _conf,
+                                                    "box": (_x1, _y1, _x2, _y2),
+                                                    "size": (_iw, _ih),
+                                                }
+                                            )
+                                            rock_overlay_detections = rock_overlay_detections[-12:]
+                                        if _lbl == "rock" and args.rock_snapshot_dir:
+                                            _now_snapshot = time.time()
+                                            if (_now_snapshot - rock_last_snapshot_time) >= max(
+                                                0.0,
+                                                float(args.rock_snapshot_cooldown),
+                                            ):
+                                                try:
+                                                    os.makedirs(args.rock_snapshot_dir, exist_ok=True)
+                                                    _snap = _img_bgr.copy()
+                                                    _sx1 = max(0, min(_iw - 1, int(_x1)))
+                                                    _sy1 = max(0, min(_ih - 1, int(_y1)))
+                                                    _sx2 = max(0, min(_iw - 1, int(_x2)))
+                                                    _sy2 = max(0, min(_ih - 1, int(_y2)))
+                                                    cv2.rectangle(_snap, (_sx1, _sy1), (_sx2, _sy2), (0, 0, 255), 2)
+                                                    cv2.putText(
+                                                        _snap,
+                                                        f"rock {_conf:.2f}",
+                                                        (_sx1, max(18, _sy1 - 8)),
+                                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                                        0.7,
+                                                        (0, 0, 255),
+                                                        2,
+                                                        cv2.LINE_AA,
+                                                    )
+                                                    _stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(_now_snapshot))
+                                                    _snap_path = os.path.join(
+                                                        args.rock_snapshot_dir,
+                                                        f"rock_{_stamp}_frame{frame_idx}_conf{_conf:.2f}.jpg",
+                                                    )
+                                                    if cv2.imwrite(_snap_path, _snap):
+                                                        rock_last_snapshot_time = _now_snapshot
+                                                        print(f"[RockSnapshot] saved {_snap_path}")
+                                                    elif args.rock_debug:
+                                                        print(f"[RockSnapshot] failed to save {_snap_path}")
+                                                except Exception as _snap_exc:
+                                                    if args.rock_debug:
+                                                        print(f"[RockSnapshot] failed: {_snap_exc}")
                                         _cx = int((_x1 + _x2) / 2)
                                         _cy = int((_y1 + _y2) / 2)
                                         _pc_c = int(_cx * _cld_w / max(1, _iw))
@@ -5472,6 +5595,12 @@ def main():
                                         _pc_c = max(0, min(_cld_w - 1, _pc_c))
                                         _pt = cloud[_pc_r, _pc_c, :3]
                                         if not np.isfinite(_pt).all():
+                                            if args.rock_debug:
+                                                print(
+                                                    "[RockDebug] "
+                                                    f"skip label={_lbl} conf={_conf:.2f} "
+                                                    f"center=({_cx},{_cy}) reason=invalid_depth"
+                                                )
                                             continue
 
                                         _is_landmark = _lbl in landmark_class_names
@@ -5497,6 +5626,12 @@ def main():
                                         _pt_w = (_det_R_world_cam @ _pt.astype(np.float32)) + _det_t_map
                                         _rc = map_world_to_grid(_pt_w[0], _pt_w[2])
                                         if _rc is None:
+                                            if args.rock_debug:
+                                                print(
+                                                    "[RockDebug] "
+                                                    f"skip label={_lbl} conf={_conf:.2f} "
+                                                    f"point=({_pt_w[0]:+.2f},{_pt_w[2]:+.2f}) reason=off_map"
+                                                )
                                             continue
                                         _rr, _cc = _rc
 
@@ -5505,6 +5640,21 @@ def main():
                                             _c0 = max(0, _cc - 1); _c1 = min(occ_map.grid_w - 1, _cc + 1)
                                             occ_map.occ_counts[_r0:_r1+1, _c0:_c1+1] += float(args.rock_stamp)
                                             occ_map.free_counts[_r0:_r1+1, _c0:_c1+1] = 0.0
+                                            if args.rock_debug:
+                                                print(
+                                                    "[RockDebug] "
+                                                    f"stamp label={_lbl} conf={_conf:.2f} "
+                                                    f"grid=({_rr},{_cc}) point=({_pt_w[0]:+.2f},{_pt_w[2]:+.2f})"
+                                                )
+                                        elif args.rock_debug:
+                                            reason = "not_in_rock_classes"
+                                            if _is_obstacle and not map_integration_ok:
+                                                reason = "map_paused"
+                                            print(
+                                                "[RockDebug] "
+                                                f"no_stamp label={_lbl} conf={_conf:.2f} "
+                                                f"grid=({_rr},{_cc}) reason={reason}"
+                                            )
 
                                         if _is_landmark and (
                                             ((not tracking_enabled) or tracking_pose_ok)
@@ -6188,6 +6338,51 @@ def main():
                         vis = cv2.addWeighted(img, 0.6, overlay, 0.4, 0)
                     else:
                         vis = img.copy()
+
+                    # Custom YOLO rock overlay. Detection runs every N frames, so keep
+                    # recent boxes on screen briefly between inference passes.
+                    now_overlay = time.time()
+                    rock_overlay_detections = [
+                        item
+                        for item in rock_overlay_detections
+                        if (now_overlay - float(item.get("time", 0.0))) <= 1.0
+                    ]
+                    for item in rock_overlay_detections:
+                        box = item.get("box")
+                        src_size = item.get("size", (w, h))
+                        if not box:
+                            continue
+                        src_w, src_h = src_size
+                        if src_w <= 0 or src_h <= 0:
+                            continue
+                        scale_x = float(w) / float(src_w)
+                        scale_y = float(h) / float(src_h)
+                        x1 = max(0, min(w - 1, int(float(box[0]) * scale_x)))
+                        y1 = max(0, min(h - 1, int(float(box[1]) * scale_y)))
+                        x2 = max(0, min(w - 1, int(float(box[2]) * scale_x)))
+                        y2 = max(0, min(h - 1, int(float(box[3]) * scale_y)))
+                        if x2 <= x1 or y2 <= y1:
+                            continue
+                        label = str(item.get("label", "rock"))
+                        conf = float(item.get("conf", 0.0))
+                        color = (0, 255, 255)
+                        text = f"{label} {conf:.0%}"
+                        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+                        text_size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 2)
+                        label_y0 = max(0, y1 - text_size[1] - 8)
+                        label_y1 = max(text_size[1] + 8, y1)
+                        label_x1 = min(w - 1, x1 + text_size[0] + 8)
+                        cv2.rectangle(vis, (x1, label_y0), (label_x1, label_y1), color, -1)
+                        cv2.putText(
+                            vis,
+                            text,
+                            (x1 + 4, label_y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.58,
+                            (0, 0, 0),
+                            2,
+                            cv2.LINE_AA,
+                        )
 
                     # Human detection overlay
                     human_person_map_points = []
