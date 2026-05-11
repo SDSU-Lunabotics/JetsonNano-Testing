@@ -5376,9 +5376,15 @@ def main():
             if tracking_enabled:
                 # --- Write ZED pose for lidar integration ---
                 try:
-                    # Use last_valid_t_world_cam (x, y) and heading from last_valid_rover_forward_world
-                    x = float(last_valid_t_world_cam[0])
-                    y = float(last_valid_t_world_cam[2])  # Z is forward in world frame
+                    # Publish rover-center pose, not the camera lens position, so
+                    # the LiDAR overlay aligns with the rover body on the map.
+                    rover_pos_world = (
+                        np.array(last_valid_t_world_cam, dtype=np.float32)
+                        - np.array(last_valid_rover_forward_world, dtype=np.float32) * float(camera_forward_offset_m)
+                        - np.array(last_valid_rover_right_world, dtype=np.float32) * float(camera_right_offset_m)
+                    )
+                    x = float(rover_pos_world[0])
+                    y = float(rover_pos_world[2])  # Z is forward in world frame
                     if (not args.complex) and map_origin_set:
                         map_x = x - float(map_origin_t[0])
                         map_y = y - float(map_origin_t[2])
@@ -5393,6 +5399,15 @@ def main():
                         float(last_valid_rover_forward_world[2]),
                         float(last_valid_rover_forward_world[0])
                     )
+                    camera_forward_world = camera_forward_from_rover_axes(
+                        last_valid_rover_forward_world,
+                        last_valid_rover_right_world,
+                        current_camera_mount_yaw_deg(),
+                    )
+                    overlay_yaw_rad = math.atan2(
+                        float(camera_forward_world[2]),
+                        float(camera_forward_world[0]),
+                    )
                     zed_utils.write_lidar_pose_json(
                         x,
                         y,
@@ -5401,6 +5416,7 @@ def main():
                         map_y=map_y,
                         map_origin_x=map_origin_x,
                         map_origin_y=map_origin_y,
+                        overlay_yaw_rad=overlay_yaw_rad,
                     )
                 except Exception as exc:
                     print(f"[LidarPose] Failed to write pose: {exc}")

@@ -10,6 +10,7 @@ def write_lidar_pose_json(
     map_y=None,
     map_origin_x=None,
     map_origin_y=None,
+    overlay_yaw_rad=None,
 ):
     """
     Write the current pose for lidar integration.
@@ -32,6 +33,8 @@ def write_lidar_pose_json(
         payload["map_origin_x"] = float(map_origin_x)
     if map_origin_y is not None:
         payload["map_origin_y"] = float(map_origin_y)
+    if overlay_yaw_rad is not None:
+        payload["overlay_yaw_rad"] = float(overlay_yaw_rad)
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f)

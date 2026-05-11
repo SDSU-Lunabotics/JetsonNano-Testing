@@ -99,6 +99,7 @@ class ExternalPoseSource:
         self.max_age_sec = max_age_sec
         self._last_pose: tuple[float, float, float] | None = None
         self._last_update_ts: float | None = None
+        self._last_overlay_yaw_rad: float | None = None
 
     @property
     def is_live(self) -> bool:
@@ -133,6 +134,14 @@ class ExternalPoseSource:
             yaw_rad = math.radians(float(payload['yaw_deg']))
         else:
             raise KeyError('Missing yaw field')
+        overlay_yaw_raw = payload.get('overlay_yaw_rad')
+        if overlay_yaw_raw is not None:
+            try:
+                self._last_overlay_yaw_rad = _wrap_angle(float(overlay_yaw_raw))
+            except Exception:
+                self._last_overlay_yaw_rad = None
+        else:
+            self._last_overlay_yaw_rad = None
 
         timestamp = payload.get('timestamp')
         now = time.time()
@@ -145,3 +154,7 @@ class ExternalPoseSource:
         self._last_pose = pose
         self._last_update_ts = stat.st_mtime
         return pose, is_fresh
+
+    @property
+    def overlay_yaw_rad(self) -> float | None:
+        return self._last_overlay_yaw_rad

@@ -228,6 +228,7 @@ class _AppState:
         self.args     = args
         self.frame    = 0
         self.sensor_yaw_offset_rad = math.radians(float(args.sensor_yaw_offset_deg))
+        self.overlay_center_yaw_rad = None
         self._last_webui_warn_ts = 0.0
         self._interactive = bool(fig is not None and ax_polar is not None and ax_map is not None)
         self.img = None
@@ -308,6 +309,7 @@ class _AppState:
                 if pose_fresh:
                     self.mapper.sensor_x_m = float(pose_x_m)
                     self.mapper.sensor_y_m = float(pose_y_m)
+                self.overlay_center_yaw_rad = self.pose_source.overlay_yaw_rad
                 self.mapper.set_external_yaw(
                     pose_yaw_rad + self.sensor_yaw_offset_rad,
                     is_fresh=pose_fresh,
@@ -389,11 +391,25 @@ class _AppState:
 
         angles = angles[valid]
         dists = dists[valid]
+        local_x = dists * np.cos(angles)
+        local_y = dists * np.sin(angles)
+
+        c = np.cos(self.mapper.sensor_yaw_rad)
+        s = np.sin(self.mapper.sensor_yaw_rad)
+        world_x = self.mapper.sensor_x_m + (c * local_x - s * local_y)
+        world_y = self.mapper.sensor_y_m + (s * local_x + c * local_y)
+
         overlay_fov_deg = float(self.args.overlay_fov_deg)
         if 0.0 < overlay_fov_deg < 359.0:
             half_fov_rad = math.radians(overlay_fov_deg * 0.5)
-            forward_rel = _wrap_angle_array(angles + self.sensor_yaw_offset_rad)
-            keep = np.abs(forward_rel) <= half_fov_rad
+            overlay_center_yaw = self.overlay_center_yaw_rad
+            if overlay_center_yaw is None:
+                overlay_center_yaw = self.mapper.sensor_yaw_rad
+            world_bearing = np.arctan2(
+                world_y - float(self.mapper.sensor_y_m),
+                world_x - float(self.mapper.sensor_x_m),
+            )
+            keep = np.abs(_wrap_angle_array(world_bearing - overlay_center_yaw)) <= half_fov_rad
             if not np.any(keep):
                 payload = {
                     'timestamp': time.time(),
@@ -407,15 +423,8 @@ class _AppState:
                 }
                 _write_json_atomic(self.args.overlay_file, payload)
                 return
-            angles = angles[keep]
-            dists = dists[keep]
-        local_x = dists * np.cos(angles)
-        local_y = dists * np.sin(angles)
-
-        c = np.cos(self.mapper.sensor_yaw_rad)
-        s = np.sin(self.mapper.sensor_yaw_rad)
-        world_x = self.mapper.sensor_x_m + (c * local_x - s * local_y)
-        world_y = self.mapper.sensor_y_m + (s * local_x + c * local_y)
+            world_x = world_x[keep]
+            world_y = world_y[keep]
 
         stride = max(1, int(self.args.overlay_stride))
         world_points = [
