@@ -283,6 +283,11 @@ if [[ -n "${ROCK_MODEL:-}" ]]; then
   cmd+=(--rock-conf "${ROCK_CONF:-0.35}")
   cmd+=(--rock-every "${ROCK_EVERY:-5}")
   cmd+=(--rock-stamp "${ROCK_STAMP:-6.0}")
+  if [[ "${ROCK_DEBUG:-0}" == "1" ]]; then cmd+=(--rock-debug); fi
+  if [[ -n "${ROCK_SNAPSHOT_DIR:-}" ]]; then
+    cmd+=(--rock-snapshot-dir "${ROCK_SNAPSHOT_DIR}")
+    cmd+=(--rock-snapshot-cooldown "${ROCK_SNAPSHOT_COOLDOWN:-2.0}")
+  fi
   cmd+=(--rock-classes "${ROCK_CLASSES:-rock,stone,boulder}")
 fi
 if [[ "${LANDMARK_MEMORY:-1}" == "1" ]]; then
