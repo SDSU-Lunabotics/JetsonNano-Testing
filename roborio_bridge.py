@@ -132,6 +132,29 @@ DATA_KEYS = {
     "Deposit/Depositing": "boolean",
     "Deposit/DoorState": "string",
     "Deposit/TorqueCurrentA": "number",
+    "Deposit/TailgateCounts": "number",
+    "Deposit/TailgateInches": "number",
+    "Deposit/TailgateExtensionPct": "number",
+    "Deposit/TailgatePositionCalibrated": "boolean",
+    "Deposit/TailgateState": "string",
+    "Deposit/TailgateMoving": "boolean",
+    "Deposit/TailgateOpen": "boolean",
+    "Deposit/TailgateClosed": "boolean",
+    "Deposit/TailgateTorqueCurrentA": "number",
+    "Tailgate/Counts": "number",
+    "Tailgate/Inches": "number",
+    "Tailgate/ExtensionPct": "number",
+    "Tailgate/PositionCalibrated": "boolean",
+    "Tailgate/State": "string",
+    "Tailgate/Moving": "boolean",
+    "Tailgate/Open": "boolean",
+    "Tailgate/Closed": "boolean",
+    "Tailgate/TorqueCurrentA": "number",
+    "Jetson/TailgateCounts": "number",
+    "Jetson/TailgateInches": "number",
+    "Jetson/TailgateExtensionPct": "number",
+    "Jetson/TailgatePositionCalibrated": "boolean",
+    "Jetson/TailgateState": "string",
     "MainRover/CurrentLimitEnabled": "boolean",
     "MainRover/DriveCurrentLimitA": "number",
     "MainRover/ExcavCurrentLimitA": "number",
@@ -458,6 +481,34 @@ def read_dynamic_controller_values():
     return values
 
 
+def read_dynamic_actuator_values():
+    """
+    Surface newly added actuator telemetry without requiring the bridge whitelist
+    to know every RoboRIO key spelling ahead of time.
+    """
+    try:
+        keys = sd.getKeys()
+    except Exception:
+        return {}
+
+    values = {}
+    actuator_tokens = ("tailgate", "gateactuator", "gate_actuator", "dooractuator", "door_actuator")
+
+    for key in keys:
+        normalized = re.sub(r"[^a-z0-9]+", "", key.lower())
+        if not any(token in normalized for token in actuator_tokens):
+            continue
+        if key in DATA_KEYS:
+            continue
+
+        try:
+            values[key] = sd.getValue(key, None)
+        except Exception:
+            continue
+
+    return values
+
+
 def infer_controller_status(values):
     controller_keys = {}
     connected = None
@@ -683,6 +734,7 @@ class Handler(BaseHTTPRequestHandler):
             }
             dynamic_controller_values = read_dynamic_controller_values()
             values.update(dynamic_controller_values)
+            values.update(read_dynamic_actuator_values())
             values.update(read_battery_values(available_keys))
             battery = normalize_battery_voltage(values)
             connected = NetworkTables.isConnected()

@@ -59,6 +59,14 @@ class ActuatorUiState(BaseModel):
     right_extension_pct: Optional[float] = None
     left_extension_inches: Optional[float] = None
     right_extension_inches: Optional[float] = None
+    tailgate_extension_pct: Optional[float] = None
+    tailgate_inches: Optional[float] = None
+    tailgate_counts: Optional[float] = None
+    tailgate_position_calibrated: Optional[bool] = None
+    tailgate_state: Optional[str] = None
+    tailgate_moving: Optional[bool] = None
+    tailgate_open: Optional[bool] = None
+    tailgate_closed: Optional[bool] = None
     bottom_position_calibrated: Optional[bool] = None
     sync_fault: Optional[bool] = None
     left_extend_command: bool = False

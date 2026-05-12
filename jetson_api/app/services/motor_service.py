@@ -148,6 +148,30 @@ def _optional_str(value) -> Optional[str]:
     return text or None
 
 
+def _first_float(values: Dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        value = _optional_float(values.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _first_bool(values: Dict[str, Any], *keys: str) -> Optional[bool]:
+    for key in keys:
+        value = _optional_bool(values.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _first_str(values: Dict[str, Any], *keys: str) -> Optional[str]:
+    for key in keys:
+        value = _optional_str(values.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _parse_motor_id(value: Any) -> MotorId:
     raw = str(value).strip()
     candidates = [
@@ -351,6 +375,74 @@ def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetr
             depositing=_optional_bool(values.get("Deposit/Depositing")),
             door_state=_optional_str(values.get("Deposit/DoorState")),
             torque_current_a=_optional_float(values.get("Deposit/TorqueCurrentA")),
+            tailgate_counts=_first_float(
+                values,
+                "Deposit/TailgateCounts",
+                "Tailgate/Counts",
+                "Jetson/TailgateCounts",
+                "Jetson/GateActuatorCounts",
+                "GateActuator/Counts",
+            ),
+            tailgate_inches=_first_float(
+                values,
+                "Deposit/TailgateInches",
+                "Tailgate/Inches",
+                "Jetson/TailgateInches",
+                "Jetson/GateActuatorInches",
+                "GateActuator/Inches",
+            ),
+            tailgate_extension_pct=_first_float(
+                values,
+                "Deposit/TailgateExtensionPct",
+                "Tailgate/ExtensionPct",
+                "Jetson/TailgateExtensionPct",
+                "Jetson/GateActuatorExtensionPct",
+                "GateActuator/ExtensionPct",
+            ),
+            tailgate_position_calibrated=_first_bool(
+                values,
+                "Deposit/TailgatePositionCalibrated",
+                "Tailgate/PositionCalibrated",
+                "Jetson/TailgatePositionCalibrated",
+                "Jetson/GateActuatorPositionCalibrated",
+                "GateActuator/PositionCalibrated",
+            ),
+            tailgate_state=_first_str(
+                values,
+                "Deposit/TailgateState",
+                "Tailgate/State",
+                "Jetson/TailgateState",
+                "Jetson/GateActuatorState",
+                "GateActuator/State",
+            ),
+            tailgate_moving=_first_bool(
+                values,
+                "Deposit/TailgateMoving",
+                "Tailgate/Moving",
+                "Jetson/TailgateMoving",
+                "GateActuator/Moving",
+            ),
+            tailgate_open=_first_bool(
+                values,
+                "Deposit/TailgateOpen",
+                "Tailgate/Open",
+                "Jetson/TailgateOpen",
+                "GateActuator/Open",
+            ),
+            tailgate_closed=_first_bool(
+                values,
+                "Deposit/TailgateClosed",
+                "Tailgate/Closed",
+                "Jetson/TailgateClosed",
+                "GateActuator/Closed",
+            ),
+            tailgate_torque_current_a=_first_float(
+                values,
+                "Deposit/TailgateTorqueCurrentA",
+                "Tailgate/TorqueCurrentA",
+                "Jetson/TailgateTorqueCurrentA",
+                "GateActuator/TorqueCurrentA",
+            ),
         ),
         current_limits=CurrentLimitsTelemetry(
             enabled=_optional_bool(values.get("MainRover/CurrentLimitEnabled")),
@@ -472,10 +564,28 @@ def _build_motor_health_rows(
         ),
         MotorHealth(
             motor_id=MotorId.deposition,
-            connected=True if _has_any(values, "Deposit/Running", "Deposit/Output", "Deposit/TorqueCurrentA", "Deposit/DoorState") else None,
+            connected=True if _has_any(
+                values,
+                "Deposit/Running",
+                "Deposit/Output",
+                "Deposit/TorqueCurrentA",
+                "Deposit/DoorState",
+                "Deposit/TailgateCounts",
+                "Deposit/TailgateInches",
+                "Deposit/TailgateExtensionPct",
+                "Tailgate/Counts",
+                "Tailgate/Inches",
+                "Tailgate/ExtensionPct",
+                "Jetson/TailgateCounts",
+                "Jetson/TailgateInches",
+                "Jetson/TailgateExtensionPct",
+            ) else None,
             enabled=_deposition_is_active(telemetry),
             active=_deposition_is_active(telemetry),
-            current_a=telemetry.deposition.torque_current_a,
+            current_a=_max_optional_float(
+                telemetry.deposition.torque_current_a,
+                telemetry.deposition.tailgate_torque_current_a,
+            ),
             output_percent=telemetry.deposition.output,
             state=_compose_deposition_state(telemetry),
             last_update_ms=timestamp,
@@ -483,6 +593,15 @@ def _build_motor_health_rows(
                 "door_state": telemetry.deposition.door_state,
                 "collecting_assist": telemetry.deposition.collecting_assist,
                 "depositing": telemetry.deposition.depositing,
+                "tailgate_counts": telemetry.deposition.tailgate_counts,
+                "tailgate_inches": telemetry.deposition.tailgate_inches,
+                "tailgate_extension_pct": telemetry.deposition.tailgate_extension_pct,
+                "tailgate_position_calibrated": telemetry.deposition.tailgate_position_calibrated,
+                "tailgate_state": telemetry.deposition.tailgate_state,
+                "tailgate_moving": telemetry.deposition.tailgate_moving,
+                "tailgate_open": telemetry.deposition.tailgate_open,
+                "tailgate_closed": telemetry.deposition.tailgate_closed,
+                "tailgate_torque_current_a": telemetry.deposition.tailgate_torque_current_a,
             },
         ),
     ]
@@ -565,7 +684,10 @@ def _build_motor_cards(telemetry: JetsonMotorTelemetry) -> MotorCardsTelemetry:
         label="Deposition",
         active=_deposition_is_active(telemetry),
         enabled=_deposition_is_active(telemetry),
-        current_a=telemetry.deposition.torque_current_a,
+        current_a=_max_optional_float(
+            telemetry.deposition.torque_current_a,
+            telemetry.deposition.tailgate_torque_current_a,
+        ),
         output_percent=telemetry.deposition.output,
         state=_compose_deposition_state(telemetry),
         source="Deposit/Running",
@@ -648,7 +770,9 @@ def _deposition_is_active(telemetry: JetsonMotorTelemetry) -> Optional[bool]:
         _active_from_output(telemetry.deposition.output),
         telemetry.deposition.collecting_assist,
         telemetry.deposition.depositing,
+        telemetry.deposition.tailgate_moving,
         _active_from_magnitude(telemetry.deposition.torque_current_a, 0.5),
+        _active_from_magnitude(telemetry.deposition.tailgate_torque_current_a, 0.5),
     )
 
 
@@ -663,6 +787,12 @@ def _compose_deposition_state(telemetry: JetsonMotorTelemetry) -> Optional[str]:
     states: List[str] = []
     if telemetry.deposition.door_state:
         states.append(telemetry.deposition.door_state)
+    if telemetry.deposition.tailgate_state:
+        states.append(f"TAILGATE_{telemetry.deposition.tailgate_state}")
+    elif telemetry.deposition.tailgate_open:
+        states.append("TAILGATE_OPEN")
+    elif telemetry.deposition.tailgate_closed:
+        states.append("TAILGATE_CLOSED")
     if telemetry.deposition.collecting_assist:
         states.append("COLLECTING_ASSIST")
     if telemetry.deposition.depositing:

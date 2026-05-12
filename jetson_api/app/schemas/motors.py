@@ -97,6 +97,15 @@ class DepositionTelemetry(BaseModel):
     depositing: Optional[bool] = None
     door_state: Optional[str] = None
     torque_current_a: Optional[float] = None
+    tailgate_counts: Optional[float] = None
+    tailgate_inches: Optional[float] = None
+    tailgate_extension_pct: Optional[float] = None
+    tailgate_position_calibrated: Optional[bool] = None
+    tailgate_state: Optional[str] = None
+    tailgate_moving: Optional[bool] = None
+    tailgate_open: Optional[bool] = None
+    tailgate_closed: Optional[bool] = None
+    tailgate_torque_current_a: Optional[float] = None
 
 
 class CurrentLimitsTelemetry(BaseModel):
