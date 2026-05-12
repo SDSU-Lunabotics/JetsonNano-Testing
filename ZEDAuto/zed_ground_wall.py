@@ -343,24 +343,30 @@ def main():
         default=1.4,
         help="Max change rate of forward command during auto path driving (command units per second)",
     )
-    parser.add_argument("--drive-turn-k", type=float, default=0.8, help="Turn gain for heading error")
+    parser.add_argument("--drive-turn-k", type=float, default=0.65, help="Turn gain for heading error")
     parser.add_argument(
         "--drive-max-turn-cmd",
         type=float,
-        default=0.60,
+        default=0.50,
         help="Maximum absolute turn command while auto-driving (0-1)",
     )
     parser.add_argument(
         "--drive-slow-turn-deg",
         type=float,
-        default=12.0,
+        default=20.0,
         help="Begin reducing forward speed above this heading error (deg)",
     )
     parser.add_argument(
         "--drive-stop-turn-deg",
         type=float,
-        default=22.0,
+        default=40.0,
         help="Stop forward motion above this heading error (deg)",
+    )
+    parser.add_argument(
+        "--drive-min-turn-forward-scale",
+        type=float,
+        default=0.20,
+        help="Minimum forward-speed scale to keep while auto-turning toward the path (0-1).",
     )
     parser.add_argument(
         "--drive-turn-slew-per-sec",
@@ -442,8 +448,8 @@ def main():
         default=0.40,
         help="How long to continue backup once triggered (seconds).",
     )
-    parser.add_argument("--drive-goal-tol-m", type=float, default=0.3, help="Goal tolerance (m)")
-    parser.add_argument("--drive-heading-tol-deg", type=float, default=10.0, help="Heading tolerance (deg)")
+    parser.add_argument("--drive-goal-tol-m", type=float, default=0.45, help="Goal tolerance (m)")
+    parser.add_argument("--drive-heading-tol-deg", type=float, default=16.0, help="Heading tolerance (deg)")
     parser.add_argument("--drive-heading-flip", action="store_true", help="Flip heading by 180 degrees")
     parser.add_argument(
         "--hard-drive-flip",
@@ -1354,6 +1360,8 @@ def main():
     test_excavation_lower_cycle_started_at = 0.0
     test_door_open_active = False
     test_door_close_active = False
+    test_drive_forward_active = False
+    test_drive_forward_until = 0.0
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
     actuator_left_extension_inches = None
@@ -2010,6 +2018,27 @@ def main():
         if changed:
             print(f"Actuator manual commands stopped via {source}.")
             publish_map_ui_state(force=True)
+
+    def set_test_drive_forward(enabled, source="button"):
+        nonlocal test_drive_forward_active, test_drive_forward_until
+        if not args.drive or sd is None:
+            print("Forward drive test unavailable because RoboRIO drive is not active.")
+            return
+        enabled = bool(enabled)
+        if enabled:
+            test_drive_forward_active = True
+            test_drive_forward_until = time.time() + 5.0
+            reset_auto_drive_shape(time.time())
+            print(f"Forward drive test STARTED via {source} (5s).")
+        else:
+            if not test_drive_forward_active:
+                return
+            test_drive_forward_active = False
+            test_drive_forward_until = 0.0
+            reset_auto_drive_shape(time.time())
+            send_nt_command(False, 0.0, 0.0, 0.1)
+            print(f"Forward drive test STOPPED via {source}.")
+        publish_map_ui_state(force=True)
 
     def _read_first_nt_number(keys):
         if sd is None:
@@ -2776,6 +2805,13 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "test_drive_forward",
+                    "label": "Test Forward 5s",
+                    "command": "test_drive_forward",
+                    "active": bool(test_drive_forward_active),
+                    "enabled": bool(args.drive and sd is not None),
+                },
+                {
                     "id": "camera_view_flip",
                     "label": "Flip Map/Depo: ON" if camera_view_flip_active() else "Flip Map/Depo",
                     "command": "camera_view_flip",
@@ -3494,6 +3530,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_steering_flip(not args.steering_flip, "button")
                 return
+        rect = status_button_rects.get("test_drive_forward")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_test_drive_forward(not test_drive_forward_active, "button")
+                return
         rect = status_button_rects.get("camera_view_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3794,6 +3836,8 @@ def main():
             set_hard_drive_flip(not args.hard_drive_flip, "external command")
         elif action == "steering_flip":
             set_steering_flip(not args.steering_flip, "external command")
+        elif action == "test_drive_forward":
+            set_test_drive_forward(not test_drive_forward_active, "external command")
         elif action == "camera_view_flip":
             flip_camera_view_calibration("external command")
         elif action == "display_heading_flip":
@@ -4749,7 +4793,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 3 * (button_h + 10) + 70
+        cal_section_h = 72 + 4 * (button_h + 10) + 70
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -4765,6 +4809,7 @@ def main():
         hard_drive_flip_rect = grid_rect(cal_body_y, 1, 1)
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         steering_flip_rect = grid_rect(cal_body_y, 2, 0)
+        test_drive_forward_rect = grid_rect(cal_body_y, 2, 1)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4819,16 +4864,24 @@ def main():
             (40, 120, 160),
             (120, 220, 255),
         )
+        draw_control_button(
+            test_drive_forward_rect,
+            "Test Forward: ON" if test_drive_forward_active else "Test Forward 5s",
+            bool(args.drive and sd is not None),
+            bool(test_drive_forward_active),
+            (20, 130, 60),
+            (120, 255, 170),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
-            cal_body_y + 3 * (button_h + 10) + 14,
+            cal_body_y + 4 * (button_h + 10) + 14,
             (180, 220, 255),
             0.44,
             x=card_x0 + card_inner,
         )
         put_control_line(
             drive_calibration.last_result[:88],
-            cal_body_y + 3 * (button_h + 10) + 38,
+            cal_body_y + 4 * (button_h + 10) + 38,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5112,6 +5165,7 @@ def main():
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("steering_flip", steering_flip_rect),
+            ("test_drive_forward", test_drive_forward_rect),
             ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
@@ -6338,6 +6392,22 @@ def main():
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif test_drive_forward_active:
+                                if now >= test_drive_forward_until:
+                                    test_drive_forward_active = False
+                                    test_drive_forward_until = 0.0
+                                    reset_auto_drive_shape(now)
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
+                                    print("Forward drive test completed.")
+                                    publish_map_ui_state(force=True)
+                                    continue
+                                reset_auto_drive_shape(now)
+                                send_nt_command(
+                                    True,
+                                    max(0.0, min(1.0, float(args.drive_speed))) * 0.45,
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif manual_mode:
                                 reset_auto_drive_shape(now)
                                 # Driver Station joystick blends with ZED keyboard manual commands.
@@ -6467,14 +6537,18 @@ def main():
                                 if stop_turn_rad < slow_turn_rad:
                                     stop_turn_rad = slow_turn_rad
 
+                                min_turn_forward_scale = max(
+                                    0.0, min(1.0, float(args.drive_min_turn_forward_scale))
+                                )
                                 if stop_turn_rad <= 1e-6:
-                                    turn_scale = 0.0 if err_abs > 0.0 else 1.0
+                                    turn_scale = min_turn_forward_scale if err_abs > 0.0 else 1.0
                                 elif err_abs >= stop_turn_rad:
-                                    turn_scale = 0.0
+                                    turn_scale = min_turn_forward_scale
                                 elif err_abs <= slow_turn_rad:
                                     turn_scale = 1.0
                                 else:
                                     turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
+                                    turn_scale = max(min_turn_forward_scale, turn_scale)
 
                                 align_scale = max(0.0, math.cos(err))
                                 fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
