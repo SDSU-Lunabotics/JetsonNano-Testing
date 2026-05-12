@@ -1239,7 +1239,7 @@ def main():
         )),
         "continuous_runs":      os.getenv("MINING_CONTINUOUS_RUNS", "1"),
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
-        "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.4")),
+        "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.55")),
         "rover_size_m":          float(args.rover_size_m),
         "berm_left_center_x_m":  float(os.getenv("MINING_BERM_LEFT_CENTER_X_M",   "-6.80")),
         "berm_right_center_x_m": float(os.getenv("MINING_BERM_RIGHT_CENTER_X_M",  "6.80")),
@@ -2292,6 +2292,14 @@ def main():
         print(f"Steering flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_drive_speed(value, source="slider"):
+        value = max(0.10, min(1.00, float(value)))
+        if abs(float(args.drive_speed) - value) <= 1e-6:
+            return
+        args.drive_speed = value
+        print(f"Auto drive speed set to {args.drive_speed:.2f} via {source}.")
+        publish_map_ui_state(force=True)
+
     def set_display_heading_flip(enabled, source="button"):
         enabled = bool(enabled)
         if bool(args.display_heading_flip) == enabled:
@@ -2867,6 +2875,9 @@ def main():
             "brush_radius": int(paint_brush_radius),
             "brush_radius_min": 1,
             "brush_radius_max": 15,
+            "drive_speed": float(args.drive_speed),
+            "drive_speed_min": 0.10,
+            "drive_speed_max": 1.00,
             "drive_calibration": drive_cal_state,
             "dig_profiles": dig_ui_state,
             "actuators": {
@@ -3603,6 +3614,13 @@ def main():
                 frac = (x - x0) / max(1, x1 - x0)
                 paint_brush_radius = max(1, min(15, int(round(1 + frac * 14))))
                 return
+        rect = status_button_rects.get("drive_speed_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = (x - x0) / max(1, x1 - x0)
+                set_drive_speed(0.10 + frac * 0.90, "slider")
+                return
         if is_drag:
             return
         rect = status_button_rects.get("dig_name_input")
@@ -4219,6 +4237,12 @@ def main():
                 value = paint_brush_radius
             paint_brush_radius = max(1, min(15, value))
             print(f"Brush radius: {paint_brush_radius} cells")
+        elif action == "set_drive_speed":
+            try:
+                value = float(payload.get("value", args.drive_speed))
+            except Exception:
+                value = float(args.drive_speed)
+            set_drive_speed(value, "external command")
 
         last_map_command_seq = seq
 
@@ -5116,7 +5140,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 4 * (button_h + 10) + 70
+        cal_section_h = 72 + 4 * (button_h + 10) + 150
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -5133,6 +5157,10 @@ def main():
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         steering_flip_rect = grid_rect(cal_body_y, 2, 0)
         test_drive_forward_rect = grid_rect(cal_body_y, 2, 1)
+        cal_slider_y = cal_body_y + 4 * (button_h + 10) + 50
+        cal_slider_x0 = card_x0 + card_inner + 8
+        cal_slider_x1 = card_x1 - card_inner - 8
+        drive_speed_slider_rect = (cal_slider_x0, cal_slider_y, cal_slider_x1, cal_slider_y + 44)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -5208,6 +5236,33 @@ def main():
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Auto speed: {float(args.drive_speed):.2f}",
+            cal_slider_y - 2,
+            (180, 220, 255),
+            0.42,
+            x=card_x0 + card_inner,
+        )
+        cv2.rectangle(controls, (cal_slider_x0, cal_slider_y + 18), (cal_slider_x1, cal_slider_y + 34), (60, 60, 60), -1)
+        cv2.rectangle(controls, (cal_slider_x0, cal_slider_y + 18), (cal_slider_x1, cal_slider_y + 34), (120, 120, 120), 1)
+        drive_speed_frac = (max(0.10, min(1.00, float(args.drive_speed))) - 0.10) / 0.90
+        drive_speed_knob_x = int(cal_slider_x0 + drive_speed_frac * (cal_slider_x1 - cal_slider_x0))
+        cv2.circle(controls, (drive_speed_knob_x, cal_slider_y + 26), 11, (80, 210, 255), -1)
+        cv2.circle(controls, (drive_speed_knob_x, cal_slider_y + 26), 11, (220, 245, 255), 1)
+        put_control_line(
+            "Slower",
+            cal_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=cal_slider_x0,
+        )
+        put_control_line(
+            "Faster",
+            cal_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=max(cal_slider_x0, cal_slider_x1 - 44),
         )
         cursor_y += cal_section_h + card_gap
 
@@ -5562,6 +5617,7 @@ def main():
             ("hard_drive_flip", hard_drive_flip_rect),
             ("steering_flip", steering_flip_rect),
             ("test_drive_forward", test_drive_forward_rect),
+            ("drive_speed_slider", drive_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
@@ -6965,15 +7021,22 @@ def main():
                                 dx = tx_drive - cx
                                 dz = tz - cz
 
-                                # Stop if close enough to goal.
-                                goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-                                if goal_world is not None:
-                                    gx, gz = goal_world
-                                    gx_drive = zed_x_from_map(gx)
-                                    if math.hypot(gx_drive - cx, gz - cz) <= args.drive_goal_tol_m:
-                                        reset_auto_drive_shape(now)
-                                        send_nt_command(False, 0.0, 0.0, 0.1)
-                                        continue
+                                # Let mining own the final arrival handoff for excavation/deposit
+                                # targets so auto-drive does not stop early and strand the state
+                                # machine in NAV_DIG/NAV_DEPOSIT.
+                                mining_arrival_owned = mining.state in (
+                                    auto_mining.MiningState.NAVIGATE_DIG,
+                                    auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                                )
+                                if not mining_arrival_owned:
+                                    goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
+                                    if goal_world is not None:
+                                        gx, gz = goal_world
+                                        gx_drive = zed_x_from_map(gx)
+                                        if math.hypot(gx_drive - cx, gz - cz) <= args.drive_goal_tol_m:
+                                            reset_auto_drive_shape(now)
+                                            send_nt_command(False, 0.0, 0.0, 0.1)
+                                            continue
 
                                 # Heading error in the physical X/Z frame, not the mirrored display frame.
                                 forward = drive_forward_world_from_rover(rover_forward_world)
