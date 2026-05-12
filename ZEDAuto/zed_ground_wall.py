@@ -6743,6 +6743,27 @@ def main():
                             dig_profile_playback_cmd = None
                             controller_macro_playback_cmd = None
                             refresh_ds_joystick_state()
+                            if controller_macros.recording:
+                                record_fwd = 0.0
+                                record_turn = 0.0
+                                if manual_mode:
+                                    record_fwd, record_turn = mix_ds_drive(manual_fwd, manual_turn)
+                                elif args.ds_joystick:
+                                    # In main-rover mode the Xbox path stays on the RoboRIO side,
+                                    # so record the DS axes directly instead of Jetson manual commands.
+                                    record_fwd = float(ds_joystick_fwd)
+                                    record_turn = float(ds_joystick_turn)
+                                controller_macros.capture_sample(
+                                    now,
+                                    record_fwd,
+                                    record_turn,
+                                    test_excavation_dig_active,
+                                    test_excavation_lower_active,
+                                    test_excavation_left_extend_active,
+                                    test_excavation_right_extend_active,
+                                    test_door_open_active,
+                                    test_door_close_active,
+                                )
                             # Watchdog: NT telemetry lost — stop immediately.
                             _nt_timeout = float(args.nt_timeout_sec)
                             if _nt_timeout > 0 and (now - last_nt_ok_time) > _nt_timeout:
@@ -6752,7 +6773,7 @@ def main():
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
                                 continue
-                            if driver_priority_active:
+                            if driver_priority_active and not controller_macro_preview_active:
                                 # Let the RoboRIO/Xbox path own the drivetrain while the driver is actively commanding it.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
@@ -6850,18 +6871,6 @@ def main():
                                         test_excavation_lower_active,
                                         test_excavation_left_extend_active,
                                         test_excavation_right_extend_active,
-                                    )
-                                if controller_macros.recording:
-                                    controller_macros.capture_sample(
-                                        now,
-                                        _man_fwd,
-                                        _man_turn,
-                                        test_excavation_dig_active,
-                                        test_excavation_lower_active,
-                                        test_excavation_left_extend_active,
-                                        test_excavation_right_extend_active,
-                                        test_door_open_active,
-                                        test_door_close_active,
                                     )
                             elif tracking_enabled and (not tracking_pose_ok):
                                 reset_auto_drive_shape(now)
