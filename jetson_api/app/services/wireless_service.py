@@ -70,7 +70,7 @@ class WirelessService:
                 band_24ghz=band_24ghz,
                 band_5ghz=band_5ghz,
             ),
-            current_channel=_coerce_channel(channel),
+            current_channel=channel,
             status_ok=connected,
             status_message=status_message,
             comm_line=comm_line,
@@ -208,12 +208,5 @@ class WirelessService:
 
         output = completed.stdout.strip()
         return output or None
-
-
-def _coerce_channel(channel: Optional[int]) -> int:
-    if channel is None:
-        return 1
-    return max(1, min(11, int(channel)))
-
 
 wireless_service = WirelessService()

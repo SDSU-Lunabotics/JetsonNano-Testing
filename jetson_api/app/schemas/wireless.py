@@ -1,9 +1,9 @@
 from __future__ import annotations
-from typing import Dict, List, Literal, Union
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field
 import time
 
-WiFiChannel = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+WiFiChannel = int
 ActivityState = Literal["idle", "transmitting", "receiving", "error"]
 
 PacketMetadata = Dict[str, Union[str, int, float]]
@@ -18,7 +18,7 @@ class DeviceWirelessStatus(BaseModel):
     device_name: str
     radio_state: WirelessRadioState
     available_channels: List[WiFiChannel] = Field(default_factory=lambda: list(range(1, 12)))
-    current_channel: WiFiChannel
+    current_channel: Optional[WiFiChannel] = None
     status_ok: bool
     status_message: str = ""
     comm_line: str = "N/A"

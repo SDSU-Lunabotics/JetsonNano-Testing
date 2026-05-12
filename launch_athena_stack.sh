@@ -14,16 +14,21 @@ LOCAL_BACKEND_DIR="$HOME/Downloads/Lunabotics-UI/backend/src"
 LOCAL_FRONTEND_DIR="$HOME/Downloads/Lunabotics-UI/frontend"
 
 SSH_BASE="sshpass -p '${JETSON_PASS}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${JETSON_USER}@${JETSON_IP}"
+JETSON_API_CMD="cd ${JETSON_API_DIR} && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload || { echo; echo Jetson API failed.; echo If the error says No module named uvicorn, run this on the Jetson:; echo cd ${JETSON_API_DIR} \&\& python3 -m pip install -r requirements.txt; }"
 
 open_terminal() {
   TITLE="$1"
   CMD="$2"
 
-  osascript <<EOF
+  osascript - "$TITLE" "$CMD" <<'EOF'
+on run argv
+set theTitle to item 1 of argv
+set theCmd to item 2 of argv
 tell application "Terminal"
     activate
-    do script "echo '$TITLE'; echo; $CMD; echo; echo 'Process ended or crashed. Terminal staying open.'; exec \$SHELL"
+    do script "echo " & quoted form of theTitle & "; echo; " & theCmd & "; echo; echo 'Process ended or crashed. Terminal staying open.'; exec $SHELL"
 end tell
+end run
 EOF
 }
 
@@ -35,43 +40,22 @@ open_terminal "Terminal 1 - Jetson Roborio Bridge" \
 sleep 1
 
 open_terminal "Terminal 2 - Jetson API" \
-"$SSH_BASE 'cd ${JETSON_API_DIR} && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload'"
+"$SSH_BASE '${JETSON_API_CMD}'"
 
 sleep 1
 
-open_terminal "Terminal 3 - Jetson VNC Startup" \
-"$SSH_BASE 'mkdir -p ~/.vnc && cat > ~/.vnc/xstartup <<'\''EOF'\''
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-exec startxfce4
-EOF
-chmod +x ~/.vnc/xstartup
-tigervncserver -kill :2 || true
-tigervncserver :2 -localhost no -xstartup ~/.vnc/xstartup
-echo
-echo VNC should now be running on ${JETSON_IP}:5902
-'"
 
-# Give VNC a little time to start before launching ZEDAuto into it
-sleep 5
-
-open_terminal "Terminal 4 - Jetson Camera Startup inside VNC" \
-"$SSH_BASE 'cd ${JETSON_PROJECT_DIR} && DISPLAY=:2 ./ZEDAuto/RunAuto.sh'"
-
-sleep 1
-
-open_terminal "Terminal 5 - UI Backend" \
+open_terminal "Terminal 3 - UI Backend" \
 "cd '${LOCAL_BACKEND_DIR}' && uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload"
 
 sleep 1
 
-open_terminal "Terminal 6 - UI Frontend" \
+open_terminal "Terminal 4 - UI Frontend" \
 "cd '${LOCAL_FRONTEND_DIR}' && npm run dev"
 
 sleep 1
 
-open_terminal "Terminal 7 - Optional Commands" \
+open_terminal "Terminal 5 - Optional Commands" \
 "echo 'Optional command terminal'; echo; echo 'Useful command:'; echo 'curl http://127.0.0.1:8002/status'; echo; exec \$SHELL"
 
 echo "All ATHENA terminals launched."
