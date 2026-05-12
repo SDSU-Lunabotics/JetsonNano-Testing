@@ -1353,6 +1353,14 @@ def main():
     actuator_right_counts = None
     actuator_left_inches = None
     actuator_right_inches = None
+    actuator_tailgate_extension_pct = None
+    actuator_tailgate_inches = None
+    actuator_tailgate_counts = None
+    actuator_tailgate_position_calibrated = None
+    actuator_tailgate_state = None
+    actuator_tailgate_moving = None
+    actuator_tailgate_open = None
+    actuator_tailgate_closed = None
     actuator_bottom_diff_counts = None
     actuator_bottom_position_calibrated = None
     direct_nav_enabled = False
@@ -2031,6 +2039,10 @@ def main():
         nonlocal actuator_bottom_position_calibrated, actuator_sync_fault
         nonlocal actuator_left_counts, actuator_right_counts
         nonlocal actuator_left_inches, actuator_right_inches
+        nonlocal actuator_tailgate_extension_pct, actuator_tailgate_inches
+        nonlocal actuator_tailgate_counts, actuator_tailgate_position_calibrated
+        nonlocal actuator_tailgate_state, actuator_tailgate_moving
+        nonlocal actuator_tailgate_open, actuator_tailgate_closed
         nonlocal actuator_bottom_diff_counts, actuator_bottom_position_calibrated
         left_pct = _read_first_nt_number(
             (
@@ -2097,6 +2109,85 @@ def main():
             )
         )
         actuator_sync_fault = _read_first_nt_boolean(("Excav/SyncFault",))
+        tailgate_pct = _read_first_nt_number(
+            (
+                "Deposit/TailgateExtensionPct",
+                "Tailgate/ExtensionPct",
+                "Jetson/TailgateExtensionPct",
+                "Jetson/GateActuatorExtensionPct",
+                "GateActuator/ExtensionPct",
+            )
+        )
+        actuator_tailgate_extension_pct = None if tailgate_pct is None else max(0.0, min(100.0, tailgate_pct))
+        actuator_tailgate_inches = _read_first_nt_number(
+            (
+                "Deposit/TailgateInches",
+                "Tailgate/Inches",
+                "Jetson/TailgateInches",
+                "Jetson/GateActuatorInches",
+                "GateActuator/Inches",
+            )
+        )
+        actuator_tailgate_counts = _read_first_nt_number(
+            (
+                "Deposit/TailgateCounts",
+                "Tailgate/Counts",
+                "Jetson/TailgateCounts",
+                "Jetson/GateActuatorCounts",
+                "GateActuator/Counts",
+            )
+        )
+        actuator_tailgate_position_calibrated = _read_first_nt_boolean(
+            (
+                "Deposit/TailgatePositionCalibrated",
+                "Tailgate/PositionCalibrated",
+                "Jetson/TailgatePositionCalibrated",
+                "Jetson/GateActuatorPositionCalibrated",
+                "GateActuator/PositionCalibrated",
+            )
+        )
+        actuator_tailgate_moving = _read_first_nt_boolean(
+            (
+                "Deposit/TailgateMoving",
+                "Tailgate/Moving",
+                "Jetson/TailgateMoving",
+                "GateActuator/Moving",
+            )
+        )
+        actuator_tailgate_open = _read_first_nt_boolean(
+            (
+                "Deposit/TailgateOpen",
+                "Tailgate/Open",
+                "Jetson/TailgateOpen",
+                "GateActuator/Open",
+            )
+        )
+        actuator_tailgate_closed = _read_first_nt_boolean(
+            (
+                "Deposit/TailgateClosed",
+                "Tailgate/Closed",
+                "Jetson/TailgateClosed",
+                "GateActuator/Closed",
+            )
+        )
+        actuator_tailgate_state = None
+        if sd is not None:
+            for key in (
+                "Deposit/TailgateState",
+                "Tailgate/State",
+                "Jetson/TailgateState",
+                "Jetson/GateActuatorState",
+                "GateActuator/State",
+            ):
+                try:
+                    if hasattr(sd, "containsKey") and not sd.containsKey(key):
+                        continue
+                    text = str(sd.getString(key, "")).strip()
+                except Exception:
+                    continue
+                if text:
+                    actuator_tailgate_state = text
+                    break
 
     def refresh_camera_servo_state():
         nonlocal servo_angle_deg, servo_target_angle_deg, servo_command_angle_deg
@@ -2599,6 +2690,14 @@ def main():
                 "right_extension_pct": actuator_right_extension_pct,
                 "left_extension_inches": actuator_left_extension_inches,
                 "right_extension_inches": actuator_right_extension_inches,
+                "tailgate_extension_pct": actuator_tailgate_extension_pct,
+                "tailgate_inches": actuator_tailgate_inches,
+                "tailgate_counts": actuator_tailgate_counts,
+                "tailgate_position_calibrated": actuator_tailgate_position_calibrated,
+                "tailgate_state": actuator_tailgate_state,
+                "tailgate_moving": actuator_tailgate_moving,
+                "tailgate_open": actuator_tailgate_open,
+                "tailgate_closed": actuator_tailgate_closed,
                 "bottom_position_calibrated": actuator_bottom_position_calibrated,
                 "sync_fault": actuator_sync_fault,
                 "left_extend_command": bool(test_excavation_left_extend_active),
@@ -4251,6 +4350,8 @@ def main():
         right_pct_text = "n/a" if actuator_right_extension_pct is None else f"{actuator_right_extension_pct:.0f}%"
         left_in_text = "n/a" if actuator_left_extension_inches is None else f"{actuator_left_extension_inches:.2f}in"
         right_in_text = "n/a" if actuator_right_extension_inches is None else f"{actuator_right_extension_inches:.2f}in"
+        tailgate_pct_text = "n/a" if actuator_tailgate_extension_pct is None else f"{actuator_tailgate_extension_pct:.0f}%"
+        tailgate_in_text = "n/a" if actuator_tailgate_inches is None else f"{actuator_tailgate_inches:.2f}in"
         cal_text = "CAL" if actuator_bottom_position_calibrated else "UNCAL"
         if actuator_bottom_position_calibrated is None:
             cal_text = "CAL?"
@@ -4271,10 +4372,10 @@ def main():
             0.40,
         )
         put_line(
-            f"{hall_state_text} | counts L {left_counts_text} | R {right_counts_text}",
+            f"{hall_state_text} | counts L {left_counts_text} | R {right_counts_text} | TG {tailgate_in_text} {tailgate_pct_text}",
             servo_info_y + 378,
             (170, 255, 170) if (actuator_left_counts is not None and actuator_right_counts is not None) else (190, 190, 190),
-            0.43,
+            0.38,
         )
 
         def draw_pct_bar(x0, y0, width, height, label, value, active):
@@ -4804,6 +4905,10 @@ def main():
             hall_meta_parts.append(
                 "home set" if actuator_bottom_position_calibrated else "home unset"
             )
+        if actuator_tailgate_counts is not None:
+            hall_meta_parts.append(f"tailgate {int(round(actuator_tailgate_counts))} ct")
+        elif actuator_tailgate_inches is not None:
+            hall_meta_parts.append(f"tailgate {actuator_tailgate_inches:.2f} in")
         hall_meta_text = "Hall feedback: " + (" | ".join(hall_meta_parts) if hall_meta_parts else "status unavailable")
         put_control_line(
             hall_counts_text,

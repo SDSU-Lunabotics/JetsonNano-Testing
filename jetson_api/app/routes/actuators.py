@@ -17,6 +17,7 @@ def _guard():
 def actuator_status():
     motors_status = motor_service.get_status()
     excavation = motors_status.telemetry.excavation
+    deposition = motors_status.telemetry.deposition
     return {
         "ok": True,
         "timestamp_ms": motors_status.timestamp_ms,
@@ -34,6 +35,22 @@ def actuator_status():
                 "jetson_right_extension_inches": excavation.jetson_right_extension_inches,
                 "excav_bottom_left_inches": excavation.bottom_left_inches,
                 "excav_bottom_right_inches": excavation.bottom_right_inches,
+            },
+        },
+        "tailgate": {
+            "counts": deposition.tailgate_counts,
+            "inches": deposition.tailgate_inches,
+            "extension_pct": deposition.tailgate_extension_pct,
+            "position_calibrated": deposition.tailgate_position_calibrated,
+            "state": deposition.tailgate_state,
+            "moving": deposition.tailgate_moving,
+            "open": deposition.tailgate_open,
+            "closed": deposition.tailgate_closed,
+            "torque_current_a": deposition.tailgate_torque_current_a,
+            "sources": {
+                "deposit_tailgate_counts": motors_status.raw_values.get("Deposit/TailgateCounts"),
+                "tailgate_counts": motors_status.raw_values.get("Tailgate/Counts"),
+                "jetson_tailgate_counts": motors_status.raw_values.get("Jetson/TailgateCounts"),
             },
         },
     }
