@@ -570,6 +570,7 @@ def main():
     parser.add_argument("--map-ui-state-file", default=os.path.join(SCRIPT_DIR, "zed_map_ui_state.json"), help="Path to published UI state JSON for remote map controls")
     parser.add_argument("--drive-calibration-file", default=os.path.join(SCRIPT_DIR, "zed_drive_calibration.json"), help="Path to saved drive-calibration JSON")
     parser.add_argument("--dig-profiles-path", default=os.path.join(SCRIPT_DIR, "zed_dig_profiles.json"), help="Path to recorded dig profile library JSON")
+    parser.add_argument("--controller-macros-path", default=os.path.join(SCRIPT_DIR, "zed_controller_macros.json"), help="Path to recorded controller macro library JSON")
     parser.add_argument("--camera-heartbeat-url", default=None, help="HTTP endpoint that receives camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-interval-ms", type=int, default=1000, help="Interval between camera-owner heartbeats")
     parser.add_argument("--camera-heartbeat-timeout-ms", type=int, default=250, help="HTTP timeout for camera-owner heartbeats")
@@ -1253,7 +1254,9 @@ def main():
     default_backup_duration_sec = float(_mining_cfg.get("backup_duration", 2.0))
     drive_calibration = calibration_profiles.DriveCalibrationManager(args.drive_calibration_file)
     dig_profiles = calibration_profiles.DigProfileLibrary(args.dig_profiles_path)
+    controller_macros = calibration_profiles.ControllerMacroLibrary(args.controller_macros_path)
     dig_profile_playback_cmd = None
+    controller_macro_playback_cmd = None
     if drive_calibration.last_saved_flip is not None:
         args.drive_heading_flip = bool(drive_calibration.last_saved_flip)
     if drive_calibration.last_saved_hard_drive_flip is not None:
@@ -1362,6 +1365,14 @@ def main():
     test_door_close_active = False
     test_drive_forward_active = False
     test_drive_forward_until = 0.0
+    dig_profile_preview_active = False
+    dig_profile_preview_started_at = 0.0
+    dig_profile_preview_style = None
+    dig_profile_preview_phase = None
+    dig_profile_preview_name = None
+    controller_macro_preview_active = False
+    controller_macro_preview_started_at = 0.0
+    controller_macro_preview_name = None
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
     actuator_left_extension_inches = None
@@ -2344,6 +2355,18 @@ def main():
         print(f"Active dig phase: {phase.upper()} via {source}.")
         publish_map_ui_state(force=True)
 
+    def resolve_preview_dig_profile():
+        profile = dig_profiles.get_selected_profile()
+        if profile is None:
+            profile = dig_profiles.get_cursor_profile()
+        return profile
+
+    def resolve_preview_controller_macro():
+        macro = controller_macros.get_selected_macro()
+        if macro is None:
+            macro = controller_macros.get_cursor_macro()
+        return macro
+
     def cycle_dig_profile_cursor(step, source="button"):
         profile = dig_profiles.cycle_cursor(step)
         if profile is None:
@@ -2379,6 +2402,166 @@ def main():
         )
         publish_map_ui_state(force=True)
 
+    def stop_dig_profile_preview(source="button", completed=False):
+        nonlocal dig_profile_preview_active, dig_profile_preview_started_at
+        nonlocal dig_profile_preview_style, dig_profile_preview_phase, dig_profile_preview_name
+        if not dig_profile_preview_active:
+            return
+        name = dig_profile_preview_name or "profile"
+        dig_profile_preview_active = False
+        dig_profile_preview_started_at = 0.0
+        dig_profile_preview_style = None
+        dig_profile_preview_phase = None
+        dig_profile_preview_name = None
+        reset_auto_drive_shape(time.time())
+        send_nt_command(False, 0.0, 0.0, 0.1)
+        if completed:
+            print(f"Preview completed for {name}.")
+        else:
+            print(f"Preview stopped for {name} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def start_dig_profile_preview(source="button"):
+        nonlocal dig_profile_preview_active, dig_profile_preview_started_at
+        nonlocal dig_profile_preview_style, dig_profile_preview_phase, dig_profile_preview_name
+        if dig_profiles.recording:
+            print("Stop recording before previewing a profile.")
+            return
+        if controller_macros.recording or controller_macro_preview_active:
+            print("Stop controller recording/playback before previewing a dig record.")
+            return
+        profile = resolve_preview_dig_profile()
+        if profile is None:
+            print(f"No {dig_profiles.active_style} {dig_profiles.active_phase} profile available to preview.")
+            return
+        clear_navigation_goal()
+        mining.abort()
+        set_manual_drive_mode(False, f"{source} dig preview")
+        dig_profile_preview_active = True
+        dig_profile_preview_started_at = time.time()
+        dig_profile_preview_style = str(profile.get("style", dig_profiles.active_style))
+        dig_profile_preview_phase = str(profile.get("phase", dig_profiles.active_phase))
+        dig_profile_preview_name = str(profile.get("name", "profile"))
+        reset_auto_drive_shape(dig_profile_preview_started_at)
+        print(
+            f"Previewing {dig_profile_preview_style} {dig_profile_preview_phase} profile "
+            f"{dig_profile_preview_name} via {source}."
+        )
+        publish_map_ui_state(force=True)
+
+    def cycle_controller_macro_cursor(step, source="button"):
+        macro = controller_macros.cycle_cursor(step)
+        if macro is None:
+            print("No controller macros recorded yet.")
+        else:
+            print(
+                f"Browsing controller macro: "
+                f"{macro['name']} ({float(macro.get('duration_sec', 0.0)):.2f}s)"
+            )
+        publish_map_ui_state(force=True)
+
+    def use_browsed_controller_macro(source="button"):
+        macro = controller_macros.select_cursor()
+        if macro is None:
+            print("No controller macro available to select.")
+            return
+        print(
+            f"Selected controller macro: {macro['name']} "
+            f"({float(macro.get('duration_sec', 0.0)):.2f}s) via {source}."
+        )
+        publish_map_ui_state(force=True)
+
+    def stop_controller_macro_preview(source="button", completed=False):
+        nonlocal controller_macro_preview_active, controller_macro_preview_started_at
+        nonlocal controller_macro_preview_name
+        if not controller_macro_preview_active:
+            return
+        name = controller_macro_preview_name or "controller macro"
+        controller_macro_preview_active = False
+        controller_macro_preview_started_at = 0.0
+        controller_macro_preview_name = None
+        reset_auto_drive_shape(time.time())
+        send_nt_command(False, 0.0, 0.0, 0.1)
+        if completed:
+            print(f"Controller macro preview completed for {name}.")
+        else:
+            print(f"Controller macro preview stopped for {name} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def start_controller_macro_preview(source="button"):
+        nonlocal controller_macro_preview_active, controller_macro_preview_started_at
+        nonlocal controller_macro_preview_name
+        if controller_macros.recording:
+            print("Stop controller recording before previewing a controller macro.")
+            return
+        if dig_profiles.recording or dig_profile_preview_active:
+            print("Stop dig recording/playback before previewing a controller macro.")
+            return
+        macro = resolve_preview_controller_macro()
+        if macro is None:
+            print("No controller macro available to preview.")
+            return
+        clear_navigation_goal()
+        mining.abort()
+        set_manual_drive_mode(False, f"{source} controller macro preview")
+        controller_macro_preview_active = True
+        controller_macro_preview_started_at = time.time()
+        controller_macro_preview_name = str(macro.get("name", "controller_macro"))
+        reset_auto_drive_shape(controller_macro_preview_started_at)
+        print(
+            f"Previewing controller macro {controller_macro_preview_name} via {source}."
+        )
+        publish_map_ui_state(force=True)
+
+    def start_controller_recording(source="button"):
+        nonlocal dig_name_input_focused
+        name_base = str(dig_name_input_text or "").strip()
+        if not name_base:
+            dig_name_input_focused = True
+            print("Enter a profile name in the status panel before recording a controller macro.")
+            publish_map_ui_state(force=True)
+            return
+        if not any(ch.isalnum() for ch in name_base):
+            dig_name_input_focused = True
+            print("Controller macro name must include at least one letter or number.")
+            publish_map_ui_state(force=True)
+            return
+        if controller_macro_preview_active:
+            print("Stop controller macro preview before starting a new recording.")
+            return
+        if dig_profiles.recording or dig_profile_preview_active:
+            print("Stop dig recording/playback before starting a controller macro recording.")
+            return
+        if controller_macros.recording:
+            print("Controller macro recording already active. Stop it first.")
+            return
+        clear_navigation_goal()
+        mining.abort()
+        set_manual_drive_mode(True, f"{source} controller macro recording")
+        if not controller_macros.begin_recording(name_base=name_base):
+            print("Failed to start controller macro recording.")
+            return
+        print(
+            "Recording controller macro. Drive and use actuators/door controls, "
+            "then stop recording to save it."
+        )
+        publish_map_ui_state(force=True)
+
+    def stop_controller_recording(save=True, source="button"):
+        macro = controller_macros.stop_recording(save=save)
+        if macro is None:
+            if save:
+                print("Controller macro stopped without saving a usable recording.")
+            else:
+                print("Controller macro recording canceled.")
+            publish_map_ui_state(force=True)
+            return
+        print(
+            f"Saved controller macro {macro['name']} "
+            f"({float(macro.get('duration_sec', 0.0)):.2f}s) via {source}."
+        )
+        publish_map_ui_state(force=True)
+
     def start_dig_recording(style, phase, source="button"):
         nonlocal dig_name_input_focused
         style = str(style).strip().lower()
@@ -2400,6 +2583,12 @@ def main():
             print("Dig profile name must include at least one letter or number.")
             publish_map_ui_state(force=True)
             return
+        if controller_macros.recording:
+            print("Stop controller macro recording before starting a dig recording.")
+            return
+        if dig_profile_preview_active:
+            print("Stop dig profile preview before starting a new recording.")
+            return
         if dig_profiles.recording:
             print(
                 "Dig recording already active "
@@ -2419,6 +2608,9 @@ def main():
             "then stop recording to save it."
         )
         publish_map_ui_state(force=True)
+
+    def start_active_dig_recording(source="button"):
+        start_dig_recording(dig_profiles.active_style, dig_profiles.active_phase, source)
 
     def stop_dig_recording(save=True, source="button"):
         profile = dig_profiles.stop_recording(save=save)
@@ -2861,25 +3053,29 @@ def main():
                     "enabled": True,
                 },
                 {
-                    "id": "dig_record_dig",
-                    "label": "Record Dig",
-                    "command": "dig_record_dig",
-                    "active": bool(dig_profiles.recording and dig_profiles.recording_phase == "dig"),
+                    "id": "dig_record_active",
+                    "label": f"Record {dig_profiles.active_phase.title()}",
+                    "command": "dig_record_active",
+                    "active": bool(
+                        dig_profiles.recording
+                        and dig_profiles.recording_style == dig_profiles.active_style
+                        and dig_profiles.recording_phase == dig_profiles.active_phase
+                    ),
                     "enabled": bool(not dig_profiles.recording),
                 },
                 {
-                    "id": "dig_record_retract",
-                    "label": "Record Retract",
-                    "command": "dig_record_retract",
-                    "active": bool(dig_profiles.recording and dig_profiles.recording_phase == "retract"),
-                    "enabled": bool(not dig_profiles.recording),
+                    "id": "dig_profile_preview",
+                    "label": "Preview Profile",
+                    "command": "dig_profile_preview",
+                    "active": bool(dig_profile_preview_active),
+                    "enabled": bool((not dig_profiles.recording) and (resolve_preview_dig_profile() is not None)),
                 },
                 {
                     "id": "dig_record_stop",
                     "label": "Stop Recording",
                     "command": "dig_record_stop",
-                    "active": bool(dig_profiles.recording),
-                    "enabled": bool(dig_profiles.recording),
+                    "active": bool(dig_profiles.recording or dig_profile_preview_active),
+                    "enabled": bool(dig_profiles.recording or dig_profile_preview_active),
                 },
                 {
                     "id": "dig_profile_prev",
@@ -2908,6 +3104,48 @@ def main():
                     "command": "dig_profile_delete",
                     "active": False,
                     "enabled": bool(dig_profiles.get_cursor_profile() is not None),
+                },
+                {
+                    "id": "controller_record",
+                    "label": "Record Controller",
+                    "command": "controller_record",
+                    "active": bool(controller_macros.recording),
+                    "enabled": bool(not controller_macros.recording),
+                },
+                {
+                    "id": "controller_preview",
+                    "label": "Play Controller",
+                    "command": "controller_preview",
+                    "active": bool(controller_macro_preview_active),
+                    "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
+                },
+                {
+                    "id": "controller_stop",
+                    "label": "Stop Controller",
+                    "command": "controller_stop",
+                    "active": bool(controller_macros.recording or controller_macro_preview_active),
+                    "enabled": bool(controller_macros.recording or controller_macro_preview_active),
+                },
+                {
+                    "id": "controller_prev",
+                    "label": "Controller Prev",
+                    "command": "controller_prev",
+                    "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "controller_next",
+                    "label": "Controller Next",
+                    "command": "controller_next",
+                    "active": False,
+                    "enabled": True,
+                },
+                {
+                    "id": "controller_use",
+                    "label": "Use Controller",
+                    "command": "controller_use",
+                    "active": False,
+                    "enabled": bool(controller_macros.get_cursor_macro() is not None),
                 },
                 {
                     "id": "test_excavation_dig",
@@ -3576,23 +3814,29 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 cycle_dig_phase("button")
                 return
-        rect = status_button_rects.get("dig_record_dig")
+        rect = status_button_rects.get("dig_record_active")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                start_dig_recording(dig_profiles.active_style, "dig", "button")
+                start_active_dig_recording("button")
                 return
-        rect = status_button_rects.get("dig_record_retract")
+        rect = status_button_rects.get("dig_profile_preview")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                start_dig_recording(dig_profiles.active_style, "retract", "button")
+                if dig_profile_preview_active:
+                    stop_dig_profile_preview("button")
+                else:
+                    start_dig_profile_preview("button")
                 return
         rect = status_button_rects.get("dig_record_stop")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
-                stop_dig_recording(True, "button")
+                if dig_profiles.recording:
+                    stop_dig_recording(True, "button")
+                else:
+                    stop_dig_profile_preview("button")
                 return
         rect = status_button_rects.get("dig_profile_prev")
         if rect is not None:
@@ -3617,6 +3861,48 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 delete_browsed_dig_profile("button")
+                return
+        rect = status_button_rects.get("controller_record")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                start_controller_recording("button")
+                return
+        rect = status_button_rects.get("controller_preview")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_macro_preview_active:
+                    stop_controller_macro_preview("button")
+                else:
+                    start_controller_macro_preview("button")
+                return
+        rect = status_button_rects.get("controller_stop")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_macros.recording:
+                    stop_controller_recording(True, "button")
+                else:
+                    stop_controller_macro_preview("button")
+                return
+        rect = status_button_rects.get("controller_prev")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                cycle_controller_macro_cursor(-1, "button")
+                return
+        rect = status_button_rects.get("controller_next")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                cycle_controller_macro_cursor(1, "button")
+                return
+        rect = status_button_rects.get("controller_use")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                use_browsed_controller_macro("button")
                 return
         rect = status_button_rects.get("excav")
         if rect is not None:
@@ -3853,6 +4139,13 @@ def main():
             cycle_dig_style("external command")
         elif action == "dig_phase_cycle":
             cycle_dig_phase("external command")
+        elif action == "dig_record_active":
+            start_active_dig_recording("external command")
+        elif action == "dig_profile_preview":
+            if dig_profile_preview_active:
+                stop_dig_profile_preview("external command")
+            else:
+                start_dig_profile_preview("external command")
         elif action == "dig_record_dig":
             start_dig_recording(dig_profiles.active_style, "dig", "external command")
         elif action == "dig_record_retract":
@@ -3862,7 +4155,10 @@ def main():
         elif action == "dig_record_long":
             start_dig_recording("long", "dig", "external command")
         elif action == "dig_record_stop":
-            stop_dig_recording(True, "external command")
+            if dig_profiles.recording:
+                stop_dig_recording(True, "external command")
+            else:
+                stop_dig_profile_preview("external command")
         elif action == "dig_profile_prev":
             cycle_dig_profile_cursor(-1, "external command")
         elif action == "dig_profile_next":
@@ -3871,6 +4167,24 @@ def main():
             use_browsed_dig_profile("external command")
         elif action == "dig_profile_delete":
             delete_browsed_dig_profile("external command")
+        elif action == "controller_record":
+            start_controller_recording("external command")
+        elif action == "controller_preview":
+            if controller_macro_preview_active:
+                stop_controller_macro_preview("external command")
+            else:
+                start_controller_macro_preview("external command")
+        elif action == "controller_stop":
+            if controller_macros.recording:
+                stop_controller_recording(True, "external command")
+            else:
+                stop_controller_macro_preview("external command")
+        elif action == "controller_prev":
+            cycle_controller_macro_cursor(-1, "external command")
+        elif action == "controller_next":
+            cycle_controller_macro_cursor(1, "external command")
+        elif action == "controller_use":
+            use_browsed_controller_macro("external command")
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
                 set_brush_tool(None)
@@ -3949,9 +4263,15 @@ def main():
                     publish_map_ui_state(force=True)
             mining_state_value = mining.state.value
             auto_dig_active = auto_digger_enabled and enabled and mining.state == auto_mining.MiningState.DIGGING
-            playback_cmd = dig_profile_playback_cmd if (
-                enabled and mining.state in (auto_mining.MiningState.DIGGING, auto_mining.MiningState.BACKUP)
-            ) else None
+            playback_cmd = controller_macro_playback_cmd if controller_macro_playback_cmd is not None else (
+                dig_profile_playback_cmd if (
+                enabled
+                and (
+                    dig_profile_preview_active
+                    or mining.state in (auto_mining.MiningState.DIGGING, auto_mining.MiningState.BACKUP)
+                )
+                ) else None
+            )
             excavator_enabled = test_excavation_dig_active or (
                 bool(playback_cmd.get("digger_on")) if playback_cmd is not None else auto_dig_active
             )
@@ -3967,6 +4287,9 @@ def main():
                 right_extend_enabled = test_excavation_right_extend_active
             door_open_enabled = bool(test_door_open_active)
             door_close_enabled = bool(test_door_close_active)
+            if playback_cmd is not None:
+                door_open_enabled = door_open_enabled or bool(playback_cmd.get("door_open_on", False))
+                door_close_enabled = door_close_enabled or bool(playback_cmd.get("door_close_on", False))
             if enabled and not (door_open_enabled or door_close_enabled):
                 if mining.state == auto_mining.MiningState.DEPOSITING:
                     door_open_enabled = True
@@ -5013,7 +5336,7 @@ def main():
         )
         cursor_y += actuators_section_h + card_gap
 
-        dig_section_h = 72 + 4 * (button_h + 10) + 170
+        dig_section_h = 72 + 6 * (button_h + 10) + 220
         dig_body_y = section_frame(
             cursor_y,
             dig_section_h,
@@ -5025,12 +5348,18 @@ def main():
         dig_style_cycle_rect = grid_rect(dig_body_y, 0, 0)
         dig_phase_cycle_rect = grid_rect(dig_body_y, 0, 1)
         dig_profile_use_rect = grid_rect(dig_body_y, 0, 2)
-        dig_record_dig_rect = grid_rect(dig_body_y, 1, 0)
-        dig_record_retract_rect = grid_rect(dig_body_y, 1, 1)
+        dig_record_active_rect = grid_rect(dig_body_y, 1, 0)
+        dig_profile_preview_rect = grid_rect(dig_body_y, 1, 1)
         dig_record_stop_rect = grid_rect(dig_body_y, 1, 2)
         dig_profile_prev_rect = grid_rect(dig_body_y, 2, 0)
         dig_profile_next_rect = grid_rect(dig_body_y, 2, 1)
         dig_profile_delete_rect = grid_rect(dig_body_y, 2, 2)
+        controller_record_rect = grid_rect(dig_body_y, 3, 0)
+        controller_preview_rect = grid_rect(dig_body_y, 3, 1)
+        controller_stop_rect = grid_rect(dig_body_y, 3, 2)
+        controller_prev_rect = grid_rect(dig_body_y, 4, 0)
+        controller_next_rect = grid_rect(dig_body_y, 4, 1)
+        controller_use_rect = grid_rect(dig_body_y, 4, 2)
         draw_control_button(dig_style_cycle_rect, f"Dig Style: {dig_profiles.active_style.title()}", True, False)
         draw_control_button(dig_phase_cycle_rect, f"Phase: {dig_profiles.active_phase.title()}", True, False)
         draw_control_button(
@@ -5040,26 +5369,38 @@ def main():
             False,
         )
         draw_control_button(
-            dig_record_dig_rect,
-            "Rec Dig" if not (dig_profiles.recording and dig_profiles.recording_phase == "dig") else "Rec Dig: ON",
+            dig_record_active_rect,
+            (
+                f"Record {dig_profiles.active_phase.title()}: ON"
+                if (
+                    dig_profiles.recording
+                    and dig_profiles.recording_style == dig_profiles.active_style
+                    and dig_profiles.recording_phase == dig_profiles.active_phase
+                )
+                else f"Record {dig_profiles.active_phase.title()}"
+            ),
             bool(not dig_profiles.recording),
-            bool(dig_profiles.recording and dig_profiles.recording_phase == "dig"),
+            bool(
+                dig_profiles.recording
+                and dig_profiles.recording_style == dig_profiles.active_style
+                and dig_profiles.recording_phase == dig_profiles.active_phase
+            ),
             (0, 120, 80),
             (120, 255, 180),
         )
         draw_control_button(
-            dig_record_retract_rect,
-            "Rec Retract" if not (dig_profiles.recording and dig_profiles.recording_phase == "retract") else "Rec Retract: ON",
-            bool(not dig_profiles.recording),
-            bool(dig_profiles.recording and dig_profiles.recording_phase == "retract"),
+            dig_profile_preview_rect,
+            "Test Dig Record: ON" if dig_profile_preview_active else "Test Dig Record",
+            bool((not dig_profiles.recording) and (resolve_preview_dig_profile() is not None)),
+            bool(dig_profile_preview_active),
             (0, 110, 170),
             (120, 220, 255),
         )
         draw_control_button(
             dig_record_stop_rect,
-            "Stop Record",
-            bool(dig_profiles.recording),
-            bool(dig_profiles.recording),
+            "Stop Record/Preview",
+            bool(dig_profiles.recording or dig_profile_preview_active),
+            bool(dig_profiles.recording or dig_profile_preview_active),
             (170, 70, 0),
             (255, 180, 120),
         )
@@ -5069,6 +5410,38 @@ def main():
             dig_profile_delete_rect,
             "Delete Profile",
             bool(dig_profiles.get_cursor_profile() is not None),
+            False,
+        )
+        draw_control_button(
+            controller_record_rect,
+            "Record Controller: ON" if controller_macros.recording else "Record Controller",
+            bool(not controller_macros.recording),
+            bool(controller_macros.recording),
+            (80, 70, 170),
+            (180, 150, 255),
+        )
+        draw_control_button(
+            controller_preview_rect,
+            "Play Controller: ON" if controller_macro_preview_active else "Play Controller",
+            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
+            bool(controller_macro_preview_active),
+            (0, 110, 170),
+            (120, 220, 255),
+        )
+        draw_control_button(
+            controller_stop_rect,
+            "Stop Controller",
+            bool(controller_macros.recording or controller_macro_preview_active),
+            bool(controller_macros.recording or controller_macro_preview_active),
+            (170, 70, 0),
+            (255, 180, 120),
+        )
+        draw_control_button(controller_prev_rect, "Ctrl Prev", True)
+        draw_control_button(controller_next_rect, "Ctrl Next", True)
+        draw_control_button(
+            controller_use_rect,
+            "Use Controller",
+            bool(controller_macros.get_cursor_macro() is not None),
             False,
         )
 
@@ -5082,9 +5455,13 @@ def main():
         recording_text = (
             f"Recording: {dig_profiles.recording_style.upper()} {dig_profiles.recording_phase.upper()}"
             if dig_profiles.recording and dig_profiles.recording_style and dig_profiles.recording_phase
-            else "Recording: OFF"
+            else (
+                f"Preview: {str(dig_profile_preview_name or 'OFF')[:22]}"
+                if dig_profile_preview_active
+                else "Recording: OFF"
+            )
         )
-        summary_y = dig_body_y + 3 * (button_h + 10) + 34
+        summary_y = dig_body_y + 5 * (button_h + 10) + 34
         put_control_line(
             f"Active {dig_profiles.active_style.upper()} {dig_profiles.active_phase.upper()} | {recording_text}",
             summary_y,
@@ -5103,10 +5480,29 @@ def main():
             0.40,
             x=card_x0 + card_inner,
         )
+        controller_cursor_macro = controller_macros.get_cursor_macro()
+        controller_cursor_name = controller_cursor_macro["name"] if controller_cursor_macro is not None else "none"
+        controller_cursor_duration = float(controller_cursor_macro.get("duration_sec", 0.0)) if controller_cursor_macro is not None else 0.0
+        controller_selected_macro = controller_macros.get_selected_macro()
+        controller_selected_name = controller_selected_macro["name"] if controller_selected_macro is not None else "none"
+        put_control_line(
+            f"Controller selected: {controller_selected_name[:30]}",
+            summary_y + 138,
+            (220, 210, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Browse controller: {controller_cursor_name[:24]} ({controller_cursor_duration:.2f}s)",
+            summary_y + 160,
+            (220, 210, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
         visible_profiles = dig_profiles.list_profiles(dig_profiles.active_style, dig_profiles.active_phase)[:4]
         put_control_line(
             f"{dig_profiles.active_style.title()} {dig_profiles.active_phase.title()} profiles:",
-            summary_y + 138,
+            summary_y + 186,
             (170, 210, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5114,7 +5510,7 @@ def main():
         for idx, profile in enumerate(visible_profiles):
             marker = "* " if profile["name"] == dig_profiles.selected.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else "  "
             cursor_marker = ">" if profile["name"] == dig_profiles.cursor.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else " "
-            line_y = summary_y + 160 + idx * 20
+            line_y = summary_y + 208 + idx * 20
             put_control_line(
                 f"{cursor_marker}{marker}{profile['name'][:34]} ({float(profile.get('duration_sec', 0.0)):.2f}s)",
                 line_y,
@@ -5172,13 +5568,19 @@ def main():
             ("drive_calibration_cancel", drive_calibration_cancel_rect),
             ("dig_style_cycle", dig_style_cycle_rect),
             ("dig_phase_cycle", dig_phase_cycle_rect),
-            ("dig_record_dig", dig_record_dig_rect),
-            ("dig_record_retract", dig_record_retract_rect),
+            ("dig_record_active", dig_record_active_rect),
+            ("dig_profile_preview", dig_profile_preview_rect),
             ("dig_record_stop", dig_record_stop_rect),
             ("dig_profile_prev", dig_profile_prev_rect),
             ("dig_profile_next", dig_profile_next_rect),
             ("dig_profile_use", dig_profile_use_rect),
             ("dig_profile_delete", dig_profile_delete_rect),
+            ("controller_record", controller_record_rect),
+            ("controller_preview", controller_preview_rect),
+            ("controller_stop", controller_stop_rect),
+            ("controller_prev", controller_prev_rect),
+            ("controller_next", controller_next_rect),
+            ("controller_use", controller_use_rect),
             ("door_open", door_open_rect),
             ("door_close", door_close_rect),
             ("stop_actuators", stop_actuators_rect),
@@ -6339,6 +6741,7 @@ def main():
                             status_target_cell = None
                             status_target_world = None
                             dig_profile_playback_cmd = None
+                            controller_macro_playback_cmd = None
                             refresh_ds_joystick_state()
                             # Watchdog: NT telemetry lost — stop immediately.
                             _nt_timeout = float(args.nt_timeout_sec)
@@ -6408,6 +6811,26 @@ def main():
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif controller_macro_preview_active:
+                                elapsed_preview = now - float(controller_macro_preview_started_at)
+                                controller_macro_playback_cmd = controller_macros.playback_sample(elapsed_preview)
+                                macro_duration = 0.0
+                                if controller_macro_playback_cmd is not None:
+                                    macro_duration = float(controller_macro_playback_cmd.get("duration_sec", 0.0))
+                                if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
+                                    stop_controller_macro_preview("auto", completed=True)
+                                    continue
+                                reset_auto_drive_shape(now)
+                                preview_fwd, preview_turn = mix_ds_drive(
+                                    controller_macro_playback_cmd["fwd"],
+                                    controller_macro_playback_cmd["turn"],
+                                )
+                                send_nt_command(
+                                    True,
+                                    preview_fwd,
+                                    preview_turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif manual_mode:
                                 reset_auto_drive_shape(now)
                                 # Driver Station joystick blends with ZED keyboard manual commands.
@@ -6428,6 +6851,18 @@ def main():
                                         test_excavation_left_extend_active,
                                         test_excavation_right_extend_active,
                                     )
+                                if controller_macros.recording:
+                                    controller_macros.capture_sample(
+                                        now,
+                                        _man_fwd,
+                                        _man_turn,
+                                        test_excavation_dig_active,
+                                        test_excavation_lower_active,
+                                        test_excavation_left_extend_active,
+                                        test_excavation_right_extend_active,
+                                        test_door_open_active,
+                                        test_door_close_active,
+                                    )
                             elif tracking_enabled and (not tracking_pose_ok):
                                 reset_auto_drive_shape(now)
                                 # Keep robot safe while localization is uncertain.
@@ -6435,6 +6870,30 @@ def main():
                             elif drive_origin_row_col is None or drive_origin_pos_map is None:
                                 reset_auto_drive_shape(now)
                                 send_nt_command(False, 0.0, 0.0, 0.1)
+                            elif dig_profile_preview_active:
+                                elapsed_preview = now - float(dig_profile_preview_started_at)
+                                dig_profile_playback_cmd = dig_profiles.playback_sample(
+                                    elapsed_preview,
+                                    style=dig_profile_preview_style,
+                                    phase=dig_profile_preview_phase,
+                                )
+                                profile_duration = 0.0
+                                if dig_profile_playback_cmd is not None:
+                                    profile_duration = float(dig_profile_playback_cmd.get("duration_sec", 0.0))
+                                if dig_profile_playback_cmd is None or elapsed_preview > max(0.05, profile_duration):
+                                    stop_dig_profile_preview("auto", completed=True)
+                                    continue
+                                reset_auto_drive_shape(now)
+                                preview_fwd, preview_turn = mix_ds_drive(
+                                    dig_profile_playback_cmd["fwd"],
+                                    dig_profile_playback_cmd["turn"],
+                                )
+                                send_nt_command(
+                                    True,
+                                    preview_fwd,
+                                    preview_turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif _mine_drive is not None:
                                 reset_auto_drive_shape(now)
                                 # Mining automation has direct drive control
