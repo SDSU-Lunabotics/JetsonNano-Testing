@@ -873,6 +873,8 @@ def main():
                 print(f"ZED object detection init error: {exc}")
         else:
             print("ZED SDK ObjectDetectionParameters not available; human detection disabled.")
+    human_detect_enabled = bool(human_detect_available)
+    rock_detect_enabled = bool(rock_model is not None)
 
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
@@ -2164,6 +2166,38 @@ def main():
         print(f"Camera overlay {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_human_detect_enabled(enabled, source="button"):
+        nonlocal human_detect_enabled, human_hazard_state, human_nearest_m
+        nonlocal human_clear_countdown, human_person_map_points
+        enabled = bool(enabled)
+        if enabled and not human_detect_available:
+            print("Human detection is unavailable; start ZEDAuto with human detection enabled to use this toggle.")
+            return
+        if human_detect_enabled == enabled:
+            return
+        human_detect_enabled = enabled
+        if not enabled:
+            human_hazard_state = "CLEAR"
+            human_nearest_m = -1.0
+            human_clear_countdown = 0
+            human_person_map_points = []
+        print(f"Human detection {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_rock_detect_enabled(enabled, source="button"):
+        nonlocal rock_detect_enabled, rock_overlay_detections
+        enabled = bool(enabled)
+        if enabled and rock_model is None:
+            print("Rock YOLO is unavailable; load a rock model to use this toggle.")
+            return
+        if rock_detect_enabled == enabled:
+            return
+        rock_detect_enabled = enabled
+        if not enabled:
+            rock_overlay_detections = []
+        print(f"Rock YOLO {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def save_calibration_settings(result_text):
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
@@ -2685,6 +2719,20 @@ def main():
                     "command": "camera_overlay",
                     "active": bool(camera_overlay_enabled),
                     "enabled": True,
+                },
+                {
+                    "id": "human_detect_toggle",
+                    "label": "Human Detect",
+                    "command": "human_detect_toggle",
+                    "active": bool(human_detect_enabled),
+                    "enabled": bool(human_detect_available),
+                },
+                {
+                    "id": "rock_detect_toggle",
+                    "label": "Rock YOLO",
+                    "command": "rock_detect_toggle",
+                    "active": bool(rock_detect_enabled),
+                    "enabled": bool(rock_model is not None),
                 },
                 {
                     "id": "drive_heading_flip",
@@ -3389,6 +3437,18 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_camera_overlay_enabled(not camera_overlay_enabled, "button")
                 return
+        rect = status_button_rects.get("human_detect_toggle")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_human_detect_enabled(not human_detect_enabled, "button")
+                return
+        rect = status_button_rects.get("rock_detect_toggle")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_rock_detect_enabled(not rock_detect_enabled, "button")
+                return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3691,6 +3751,10 @@ def main():
             toggle_camera_view()
         elif action == "camera_overlay":
             set_camera_overlay_enabled(not camera_overlay_enabled, "external command")
+        elif action == "human_detect_toggle":
+            set_human_detect_enabled(not human_detect_enabled, "external command")
+        elif action == "rock_detect_toggle":
+            set_rock_detect_enabled(not rock_detect_enabled, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -4139,7 +4203,11 @@ def main():
                 0.44,
             )
             servo_info_y = 222
-        landmark_status = f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved"
+        landmark_status = (
+            f"AI landmarks: {len(landmark_memory.get('landmarks', []))} saved"
+            f" | Human: {'ON' if human_detect_enabled else 'OFF'}"
+            f" | Rock YOLO: {'ON' if rock_detect_enabled else 'OFF'}"
+        )
         if tracking_enabled and (not tracking_pose_ok) and landmark_pose_override_t_map is not None:
             landmark_status += " | pose hold: landmark"
         put_line(
@@ -4567,7 +4635,7 @@ def main():
             )
         cursor_y += map_section_h + card_gap
 
-        zones_section_h = 72 + 2 * (button_h + 10) + 20
+        zones_section_h = 72 + 3 * (button_h + 10) + 20
         zones_body_y = section_frame(
             cursor_y,
             zones_section_h,
@@ -4582,6 +4650,8 @@ def main():
         camera_view_rect = grid_rect(zones_body_y, 1, 0)
         camera_overlay_rect = grid_rect(zones_body_y, 1, 1)
         auto_digger_rect = grid_rect(zones_body_y, 1, 2)
+        human_detect_rect = grid_rect(zones_body_y, 2, 0)
+        rock_detect_rect = grid_rect(zones_body_y, 2, 1)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
@@ -4623,6 +4693,22 @@ def main():
             auto_digger_enabled,
             (0, 140, 60),
             (110, 255, 150),
+        )
+        draw_control_button(
+            human_detect_rect,
+            "Human Detect: ON" if human_detect_enabled else "Human Detect",
+            bool(human_detect_available),
+            human_detect_enabled,
+            (130, 50, 180),
+            (230, 170, 255),
+        )
+        draw_control_button(
+            rock_detect_rect,
+            "Rock YOLO: ON" if rock_detect_enabled else "Rock YOLO",
+            bool(rock_model is not None),
+            rock_detect_enabled,
+            (180, 60, 20),
+            (255, 180, 120),
         )
         cursor_y += zones_section_h + card_gap
 
@@ -4975,6 +5061,8 @@ def main():
             ("main_rover_mode", main_rover_rect),
             ("camera_view", camera_view_rect),
             ("camera_overlay", camera_overlay_rect),
+            ("human_detect_toggle", human_detect_rect),
+            ("rock_detect_toggle", rock_detect_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -5626,6 +5714,7 @@ def main():
                     # Object detection: persist configured landmarks, stamp configured obstacles,
                     # and use saved landmarks to correct the held map pose when tracking is lost.
                     if ((not driver_priority_active)
+                            and rock_detect_enabled
                             and (rock_model is not None)
                             and (frame_idx - rock_last_frame) >= max(1, args.rock_every)):
                         rock_last_frame = frame_idx
@@ -6520,7 +6609,7 @@ def main():
 
                     # Human detection overlay
                     human_person_map_points = []
-                    if (not driver_priority_active) and human_detect_available and human_objects is not None and human_od_runtime is not None:
+                    if (not driver_priority_active) and human_detect_enabled and human_detect_available and human_objects is not None and human_od_runtime is not None:
                         if (frame_idx - human_last_frame) >= max(1, args.human_od_every):
                             human_last_frame = frame_idx
                             try:
@@ -6592,7 +6681,7 @@ def main():
                                     print(f"Human detect error: {exc}")
 
                     # Show hazard state on camera
-                    if (not driver_priority_active) and human_detect_available and human_hazard_state != "CLEAR":
+                    if (not driver_priority_active) and human_detect_enabled and human_detect_available and human_hazard_state != "CLEAR":
                         hz_color = (0, 220, 255) if human_hazard_state == "SLOW" else (0, 0, 255)
                         dist_txt = f"{human_nearest_m:.1f}m" if human_nearest_m > 0 else "--"
                         cv2.putText(
