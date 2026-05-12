@@ -42,6 +42,7 @@ class DriveCalibrationManager:
         self.last_result = "Calibration idle."
         self.last_saved_flip = None
         self.last_saved_hard_drive_flip = None
+        self.last_saved_steering_flip = None
         self.last_saved_display_heading_flip = None
         self.last_saved_camera_map_angle_deg = None
         self.last_saved_camera_deposit_angle_deg = None
@@ -57,6 +58,7 @@ class DriveCalibrationManager:
                 "version": 1,
                 "drive_heading_flip": None,
                 "hard_drive_flip": None,
+                "steering_flip": None,
                 "display_heading_flip": None,
                 "camera_map_angle_deg": None,
                 "camera_deposit_angle_deg": None,
@@ -70,6 +72,9 @@ class DriveCalibrationManager:
         hard_flip = data.get("hard_drive_flip")
         if isinstance(hard_flip, bool):
             self.last_saved_hard_drive_flip = bool(hard_flip)
+        steering_flip = data.get("steering_flip")
+        if isinstance(steering_flip, bool):
+            self.last_saved_steering_flip = bool(steering_flip)
         display_flip = data.get("display_heading_flip")
         if isinstance(display_flip, bool):
             self.last_saved_display_heading_flip = bool(display_flip)
@@ -88,6 +93,7 @@ class DriveCalibrationManager:
                 "version": 1,
                 "drive_heading_flip": self.last_saved_flip,
                 "hard_drive_flip": self.last_saved_hard_drive_flip,
+                "steering_flip": self.last_saved_steering_flip,
                 "display_heading_flip": self.last_saved_display_heading_flip,
                 "camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
                 "camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,
@@ -100,6 +106,7 @@ class DriveCalibrationManager:
         self,
         drive_heading_flip,
         hard_drive_flip,
+        steering_flip,
         display_heading_flip,
         camera_map_angle_deg,
         camera_deposit_angle_deg,
@@ -107,6 +114,7 @@ class DriveCalibrationManager:
     ):
         self.last_saved_flip = None if drive_heading_flip is None else bool(drive_heading_flip)
         self.last_saved_hard_drive_flip = None if hard_drive_flip is None else bool(hard_drive_flip)
+        self.last_saved_steering_flip = None if steering_flip is None else bool(steering_flip)
         self.last_saved_display_heading_flip = (
             None if display_heading_flip is None else bool(display_heading_flip)
         )
@@ -123,6 +131,7 @@ class DriveCalibrationManager:
         self.save_runtime_settings(
             drive_heading_flip,
             self.last_saved_hard_drive_flip,
+            self.last_saved_steering_flip,
             self.last_saved_display_heading_flip,
             self.last_saved_camera_map_angle_deg,
             self.last_saved_camera_deposit_angle_deg,
@@ -214,6 +223,7 @@ class DriveCalibrationManager:
             "last_result": self.last_result,
             "saved_drive_heading_flip": self.last_saved_flip,
             "saved_hard_drive_flip": self.last_saved_hard_drive_flip,
+            "saved_steering_flip": self.last_saved_steering_flip,
             "saved_display_heading_flip": self.last_saved_display_heading_flip,
             "saved_camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
             "saved_camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,

@@ -451,6 +451,11 @@ def main():
         help="Invert the actual drivetrain forward/turn commands sent to the RoboRIO.",
     )
     parser.add_argument(
+        "--steering-flip",
+        action="store_true",
+        help="Invert only the drivetrain turn command sent to the RoboRIO.",
+    )
+    parser.add_argument(
         "--main-rover-mode",
         action="store_true",
         dest="main_rover_mode",
@@ -1202,6 +1207,7 @@ def main():
         f"servo_invert={'on' if args.camera_servo_invert else 'off'} "
         f"heading_flip={'on' if args.drive_heading_flip else 'off'} "
         f"hard_drive_flip={'on' if args.hard_drive_flip else 'off'} "
+        f"steering_flip={'on' if args.steering_flip else 'off'} "
         f"display_heading_flip={'on' if args.display_heading_flip else 'off'}"
     )
 
@@ -1246,6 +1252,8 @@ def main():
         args.drive_heading_flip = bool(drive_calibration.last_saved_flip)
     if drive_calibration.last_saved_hard_drive_flip is not None:
         args.hard_drive_flip = bool(drive_calibration.last_saved_hard_drive_flip)
+    if drive_calibration.last_saved_steering_flip is not None:
+        args.steering_flip = bool(drive_calibration.last_saved_steering_flip)
     if drive_calibration.last_saved_display_heading_flip is not None:
         args.display_heading_flip = bool(drive_calibration.last_saved_display_heading_flip)
     if drive_calibration.last_saved_camera_map_angle_deg is not None:
@@ -2202,6 +2210,7 @@ def main():
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
             bool(args.hard_drive_flip),
+            bool(args.steering_flip),
             bool(args.display_heading_flip),
             float(args.camera_map_angle_deg),
             float(args.camera_deposit_angle_deg),
@@ -2230,6 +2239,17 @@ def main():
             f"Hard drive flip set {'ON' if args.hard_drive_flip else 'OFF'} via {source}."
         )
         print(f"Hard drive flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_steering_flip(enabled, source="button"):
+        enabled = bool(enabled)
+        if bool(args.steering_flip) == enabled:
+            return
+        args.steering_flip = enabled
+        save_calibration_settings(
+            f"Steering flip set {'ON' if args.steering_flip else 'OFF'} via {source}."
+        )
+        print(f"Steering flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
     def set_display_heading_flip(enabled, source="button"):
@@ -2746,6 +2766,13 @@ def main():
                     "label": "Hard Flip",
                     "command": "hard_drive_flip",
                     "active": bool(args.hard_drive_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "steering_flip",
+                    "label": "Flip Steering",
+                    "command": "steering_flip",
+                    "active": bool(args.steering_flip),
                     "enabled": True,
                 },
                 {
@@ -3461,6 +3488,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_hard_drive_flip(not args.hard_drive_flip, "button")
                 return
+        rect = status_button_rects.get("steering_flip")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_steering_flip(not args.steering_flip, "button")
+                return
         rect = status_button_rects.get("camera_view_flip")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3759,6 +3792,8 @@ def main():
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
             set_hard_drive_flip(not args.hard_drive_flip, "external command")
+        elif action == "steering_flip":
+            set_steering_flip(not args.steering_flip, "external command")
         elif action == "camera_view_flip":
             flip_camera_view_calibration("external command")
         elif action == "display_heading_flip":
@@ -3841,6 +3876,8 @@ def main():
         turn = float(turn)
         if args.hard_drive_flip:
             fwd = -fwd
+            turn = -turn
+        if args.steering_flip:
             turn = -turn
         enabled = bool(enabled)
         status_cmd_enabled = bool(enabled)
@@ -4712,7 +4749,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 2 * (button_h + 10) + 70
+        cal_section_h = 72 + 3 * (button_h + 10) + 70
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -4727,6 +4764,7 @@ def main():
         display_heading_flip_rect = grid_rect(cal_body_y, 1, 0)
         hard_drive_flip_rect = grid_rect(cal_body_y, 1, 1)
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
+        steering_flip_rect = grid_rect(cal_body_y, 2, 0)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -4773,16 +4811,24 @@ def main():
             (100, 90, 20),
             (220, 210, 120),
         )
+        draw_control_button(
+            steering_flip_rect,
+            "Flip Steering: ON" if args.steering_flip else "Flip Steering",
+            True,
+            bool(args.steering_flip),
+            (40, 120, 160),
+            (120, 220, 255),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
-            cal_body_y + 2 * (button_h + 10) + 14,
+            cal_body_y + 3 * (button_h + 10) + 14,
             (180, 220, 255),
             0.44,
             x=card_x0 + card_inner,
         )
         put_control_line(
             drive_calibration.last_result[:88],
-            cal_body_y + 2 * (button_h + 10) + 38,
+            cal_body_y + 3 * (button_h + 10) + 38,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5065,6 +5111,7 @@ def main():
             ("rock_detect_toggle", rock_detect_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
+            ("steering_flip", steering_flip_rect),
             ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
