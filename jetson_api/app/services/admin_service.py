@@ -10,10 +10,27 @@ from app.schemas.admin import AdminActionResponse
 class AdminService:
     def __init__(self) -> None:
         self._script_dir = Path(__file__).resolve().parents[2] / "scripts"
+        self._script_restart_map = {
+            "restart_roborio": self._script_dir / "restart_roborio.sh",
+        }
 
     def restart_service(self, service_name: str) -> AdminActionResponse:
         if not service_name.strip():
             raise ValueError("service_name is required")
+
+        script_path = self._script_restart_map.get(service_name)
+        if script_path is not None:
+            if not script_path.exists():
+                raise ValueError(f"Restart script not found: {script_path}")
+
+            try:
+                subprocess.Popen(["bash", str(script_path)])
+                return AdminActionResponse(
+                    ok=True,
+                    message=f"Restart script '{script_path.name}' started",
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to start restart script '{script_path.name}': {e}")
 
         if settings.dry_run:
             return AdminActionResponse(

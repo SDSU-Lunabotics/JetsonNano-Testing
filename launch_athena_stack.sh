@@ -7,8 +7,8 @@ JETSON_USER="creed"
 JETSON_IP="10.0.8.100"
 JETSON_PASS="Creed123"
 
-JETSON_PROJECT_DIR="jetsonano-test-F25/JetsonNano-Testing"
-JETSON_API_DIR="jetsonano-test-F25/JetsonNano-Testing/jetson_api"
+JETSON_PROJECT_DIR="B/JetsonNano-Testing"
+JETSON_API_DIR="B/JetsonNano-Testing/jetson_api"
 
 LOCAL_BACKEND_DIR="$HOME/Downloads/Lunabotics-UI/backend/src"
 LOCAL_FRONTEND_DIR="$HOME/Downloads/Lunabotics-UI/frontend"
