@@ -975,6 +975,14 @@ def main():
         1,
         int(float(os.getenv("START_FRAME_TAG_SAMPLE_RADIUS_PX", "6"))),
     )
+    start_frame_scan_duration_sec = max(
+        0.25,
+        float(os.getenv("START_FRAME_SCAN_DURATION_SEC", "0.9")),
+    )
+    start_frame_scan_min_samples = max(
+        2,
+        int(float(os.getenv("START_FRAME_SCAN_MIN_SAMPLES", "4"))),
+    )
 
     def fit_rigid_transform_2d(src_pts, dst_pts):
         src = np.asarray(src_pts, dtype=np.float32).reshape(-1, 2)
@@ -1092,10 +1100,9 @@ def main():
         detections.sort(key=lambda item: int(item["id"]))
         return detections
 
-    def apply_start_frame_from_tags(image_bgr, cloud, R_world_cam, t_map):
+    def apply_start_frame_from_detection_set(detections, status_prefix="Start frame locked"):
         nonlocal start_frame_last_status, start_frame_last_ids, start_frame_last_error_m
         nonlocal start_frame_last_map_points
-        detections, error_msg = detect_start_frame_tags(image_bgr, cloud, R_world_cam, t_map)
         start_frame_last_ids = [int(item["id"]) for item in detections]
         start_frame_last_map_points = [
             {
@@ -1105,11 +1112,6 @@ def main():
             }
             for item in detections
         ]
-        if error_msg is not None:
-            start_frame_last_error_m = None
-            start_frame_last_status = f"Start frame: {error_msg}"
-            print(start_frame_last_status)
-            return False
 
         detections = sorted(detections, key=lambda item: int(item["id"]))[:3]
         local_pts = np.array([item["local_uv"] for item in detections], dtype=np.float32)
@@ -1181,11 +1183,21 @@ def main():
 
         start_frame_last_error_m = float(fit_err)
         start_frame_last_status = (
-            f"Start frame locked from tags {start_frame_last_ids} "
+            f"{status_prefix} from tags {start_frame_last_ids} "
             f"(fit {float(fit_err):.03f} m)."
         )
         print(start_frame_last_status)
         return True
+
+    def apply_start_frame_from_tags(image_bgr, cloud, R_world_cam, t_map):
+        detections, error_msg = detect_start_frame_tags(image_bgr, cloud, R_world_cam, t_map)
+        if error_msg is not None:
+            nonlocal start_frame_last_status, start_frame_last_error_m
+            start_frame_last_error_m = None
+            start_frame_last_status = f"Start frame: {error_msg}"
+            print(start_frame_last_status)
+            return False
+        return apply_start_frame_from_detection_set(detections)
 
     camera_mount_yaw_deg = args.camera_mount_yaw_deg
     if camera_mount_yaw_deg is None:
@@ -1533,6 +1545,9 @@ def main():
     start_frame_auto_retry_sec = max(0.25, float(os.getenv("START_FRAME_AUTO_RETRY_SEC", "1.0")))
     start_frame_locked_once = False
     start_frame_last_attempt_time = 0.0
+    start_frame_scan_active = False
+    start_frame_scan_started_at = 0.0
+    start_frame_scan_samples = []
     if drive_calibration.last_saved_flip is not None:
         args.drive_heading_flip = bool(drive_calibration.last_saved_flip)
     if drive_calibration.last_saved_hard_drive_flip is not None:
@@ -2811,10 +2826,26 @@ def main():
 
     def request_start_frame_lock(source="button"):
         nonlocal start_frame_lock_requested, start_frame_last_status
-        nonlocal start_frame_locked_once
+        nonlocal start_frame_locked_once, start_frame_scan_active
+        nonlocal start_frame_scan_started_at, start_frame_scan_samples
+        start_frame_scan_active = False
+        start_frame_scan_started_at = 0.0
+        start_frame_scan_samples = []
         start_frame_lock_requested = True
         start_frame_locked_once = False
         start_frame_last_status = f"Start frame: requested via {source}."
+        print(start_frame_last_status)
+        publish_map_ui_state(force=True)
+
+    def request_start_frame_scan(source="button"):
+        nonlocal start_frame_scan_active, start_frame_scan_started_at, start_frame_scan_samples
+        nonlocal start_frame_lock_requested, start_frame_last_status, start_frame_locked_once
+        start_frame_lock_requested = False
+        start_frame_locked_once = False
+        start_frame_scan_active = True
+        start_frame_scan_started_at = time.time()
+        start_frame_scan_samples = []
+        start_frame_last_status = f"Start frame: scanning via {source}."
         print(start_frame_last_status)
         publish_map_ui_state(force=True)
 
@@ -3585,6 +3616,13 @@ def main():
                     "label": "Lock Start Frame",
                     "command": "lock_start_frame",
                     "active": False,
+                    "enabled": bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
+                },
+                {
+                    "id": "scan_start_frame",
+                    "label": "Scan Start Frame",
+                    "command": "scan_start_frame",
+                    "active": bool(start_frame_scan_active),
                     "enabled": bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
                 },
                 {
@@ -4414,6 +4452,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 request_start_frame_lock("button")
                 return
+        rect = status_button_rects.get("scan_start_frame")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                request_start_frame_scan("button")
+                return
         rect = status_button_rects.get("test_drive_forward")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -4806,6 +4850,8 @@ def main():
             set_demo_auto(not demo_auto_enabled, "external command")
         elif action == "lock_start_frame":
             request_start_frame_lock("external command")
+        elif action == "scan_start_frame":
+            request_start_frame_scan("external command")
         elif action == "test_drive_forward":
             set_test_drive_forward(not test_drive_forward_active, "external command")
         elif action == "camera_view_flip":
@@ -5891,6 +5937,7 @@ def main():
         bidirectional_auto_rect = grid_rect(cal_body_y, 2, 2)
         demo_auto_rect = grid_rect(cal_body_y, 3, 0)
         lock_start_frame_rect = grid_rect(cal_body_y, 3, 1)
+        scan_start_frame_rect = grid_rect(cal_body_y, 3, 2)
         cal_slider_y = cal_body_y + 5 * (button_h + 10) + 90
         cal_slider_x0 = card_x0 + card_inner + 8
         cal_slider_x1 = card_x1 - card_inner - 8
@@ -5982,6 +6029,14 @@ def main():
             False,
             (0, 130, 120),
             (120, 255, 235),
+        )
+        draw_control_button(
+            scan_start_frame_rect,
+            "Scan Start: ON" if start_frame_scan_active else "Scan Start Frame",
+            bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
+            bool(start_frame_scan_active),
+            (80, 90, 180),
+            (160, 190, 255),
         )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
@@ -6467,6 +6522,7 @@ def main():
             ("bidirectional_auto", bidirectional_auto_rect),
             ("demo_auto", demo_auto_rect),
             ("lock_start_frame", lock_start_frame_rect),
+            ("scan_start_frame", scan_start_frame_rect),
             ("drive_speed_slider", drive_speed_slider_rect),
             ("turn_speed_slider", turn_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -7124,11 +7180,100 @@ def main():
                     auto_mining.MiningState.NAVIGATE_DEPOSIT,
                     auto_mining.MiningState.DEPOSITING,
                 )
+                if start_frame_scan_active:
+                    if tracking_enabled and (not tracking_pose_ok):
+                        start_frame_scan_active = False
+                        start_frame_scan_started_at = 0.0
+                        start_frame_scan_samples = []
+                        start_frame_last_status = "Start frame: scan canceled, tracking not locked."
+                        start_frame_last_error_m = None
+                        print(start_frame_last_status)
+                        publish_map_ui_state(force=True)
+                    else:
+                        try:
+                            _img_raw = image_left.get_data()
+                            if _img_raw is not None:
+                                if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
+                                    _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
+                                elif _img_raw.ndim == 3 and _img_raw.shape[2] >= 3:
+                                    _img_bgr = _img_raw[:, :, :3].copy()
+                                else:
+                                    _img_bgr = None
+                            else:
+                                _img_bgr = None
+                            if _img_bgr is not None:
+                                _scan_detections, _scan_error = detect_start_frame_tags(_img_bgr, cloud, R_world_cam, t_map)
+                                if _scan_error is None:
+                                    start_frame_scan_samples.append(_scan_detections)
+                                    start_frame_last_ids = [int(item["id"]) for item in _scan_detections]
+                                    start_frame_last_map_points = [
+                                        {
+                                            "id": int(item["id"]),
+                                            "map_x": float(item["map_xz"][0]),
+                                            "map_z": float(item["map_xz"][1]),
+                                        }
+                                        for item in _scan_detections
+                                    ]
+                                    start_frame_last_status = (
+                                        f"Start frame: scanning {len(start_frame_scan_samples)}/"
+                                        f"{start_frame_scan_min_samples} samples."
+                                    )
+                        except Exception as exc:
+                            start_frame_scan_active = False
+                            start_frame_scan_started_at = 0.0
+                            start_frame_scan_samples = []
+                            start_frame_last_status = f"Start frame: scan failed ({exc})."
+                            start_frame_last_error_m = None
+                            print(start_frame_last_status)
+                            publish_map_ui_state(force=True)
+                        if start_frame_scan_active:
+                            elapsed_scan = now - float(start_frame_scan_started_at)
+                            if (
+                                len(start_frame_scan_samples) >= int(start_frame_scan_min_samples)
+                                and elapsed_scan >= float(start_frame_scan_duration_sec)
+                            ):
+                                tag_groups = {}
+                                for sample in start_frame_scan_samples:
+                                    for item in sample:
+                                        tag_groups.setdefault(int(item["id"]), []).append(item)
+                                averaged_detections = []
+                                for tag_id in sorted(tag_groups.keys()):
+                                    items = tag_groups[tag_id]
+                                    if len(items) < int(start_frame_scan_min_samples):
+                                        continue
+                                    local_uv = np.array(items[0]["local_uv"], dtype=np.float32)
+                                    avg_map = np.mean(
+                                        np.array([it["map_xz"] for it in items], dtype=np.float32),
+                                        axis=0,
+                                    )
+                                    averaged_detections.append(
+                                        {
+                                            "id": int(tag_id),
+                                            "local_uv": local_uv,
+                                            "map_xz": np.array(avg_map, dtype=np.float32),
+                                        }
+                                    )
+                                start_frame_scan_active = False
+                                start_frame_scan_started_at = 0.0
+                                start_frame_scan_samples = []
+                                if len(averaged_detections) >= 3:
+                                    if apply_start_frame_from_detection_set(
+                                        averaged_detections[:3],
+                                        status_prefix="Start frame scan locked",
+                                    ):
+                                        start_frame_locked_once = True
+                                else:
+                                    start_frame_last_status = "Start frame: scan needs 3 stable tags."
+                                    start_frame_last_error_m = None
+                                    print(start_frame_last_status)
+                                publish_map_ui_state(force=True)
+
                 should_try_start_frame_lock = bool(start_frame_lock_requested)
                 if (
                     (not should_try_start_frame_lock)
                     and start_frame_auto_lock_enabled
                     and (not start_frame_locked_once)
+                    and (not start_frame_scan_active)
                     and (not mining_running_now)
                     and (now - float(start_frame_last_attempt_time)) >= float(start_frame_auto_retry_sec)
                 ):
