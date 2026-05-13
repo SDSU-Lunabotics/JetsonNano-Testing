@@ -24,10 +24,18 @@ class AdminService:
                 raise ValueError(f"Restart script not found: {script_path}")
 
             try:
-                subprocess.Popen(["bash", str(script_path)])
+                print(
+                    f"[Jetson API] restart-service '{service_name}' launching {script_path}",
+                    flush=True,
+                )
+                proc = subprocess.Popen(["bash", str(script_path)])
+                print(
+                    f"[Jetson API] restart-service '{service_name}' started pid={proc.pid}",
+                    flush=True,
+                )
                 return AdminActionResponse(
                     ok=True,
-                    message=f"Restart script '{script_path.name}' started",
+                    message=f"Restart script '{script_path.name}' started pid={proc.pid}",
                 )
             except Exception as e:
                 raise ValueError(f"Failed to start restart script '{script_path.name}': {e}")
