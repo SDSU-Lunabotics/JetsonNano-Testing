@@ -2,7 +2,14 @@
 set -e
 
 echo "[SCRIPT] restart_roborio started at $(date)"
+echo "[SCRIPT] restart_roborio CONFIRMATION: GUI/API successfully launched this script."
+echo "[SCRIPT] restart_roborio writing debug log to /tmp/restart_roborio_debug.log"
+{
+  echo "[SCRIPT] restart_roborio launched at $(date)"
+  echo "[SCRIPT] user=$(whoami) pwd=$(pwd)"
+} >> /tmp/restart_roborio_debug.log
 
+echo "[SCRIPT] restart_roborio about to run Jetson.GPIO relay reset"
 sudo python3 - <<'PY'
 import time
 import Jetson.GPIO as GPIO
@@ -38,3 +45,4 @@ PY
 sleep 2
 
 echo "[SCRIPT] restart_roborio finished"
+echo "[SCRIPT] restart_roborio finished at $(date)" >> /tmp/restart_roborio_debug.log
