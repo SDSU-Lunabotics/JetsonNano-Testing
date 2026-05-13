@@ -928,6 +928,265 @@ def main():
     def zed_x_from_map(x):
         return -float(x)
 
+    def parse_start_frame_tag_layout(layout_text):
+        layout = {}
+        for raw_item in str(layout_text or "").split(";"):
+            item = raw_item.strip()
+            if not item:
+                continue
+            try:
+                tag_str, coord_str = item.split(":", 1)
+                u_str, v_str = coord_str.split(",", 1)
+                layout[int(tag_str.strip())] = np.array(
+                    [float(u_str.strip()), float(v_str.strip())],
+                    dtype=np.float32,
+                )
+            except Exception:
+                continue
+        return layout
+
+    def resolve_start_frame_aruco_dict(name):
+        if (not HAS_CV2) or (not hasattr(cv2, "aruco")):
+            return None
+        raw_name = str(name or "").strip()
+        if not raw_name:
+            raw_name = "DICT_APRILTAG_25h9"
+        candidates = [raw_name]
+        lower_name = raw_name.lower()
+        for attr in dir(cv2.aruco):
+            if attr.lower() == lower_name:
+                candidates.append(attr)
+        for attr_name in candidates:
+            if hasattr(cv2.aruco, attr_name):
+                dict_id = getattr(cv2.aruco, attr_name)
+                try:
+                    return cv2.aruco.getPredefinedDictionary(dict_id)
+                except Exception:
+                    continue
+        return None
+
+    start_frame_tag_layout = parse_start_frame_tag_layout(
+        os.getenv("START_FRAME_TAG_LAYOUT", "10:0.50,0.00;11:0.50,0.75;12:1.25,0.00")
+    )
+    start_frame_tag_dictionary = resolve_start_frame_aruco_dict(
+        os.getenv("START_FRAME_TAG_DICT", "DICT_APRILTAG_25h9")
+    )
+    start_frame_tag_sample_radius_px = max(
+        1,
+        int(float(os.getenv("START_FRAME_TAG_SAMPLE_RADIUS_PX", "6"))),
+    )
+
+    def fit_rigid_transform_2d(src_pts, dst_pts):
+        src = np.asarray(src_pts, dtype=np.float32).reshape(-1, 2)
+        dst = np.asarray(dst_pts, dtype=np.float32).reshape(-1, 2)
+        if src.shape[0] < 2 or dst.shape[0] != src.shape[0]:
+            return None, None, None
+        src_mean = np.mean(src, axis=0)
+        dst_mean = np.mean(dst, axis=0)
+        src_centered = src - src_mean
+        dst_centered = dst - dst_mean
+        H = src_centered.T @ dst_centered
+        U, _, Vt = np.linalg.svd(H)
+        R = Vt.T @ U.T
+        if np.linalg.det(R) < 0:
+            Vt[-1, :] *= -1.0
+            R = Vt.T @ U.T
+        t = dst_mean - (R @ src_mean)
+        pred = (src @ R.T) + t
+        err = np.linalg.norm(pred - dst, axis=1)
+        return R.astype(np.float32), t.astype(np.float32), float(np.mean(err))
+
+    def detect_start_frame_tags(image_bgr, cloud, R_world_cam, t_map):
+        if start_frame_tag_dictionary is None:
+            return [], "OpenCV ArUco/AprilTag support not available."
+        if not start_frame_tag_layout:
+            return [], "No start-frame tag layout configured."
+        if image_bgr is None or cloud is None:
+            return [], "Missing camera image or point cloud."
+        if image_bgr.ndim != 3 or image_bgr.shape[2] < 3:
+            return [], "Unexpected image format."
+
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        try:
+            params = cv2.aruco.DetectorParameters()
+        except Exception:
+            params = cv2.aruco.DetectorParameters_create()
+        try:
+            detector = cv2.aruco.ArucoDetector(start_frame_tag_dictionary, params)
+            corners, ids, _ = detector.detectMarkers(gray)
+        except Exception:
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, start_frame_tag_dictionary, parameters=params)
+
+        if ids is None or len(ids) <= 0:
+            return [], "No configured AprilTags detected."
+
+        img_h, img_w = image_bgr.shape[:2]
+        cld_h, cld_w = cloud.shape[:2]
+        detections = []
+        for det_corners, det_id_arr in zip(corners, ids):
+            tag_id = int(det_id_arr[0])
+            if tag_id not in start_frame_tag_layout:
+                continue
+            pts = np.asarray(det_corners, dtype=np.float32).reshape(-1, 2)
+            cx = float(np.mean(pts[:, 0]))
+            cy = float(np.mean(pts[:, 1]))
+            pc_c = int(round(cx * cld_w / max(1, img_w)))
+            pc_r = int(round(cy * cld_h / max(1, img_h)))
+            rad = start_frame_tag_sample_radius_px
+            r0 = max(0, pc_r - rad)
+            r1 = min(cld_h, pc_r + rad + 1)
+            c0 = max(0, pc_c - rad)
+            c1 = min(cld_w, pc_c + rad + 1)
+            sample = cloud[r0:r1, c0:c1, :3].reshape(-1, 3)
+            valid = sample[np.isfinite(sample).all(axis=1)]
+            if valid.shape[0] <= 0:
+                continue
+            pt_cam = np.median(valid, axis=0).astype(np.float32)
+            pt_world = (np.asarray(R_world_cam, dtype=np.float32).reshape(3, 3) @ pt_cam) + np.asarray(t_map, dtype=np.float32).reshape(3,)
+            detections.append(
+                {
+                    "id": tag_id,
+                    "local_uv": np.array(start_frame_tag_layout[tag_id], dtype=np.float32),
+                    "map_xz": np.array([map_x_from_zed(float(pt_world[0])), float(pt_world[2])], dtype=np.float32),
+                    "image_xy": (cx, cy),
+                }
+            )
+        if len(detections) < 3:
+            return detections, f"Detected only {len(detections)} configured tag(s); need 3."
+        return detections, None
+
+    def detect_start_frame_markers_2d(image_bgr):
+        if start_frame_tag_dictionary is None or image_bgr is None:
+            return []
+        if image_bgr.ndim != 3 or image_bgr.shape[2] < 3:
+            return []
+
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        try:
+            params = cv2.aruco.DetectorParameters()
+        except Exception:
+            params = cv2.aruco.DetectorParameters_create()
+        try:
+            detector = cv2.aruco.ArucoDetector(start_frame_tag_dictionary, params)
+            corners, ids, _ = detector.detectMarkers(gray)
+        except Exception:
+            corners, ids, _ = cv2.aruco.detectMarkers(gray, start_frame_tag_dictionary, parameters=params)
+
+        if ids is None or len(ids) <= 0:
+            return []
+
+        detections = []
+        for det_corners, det_id_arr in zip(corners, ids):
+            tag_id = int(det_id_arr[0])
+            if tag_id not in start_frame_tag_layout:
+                continue
+            pts = np.asarray(det_corners, dtype=np.float32).reshape(-1, 2)
+            center = np.mean(pts, axis=0)
+            detections.append(
+                {
+                    "id": tag_id,
+                    "corners": pts,
+                    "center": (float(center[0]), float(center[1])),
+                }
+            )
+        detections.sort(key=lambda item: int(item["id"]))
+        return detections
+
+    def apply_start_frame_from_tags(image_bgr, cloud, R_world_cam, t_map):
+        nonlocal start_frame_last_status, start_frame_last_ids, start_frame_last_error_m
+        nonlocal start_frame_last_map_points
+        detections, error_msg = detect_start_frame_tags(image_bgr, cloud, R_world_cam, t_map)
+        start_frame_last_ids = [int(item["id"]) for item in detections]
+        start_frame_last_map_points = [
+            {
+                "id": int(item["id"]),
+                "map_x": float(item["map_xz"][0]),
+                "map_z": float(item["map_xz"][1]),
+            }
+            for item in detections
+        ]
+        if error_msg is not None:
+            start_frame_last_error_m = None
+            start_frame_last_status = f"Start frame: {error_msg}"
+            print(start_frame_last_status)
+            return False
+
+        detections = sorted(detections, key=lambda item: int(item["id"]))[:3]
+        local_pts = np.array([item["local_uv"] for item in detections], dtype=np.float32)
+        map_pts = np.array([item["map_xz"] for item in detections], dtype=np.float32)
+        R2, t2, fit_err = fit_rigid_transform_2d(local_pts, map_pts)
+        if R2 is None:
+            start_frame_last_error_m = None
+            start_frame_last_status = "Start frame: transform fit failed."
+            print(start_frame_last_status)
+            return False
+
+        start_w = float(_mining_cfg.get("starting_zone_width_m", 1.50))
+        start_d = float(_mining_cfg.get("starting_zone_depth_m", 1.50))
+        berm_u = max(
+            abs(float(_mining_cfg.get("berm_left_center_x_m", -6.80))),
+            abs(float(_mining_cfg.get("berm_right_center_x_m", 6.80))),
+        )
+        berm_v = float(_mining_cfg.get("berm_center_z_m", 3.57))
+        berm_w = float(_mining_cfg.get("berm_width_m", 1.50))
+        berm_d = float(_mining_cfg.get("berm_depth_m", 0.90))
+        apply_start_to_excav = str(_mining_cfg.get("starting_zone_apply_to_excav", "1")).strip().lower() not in ("0", "false", "no", "off", "")
+
+        def transform_local_poly(local_poly):
+            local_arr = np.asarray(local_poly, dtype=np.float32).reshape(-1, 2)
+            return (local_arr @ R2.T) + t2
+
+        start_local = np.array(
+            [[0.0, 0.0], [start_w, 0.0], [start_w, start_d], [0.0, start_d]],
+            dtype=np.float32,
+        )
+        berm_local = np.array(
+            [
+                [berm_u - 0.5 * berm_w, berm_v - 0.5 * berm_d],
+                [berm_u + 0.5 * berm_w, berm_v - 0.5 * berm_d],
+                [berm_u + 0.5 * berm_w, berm_v + 0.5 * berm_d],
+                [berm_u - 0.5 * berm_w, berm_v + 0.5 * berm_d],
+            ],
+            dtype=np.float32,
+        )
+        start_world = transform_local_poly(start_local)
+        berm_world = transform_local_poly(berm_local)
+
+        def world_poly_to_rc(poly_world):
+            out = []
+            for map_x, map_z in np.asarray(poly_world, dtype=np.float32):
+                rc = occ_map.world_to_grid(float(map_x), float(map_z))
+                if rc is None:
+                    return None
+                out.append(rc)
+            return out
+
+        start_rc = world_poly_to_rc(start_world)
+        berm_rc = world_poly_to_rc(berm_world)
+        if start_rc is None or berm_rc is None:
+            start_frame_last_error_m = None
+            start_frame_last_status = "Start frame: transformed zones fell outside current map bounds."
+            print(start_frame_last_status)
+            return False
+
+        mining.starting_corners_rc = list(start_rc)
+        mining.starting_zone_preset_side = None
+        if apply_start_to_excav:
+            mining.excav_corners_rc = list(start_rc)
+            mining.preferred_start_rc = None
+        mining.deposit_corners_rc = list(berm_rc)
+        mining.deposit_zone_preset_side = None
+        mining._deposit_approach_rc = None
+        mining.save_zones(occ_map)
+
+        start_frame_last_error_m = float(fit_err)
+        start_frame_last_status = (
+            f"Start frame locked from tags {start_frame_last_ids} "
+            f"(fit {float(fit_err):.03f} m)."
+        )
+        print(start_frame_last_status)
+        return True
+
     camera_mount_yaw_deg = args.camera_mount_yaw_deg
     if camera_mount_yaw_deg is None:
         camera_mount_yaw_deg = 180.0 if args.camera_mount == "rear" else 0.0
@@ -1227,11 +1486,13 @@ def main():
 
     # --- Mining automation subsystem ---
     _mining_cfg = {
-        "dig_duration":          float(os.getenv("MINING_DIG_DURATION",           "5.0")),
+        "dig_duration":          float(os.getenv("MINING_DIG_DURATION",           "52.0")),
         "dig_speed":             float(os.getenv("MINING_DIG_SPEED",              "0.20")),
-        "backup_duration":       float(os.getenv("MINING_BACKUP_DURATION",        "2.0")),
+        "backup_duration":       float(os.getenv("MINING_BACKUP_DURATION",        "5.0")),
         "backup_speed":          float(os.getenv("MINING_BACKUP_SPEED",           "0.35")),
-        "deposit_duration":      float(os.getenv("MINING_DEPOSIT_DURATION",       "5.0")),
+        "dig_cycles":            float(os.getenv("MINING_DIG_CYCLES",             "4")),
+        "dig_pullup_duration":   float(os.getenv("MINING_DIG_PULLUP_DURATION",    "2.0")),
+        "deposit_duration":      float(os.getenv("MINING_DEPOSIT_DURATION",       "14.0")),
         "deposit_backup_speed":  float(os.getenv("MINING_DEPOSIT_BACKUP_SPEED",   "0.35")),
         "deposit_approach_dist": float(os.getenv("MINING_DEPOSIT_APPROACH_DIST",  "1.0")),
         "deposit_boundary_inset_m": float(os.getenv(
@@ -1246,6 +1507,12 @@ def main():
         "berm_center_z_m":       float(os.getenv("MINING_BERM_CENTER_Z_M",        "3.57")),
         "berm_width_m":          float(os.getenv("MINING_BERM_WIDTH_M",           "1.50")),
         "berm_depth_m":          float(os.getenv("MINING_BERM_DEPTH_M",           "0.90")),
+        "starting_zone_side":    os.getenv("MINING_STARTING_ZONE_SIDE",          "right"),
+        "starting_zone_origin_x_m": float(os.getenv("MINING_STARTING_ZONE_ORIGIN_X_M", "0.0")),
+        "starting_zone_origin_z_m": float(os.getenv("MINING_STARTING_ZONE_ORIGIN_Z_M", "0.0")),
+        "starting_zone_width_m": float(os.getenv("MINING_STARTING_ZONE_WIDTH_M", "1.50")),
+        "starting_zone_depth_m": float(os.getenv("MINING_STARTING_ZONE_DEPTH_M", "1.50")),
+        "starting_zone_apply_to_excav": os.getenv("MINING_STARTING_ZONE_APPLY_TO_EXCAV", "1"),
         "zones_path":            os.getenv("MINING_ZONES_PATH",
                                            os.path.join(SCRIPT_DIR, "mining_zones.json")),
     }
@@ -1257,6 +1524,15 @@ def main():
     controller_macros = calibration_profiles.ControllerMacroLibrary(args.controller_macros_path)
     dig_profile_playback_cmd = None
     controller_macro_playback_cmd = None
+    start_frame_lock_requested = False
+    start_frame_last_status = "Start frame: idle"
+    start_frame_last_ids = []
+    start_frame_last_error_m = None
+    start_frame_last_map_points = []
+    start_frame_auto_lock_enabled = str(os.getenv("START_FRAME_AUTO_LOCK", "1")).strip().lower() not in ("0", "false", "no", "off", "")
+    start_frame_auto_retry_sec = max(0.25, float(os.getenv("START_FRAME_AUTO_RETRY_SEC", "1.0")))
+    start_frame_locked_once = False
+    start_frame_last_attempt_time = 0.0
     if drive_calibration.last_saved_flip is not None:
         args.drive_heading_flip = bool(drive_calibration.last_saved_flip)
     if drive_calibration.last_saved_hard_drive_flip is not None:
@@ -1370,6 +1646,8 @@ def main():
     test_door_close_active = False
     test_drive_forward_active = False
     test_drive_forward_until = 0.0
+    excavation_pattern_test_active = False
+    excavation_pattern_test_started_at = 0.0
     dig_profile_preview_active = False
     dig_profile_preview_started_at = 0.0
     dig_profile_preview_style = None
@@ -1895,7 +2173,63 @@ def main():
         return
 
     def draw_localization_banner(frame):
-        return
+        if frame is None:
+            return
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0:
+            return
+
+        locked = bool(start_frame_locked_once)
+        waiting = bool(start_frame_auto_lock_enabled and (not start_frame_locked_once))
+        if locked:
+            headline = "START FRAME: LOCKED"
+            color = (60, 215, 80)
+        elif waiting:
+            headline = "START FRAME: SEARCHING TAGS"
+            color = (0, 215, 255)
+        else:
+            headline = "START FRAME: IDLE"
+            color = (180, 180, 180)
+
+        detail = str(start_frame_last_status or "").strip()
+        if len(detail) > 84:
+            detail = detail[:81] + "..."
+        if start_frame_last_ids:
+            id_text = ",".join(str(v) for v in start_frame_last_ids)
+            detail = f"{detail}  IDs:{id_text}".strip()
+        if start_frame_last_error_m is not None:
+            detail = f"{detail}  fit:{float(start_frame_last_error_m):.03f}m".strip()
+
+        pad = 10
+        box_h = 54
+        box_w = min(w - 2 * pad, max(340, int(0.56 * w)))
+        x0 = pad
+        y0 = pad
+        x1 = x0 + box_w
+        y1 = y0 + box_h
+        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 0), -1)
+        cv2.rectangle(frame, (x0, y0), (x1, y1), color, 2)
+        cv2.putText(
+            frame,
+            headline,
+            (x0 + 12, y0 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+        if detail:
+            cv2.putText(
+                frame,
+                detail,
+                (x0 + 12, y0 + 42),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.46,
+                (235, 235, 235),
+                1,
+                cv2.LINE_AA,
+            )
 
     load_landmark_memory()
 
@@ -1962,7 +2296,11 @@ def main():
         nonlocal test_excavation_dig_active, test_excavation_lower_active
         nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
+        nonlocal excavation_pattern_test_active, excavation_pattern_test_started_at
         enabled = bool(enabled)
+        if enabled and excavation_pattern_test_active:
+            excavation_pattern_test_active = False
+            excavation_pattern_test_started_at = 0.0
         if mode_name == "auto_digger":
             if auto_digger_enabled == enabled:
                 return
@@ -2016,6 +2354,7 @@ def main():
         nonlocal test_excavation_dig_active, test_excavation_lower_active
         nonlocal test_excavation_lower_cycle_started_at
         nonlocal test_door_open_active, test_door_close_active
+        nonlocal excavation_pattern_test_active, excavation_pattern_test_started_at
         changed = (
             test_excavation_left_extend_active
             or test_excavation_right_extend_active
@@ -2023,6 +2362,7 @@ def main():
             or test_excavation_lower_active
             or test_door_open_active
             or test_door_close_active
+            or excavation_pattern_test_active
         )
         test_excavation_left_extend_active = False
         test_excavation_right_extend_active = False
@@ -2031,17 +2371,25 @@ def main():
         test_excavation_lower_cycle_started_at = 0.0
         test_door_open_active = False
         test_door_close_active = False
+        excavation_pattern_test_active = False
+        excavation_pattern_test_started_at = 0.0
         if changed:
             print(f"Actuator manual commands stopped via {source}.")
+            if args.drive and sd is not None:
+                reset_auto_drive_shape(time.time())
+                send_nt_command(False, 0.0, 0.0, 0.1)
             publish_map_ui_state(force=True)
 
     def set_test_drive_forward(enabled, source="button"):
         nonlocal test_drive_forward_active, test_drive_forward_until
+        nonlocal excavation_pattern_test_active, excavation_pattern_test_started_at
         if not args.drive or sd is None:
             print("Forward drive test unavailable because RoboRIO drive is not active.")
             return
         enabled = bool(enabled)
         if enabled:
+            excavation_pattern_test_active = False
+            excavation_pattern_test_started_at = 0.0
             test_drive_forward_active = True
             test_drive_forward_until = time.time() + 5.0
             reset_auto_drive_shape(time.time())
@@ -2054,6 +2402,105 @@ def main():
             reset_auto_drive_shape(time.time())
             send_nt_command(False, 0.0, 0.0, 0.1)
             print(f"Forward drive test STOPPED via {source}.")
+        publish_map_ui_state(force=True)
+
+    def excavation_pattern_state(now):
+        if not excavation_pattern_test_active or excavation_pattern_test_started_at <= 0.0:
+            return None
+        forward_sec = 5.0
+        reverse_sec = 5.0
+        pull_up_sec = 2.0
+        cycles = 4
+        final_retract_sec = max(0.0, (forward_sec - pull_up_sec) * cycles)
+        total_cycle_sec = forward_sec + reverse_sec
+        total_sec = total_cycle_sec * cycles + final_retract_sec
+        elapsed = max(0.0, float(now) - float(excavation_pattern_test_started_at))
+        slow_speed = max(0.10, min(1.0, float(args.drive_speed))) * 0.28
+        if elapsed >= total_sec:
+            return {
+                "done": True,
+                "label": "complete",
+                "fwd": 0.0,
+                "lower": False,
+                "digger": False,
+                "cycle_index": cycles,
+                "cycles": cycles,
+            }
+        active_window = total_cycle_sec * cycles
+        if elapsed < active_window:
+            cycle_index = int(elapsed // total_cycle_sec)
+            cycle_elapsed = elapsed - float(cycle_index * total_cycle_sec)
+            if cycle_elapsed < forward_sec:
+                return {
+                    "done": False,
+                    "label": f"Cycle {cycle_index + 1}/{cycles}: lower + forward",
+                    "fwd": slow_speed,
+                    "lower": True,
+                    "digger": True,
+                    "cycle_index": cycle_index + 1,
+                    "cycles": cycles,
+                }
+            reverse_elapsed = cycle_elapsed - forward_sec
+            if reverse_elapsed < pull_up_sec:
+                label = f"Cycle {cycle_index + 1}/{cycles}: pull up + reverse"
+            else:
+                label = f"Cycle {cycle_index + 1}/{cycles}: reverse"
+            return {
+                "done": False,
+                "label": label,
+                "fwd": -slow_speed,
+                "lower": False,
+                "digger": True,
+                "cycle_index": cycle_index + 1,
+                "cycles": cycles,
+            }
+        retract_elapsed = elapsed - active_window
+        return {
+            "done": False,
+            "label": f"Final retract {retract_elapsed:.1f}/{final_retract_sec:.1f}s",
+            "fwd": 0.0,
+            "lower": False,
+            "digger": False,
+            "cycle_index": cycles,
+            "cycles": cycles,
+        }
+
+    def set_excavation_pattern_test(enabled, source="button"):
+        nonlocal excavation_pattern_test_active, excavation_pattern_test_started_at
+        nonlocal test_drive_forward_active, test_drive_forward_until
+        nonlocal test_excavation_left_extend_active, test_excavation_right_extend_active
+        nonlocal test_excavation_dig_active, test_excavation_lower_active
+        nonlocal test_excavation_lower_cycle_started_at
+        nonlocal test_door_open_active, test_door_close_active
+        if not args.drive or sd is None:
+            print("Excavation pattern test unavailable because RoboRIO drive is not active.")
+            return
+        enabled = bool(enabled)
+        if enabled:
+            test_drive_forward_active = False
+            test_drive_forward_until = 0.0
+            test_excavation_left_extend_active = False
+            test_excavation_right_extend_active = False
+            test_excavation_dig_active = False
+            test_excavation_lower_active = False
+            test_excavation_lower_cycle_started_at = 0.0
+            test_door_open_active = False
+            test_door_close_active = False
+            excavation_pattern_test_active = True
+            excavation_pattern_test_started_at = time.time()
+            reset_auto_drive_shape(excavation_pattern_test_started_at)
+            print(
+                f"Excavation pattern test STARTED via {source} "
+                "(4 cycles: 5s lower+forward, 5s reverse, final retract 12s)."
+            )
+        else:
+            if not excavation_pattern_test_active:
+                return
+            excavation_pattern_test_active = False
+            excavation_pattern_test_started_at = 0.0
+            reset_auto_drive_shape(time.time())
+            send_nt_command(False, 0.0, 0.0, 0.1)
+            print(f"Excavation pattern test STOPPED via {source}.")
         publish_map_ui_state(force=True)
 
     def _read_first_nt_number(keys):
@@ -2360,6 +2807,15 @@ def main():
             demo_rover_pos_map = None
             demo_rover_heading_rad = 0.0
         print(f"Demo Auto {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def request_start_frame_lock(source="button"):
+        nonlocal start_frame_lock_requested, start_frame_last_status
+        nonlocal start_frame_locked_once
+        start_frame_lock_requested = True
+        start_frame_locked_once = False
+        start_frame_last_status = f"Start frame: requested via {source}."
+        print(start_frame_last_status)
         publish_map_ui_state(force=True)
 
     def set_show_all_dig_profiles(enabled, source="button"):
@@ -2995,6 +3451,7 @@ def main():
                 "lower_command": bool(test_excavation_lower_active),
                 "door_open_command": bool(test_door_open_active),
                 "door_close_command": bool(test_door_close_active),
+                "pattern_test_active": bool(excavation_pattern_test_active),
             },
             "controls": [
                 {
@@ -3122,6 +3579,13 @@ def main():
                     "command": "demo_auto",
                     "active": bool(demo_auto_enabled),
                     "enabled": True,
+                },
+                {
+                    "id": "lock_start_frame",
+                    "label": "Lock Start Frame",
+                    "command": "lock_start_frame",
+                    "active": False,
+                    "enabled": bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
                 },
                 {
                     "id": "test_drive_forward",
@@ -3303,6 +3767,13 @@ def main():
                     "enabled": True,
                 },
                 {
+                    "id": "test_excavation_pattern",
+                    "label": "Excav Test x4",
+                    "command": "test_excavation_pattern",
+                    "active": bool(excavation_pattern_test_active),
+                    "enabled": bool(args.drive and sd is not None),
+                },
+                {
                     "id": "door_open",
                     "label": "Open Door",
                     "command": "door_open",
@@ -3353,6 +3824,13 @@ def main():
                     "label": "Draw Deposit Zone",
                     "command": "draw_deposit_zone",
                     "active": mining.state == auto_mining.MiningState.DRAW_DEPOSIT,
+                    "enabled": bool(button_enabled),
+                },
+                {
+                    "id": "set_starting_zone",
+                    "label": "Set Starting Zone",
+                    "command": "set_starting_zone",
+                    "active": bool(mining.starting_corners_rc),
                     "enabled": bool(button_enabled),
                 },
                 {
@@ -3833,6 +4311,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_excavation_test_mode("lower", not test_excavation_lower_active, "button")
                 return
+        rect = status_button_rects.get("test_excavation_pattern")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_excavation_pattern_test(not excavation_pattern_test_active, "button")
+                return
         rect = status_button_rects.get("door_open")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -3923,6 +4407,12 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_demo_auto(not demo_auto_enabled, "button")
+                return
+        rect = status_button_rects.get("lock_start_frame")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                request_start_frame_lock("button")
                 return
         rect = status_button_rects.get("test_drive_forward")
         if rect is not None:
@@ -4079,6 +4569,27 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_brush_tool(None)
                 mining.start_draw_deposit()
+                return
+        rect = status_button_rects.get("starting_zone")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_brush_tool(None)
+                mining.set_starting_zone_preset(occ_map)
+                return
+        rect = status_button_rects.get("set_berm_left")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_brush_tool(None)
+                mining.set_deposit_zone_preset("left", occ_map)
+                return
+        rect = status_button_rects.get("set_berm_right")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_brush_tool(None)
+                mining.set_deposit_zone_preset("right", occ_map)
                 return
         rect = status_button_rects.get("pick_dig_start")
         if rect is not None:
@@ -4257,6 +4768,8 @@ def main():
             set_excavation_test_mode("right_extend", not test_excavation_right_extend_active, "external command")
         elif action == "test_excavation_lower":
             set_excavation_test_mode("lower", not test_excavation_lower_active, "external command")
+        elif action == "test_excavation_pattern":
+            set_excavation_pattern_test(not excavation_pattern_test_active, "external command")
         elif action == "door_open":
             set_excavation_test_mode("door_open", not test_door_open_active, "external command")
         elif action == "door_close":
@@ -4291,6 +4804,8 @@ def main():
             set_bidirectional_auto(not bidirectional_auto_enabled, "external command")
         elif action == "demo_auto":
             set_demo_auto(not demo_auto_enabled, "external command")
+        elif action == "lock_start_frame":
+            request_start_frame_lock("external command")
         elif action == "test_drive_forward":
             set_test_drive_forward(not test_drive_forward_active, "external command")
         elif action == "camera_view_flip":
@@ -4364,6 +4879,10 @@ def main():
             if mining_buttons_enabled():
                 set_brush_tool(None)
                 mining.start_draw_deposit()
+        elif action == "set_starting_zone":
+            if mining_buttons_enabled():
+                set_brush_tool(None)
+                mining.set_starting_zone_preset(occ_map)
         elif action == "set_berm_left":
             if mining_buttons_enabled():
                 set_brush_tool(None)
@@ -4429,6 +4948,14 @@ def main():
         def push_automation_state(force=False):
             nonlocal nt_last_auto_push
             nonlocal test_excavation_lower_active, test_excavation_lower_cycle_started_at
+            pattern_state = excavation_pattern_state(now)
+            if pattern_state is not None and pattern_state.get("done"):
+                pattern_state = None
+            auto_excavation_pattern = None
+            if enabled and mining.state == auto_mining.MiningState.DIGGING:
+                auto_excavation_pattern = mining.excavation_pattern_command(now)
+                if auto_excavation_pattern is not None and bool(auto_excavation_pattern.get("done")):
+                    auto_excavation_pattern = None
             if (not force) and (now - nt_last_auto_push) < max(0.02, float(args.nt_enable_heartbeat_sec)):
                 return
             lower_cycle_elapsed = 0.0
@@ -4449,18 +4976,23 @@ def main():
             playback_cmd = controller_macro_playback_cmd if controller_macro_playback_cmd is not None else (
                 dig_profile_playback_cmd if (
                 enabled
-                and (
-                    dig_profile_preview_active
-                    or mining.state in (auto_mining.MiningState.DIGGING, auto_mining.MiningState.BACKUP)
-                )
+                and dig_profile_preview_active
                 ) else None
             )
             excavator_enabled = test_excavation_dig_active or (
                 bool(playback_cmd.get("digger_on")) if playback_cmd is not None else auto_dig_active
             )
+            if pattern_state is not None and bool(pattern_state.get("digger")):
+                excavator_enabled = True
+            if auto_excavation_pattern is not None and playback_cmd is None:
+                excavator_enabled = excavator_enabled or bool(auto_excavation_pattern.get("digger"))
             excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
+            if pattern_state is not None:
+                excavator_lower_requested = excavator_lower_requested or bool(pattern_state.get("lower"))
+            if auto_excavation_pattern is not None and playback_cmd is None:
+                excavator_lower_requested = excavator_lower_requested or bool(auto_excavation_pattern.get("lower"))
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
             if playback_cmd is not None:
                 left_extend_enabled = test_excavation_left_extend_active or bool(playback_cmd.get("left_extend_on", False))
@@ -4468,6 +5000,9 @@ def main():
             else:
                 left_extend_enabled = test_excavation_left_extend_active
                 right_extend_enabled = test_excavation_right_extend_active
+            if auto_excavation_pattern is not None and playback_cmd is None:
+                left_extend_enabled = left_extend_enabled or bool(auto_excavation_pattern.get("left_extend"))
+                right_extend_enabled = right_extend_enabled or bool(auto_excavation_pattern.get("right_extend"))
             door_open_enabled = bool(test_door_open_active)
             door_close_enabled = bool(test_door_close_active)
             if playback_cmd is not None:
@@ -4494,6 +5029,8 @@ def main():
                 or test_excavation_right_extend_active
                 or door_open_enabled
                 or door_close_enabled
+                or pattern_state is not None
+                or auto_excavation_pattern is not None
             )
             automation_request_active = bool(enabled or mechanism_request_active)
             sd.putBoolean("Jetson/AutomationEnabled", automation_request_active)
@@ -4836,20 +5373,22 @@ def main():
 
         excav_set = bool(mining.excav_corners_rc)
         deposit_set = bool(mining.deposit_corners_rc)
+        starting_set = bool(mining.starting_corners_rc)
         put_line(f"Excavation zone: {'SET' if excav_set else 'unset'}", servo_info_y + 42, (170, 255, 170) if excav_set else (190, 190, 190))
         put_line(f"Deposit zone: {'SET' if deposit_set else 'unset'}", servo_info_y + 66, (170, 255, 170) if deposit_set else (190, 190, 190))
-        put_line("Click a button below, then define 4 corners on the map.", servo_info_y + 90, (210, 210, 210), 0.48)
+        put_line(f"Starting zone: {'SET' if starting_set else 'unset'}", servo_info_y + 90, (170, 255, 170) if starting_set else (190, 190, 190))
+        put_line("Click a button below, then define 4 corners on the map.", servo_info_y + 114, (210, 210, 210), 0.48)
 
         if goal_cell is None:
-            put_line("Goal cell: none", servo_info_y + 112, (190, 190, 190))
-            put_line("Goal world: none", servo_info_y + 136, (190, 190, 190))
+            put_line("Goal cell: none", servo_info_y + 136, (190, 190, 190))
+            put_line("Goal world: none", servo_info_y + 160, (190, 190, 190))
         else:
             goal_world = occ_map.grid_to_world(goal_cell[0], goal_cell[1])
-            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", servo_info_y + 112, (220, 240, 255))
+            put_line(f"Goal cell: r={goal_cell[0]} c={goal_cell[1]}", servo_info_y + 136, (220, 240, 255))
             if goal_world is None:
-                put_line("Goal world: unavailable", servo_info_y + 136, (190, 190, 190))
+                put_line("Goal world: unavailable", servo_info_y + 160, (190, 190, 190))
             else:
-                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", servo_info_y + 136, (220, 240, 255))
+                put_line(f"Goal world: x={goal_world[0]:+.2f} z={goal_world[1]:+.2f}", servo_info_y + 160, (220, 240, 255))
 
         if status_target_world is None:
             put_line("Active target: none", servo_info_y + 150, (190, 190, 190))
@@ -5234,7 +5773,7 @@ def main():
             )
         cursor_y += map_section_h + card_gap
 
-        zones_section_h = 72 + 3 * (button_h + 10) + 20
+        zones_section_h = 72 + 4 * (button_h + 10) + 20
         zones_body_y = section_frame(
             cursor_y,
             zones_section_h,
@@ -5245,16 +5784,21 @@ def main():
         )
         excav_rect = grid_rect(zones_body_y, 0, 0)
         deposit_rect = grid_rect(zones_body_y, 0, 1)
-        pick_dig_start_rect = grid_rect(zones_body_y, 0, 2)
-        camera_view_rect = grid_rect(zones_body_y, 1, 0)
-        camera_overlay_rect = grid_rect(zones_body_y, 1, 1)
-        auto_digger_rect = grid_rect(zones_body_y, 1, 2)
-        human_detect_rect = grid_rect(zones_body_y, 2, 0)
-        rock_detect_rect = grid_rect(zones_body_y, 2, 1)
+        starting_zone_rect = grid_rect(zones_body_y, 0, 2)
+        pick_dig_start_rect = grid_rect(zones_body_y, 1, 0)
+        berm_left_rect = grid_rect(zones_body_y, 1, 1)
+        berm_right_rect = grid_rect(zones_body_y, 1, 2)
+        camera_view_rect = grid_rect(zones_body_y, 2, 0)
+        camera_overlay_rect = grid_rect(zones_body_y, 2, 1)
+        auto_digger_rect = grid_rect(zones_body_y, 2, 2)
+        human_detect_rect = grid_rect(zones_body_y, 3, 0)
+        rock_detect_rect = grid_rect(zones_body_y, 3, 1)
         excav_label = "Drawing Excav..." if excav_drawing else ("Excav Zone Set" if excav_set else "Draw Excav Zone")
         deposit_label = "Drawing Deposit..." if deposit_drawing else ("Deposit Zone Set" if deposit_set else "Draw Deposit Zone")
+        starting_label = "Starting Zone Set" if starting_set else "Set Starting Zone"
         draw_control_button(excav_rect, excav_label, zone_buttons_enabled, excav_drawing or excav_set, (0, 120, 220), (80, 200, 255))
         draw_control_button(deposit_rect, deposit_label, zone_buttons_enabled, deposit_drawing or deposit_set, (180, 150, 0), (255, 230, 80))
+        draw_control_button(starting_zone_rect, starting_label, zone_buttons_enabled, starting_set, (0, 150, 70), (100, 255, 160))
         pick_label = "Picking Start..." if picking_dig_start else ("Dig Start Set" if mining.preferred_start_rc is not None else "Pick Dig Start")
         draw_control_button(
             pick_dig_start_rect,
@@ -5263,6 +5807,22 @@ def main():
             picking_dig_start or mining.preferred_start_rc is not None,
             (0, 170, 70),
             (100, 255, 160),
+        )
+        draw_control_button(
+            berm_left_rect,
+            "Berm: Left",
+            zone_buttons_enabled,
+            mining.deposit_zone_preset_side == "left",
+            (170, 120, 0),
+            (255, 220, 120),
+        )
+        draw_control_button(
+            berm_right_rect,
+            "Berm: Right",
+            zone_buttons_enabled,
+            mining.deposit_zone_preset_side == "right",
+            (170, 120, 0),
+            (255, 220, 120),
         )
         camera_label = f"Camera: Deposit {args.camera_deposit_angle_deg:.0f}" if (
             servo_deposit_view
@@ -5311,7 +5871,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 5 * (button_h + 10) + 232
+        cal_section_h = 72 + 5 * (button_h + 10) + 272
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -5330,7 +5890,8 @@ def main():
         test_drive_forward_rect = grid_rect(cal_body_y, 2, 1)
         bidirectional_auto_rect = grid_rect(cal_body_y, 2, 2)
         demo_auto_rect = grid_rect(cal_body_y, 3, 0)
-        cal_slider_y = cal_body_y + 5 * (button_h + 10) + 50
+        lock_start_frame_rect = grid_rect(cal_body_y, 3, 1)
+        cal_slider_y = cal_body_y + 5 * (button_h + 10) + 90
         cal_slider_x0 = card_x0 + card_inner + 8
         cal_slider_x1 = card_x1 - card_inner - 8
         drive_speed_slider_rect = (cal_slider_x0, cal_slider_y, cal_slider_x1, cal_slider_y + 44)
@@ -5414,6 +5975,14 @@ def main():
             (80, 50, 150),
             (185, 140, 255),
         )
+        draw_control_button(
+            lock_start_frame_rect,
+            "Lock Start Frame",
+            bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
+            False,
+            (0, 130, 120),
+            (120, 255, 235),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
             cal_body_y + 5 * (button_h + 10) + 14,
@@ -5425,6 +5994,13 @@ def main():
             drive_calibration.last_result[:88],
             cal_body_y + 5 * (button_h + 10) + 38,
             (210, 230, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            start_frame_last_status[:88],
+            cal_body_y + 5 * (button_h + 10) + 62,
+            (180, 255, 235),
             0.40,
             x=card_x0 + card_inner,
         )
@@ -5500,6 +6076,7 @@ def main():
         test_excavation_dig_rect = grid_rect(actuators_body_y, 1, 2)
         door_open_rect = grid_rect(actuators_body_y, 2, 0)
         door_close_rect = grid_rect(actuators_body_y, 2, 1)
+        test_excavation_pattern_rect = grid_rect(actuators_body_y, 2, 2)
         draw_control_button(
             test_excavation_lower_rect,
             "Lower Cycle: ON" if test_excavation_lower_active else "Lower Cycle",
@@ -5556,7 +6133,23 @@ def main():
             (170, 90, 0),
             (255, 200, 120),
         )
-        door_mode_text = "Manual door override active" if (test_door_open_active or test_door_close_active) else "Door auto: closes for dig, opens for deposit"
+        draw_control_button(
+            test_excavation_pattern_rect,
+            "Excav Test: ON" if excavation_pattern_test_active else "Excav Test x4",
+            bool(args.drive and sd is not None),
+            excavation_pattern_test_active,
+            (90, 40, 160),
+            (205, 150, 255),
+        )
+        if excavation_pattern_test_active:
+            _pattern_state = excavation_pattern_state(time.time())
+            door_mode_text = (
+                f"Excav test: {_pattern_state.get('label', 'running')}"
+                if _pattern_state is not None
+                else "Excav test: running"
+            )
+        else:
+            door_mode_text = "Manual door override active" if (test_door_open_active or test_door_close_active) else "Door auto: closes for dig, opens for deposit"
         put_control_line(
             door_mode_text,
             actuators_body_y + 3 * (button_h + 10) + 10,
@@ -5845,9 +6438,13 @@ def main():
             ("test_excavation_right_extend", test_excavation_right_extend_rect),
             ("test_excavation_dig", test_excavation_dig_rect),
             ("test_excavation_lower", test_excavation_lower_rect),
+            ("test_excavation_pattern", test_excavation_pattern_rect),
             ("direct_nav", direct_nav_rect),
             ("excav", excav_rect),
             ("deposit", deposit_rect),
+            ("starting_zone", starting_zone_rect),
+            ("set_berm_left", berm_left_rect),
+            ("set_berm_right", berm_right_rect),
             ("whole", whole_rect),
             ("paint_obstacle", obstacle_rect),
             ("paint_safe", paint_rect),
@@ -5869,6 +6466,7 @@ def main():
             ("test_drive_forward", test_drive_forward_rect),
             ("bidirectional_auto", bidirectional_auto_rect),
             ("demo_auto", demo_auto_rect),
+            ("lock_start_frame", lock_start_frame_rect),
             ("drive_speed_slider", drive_speed_slider_rect),
             ("turn_speed_slider", turn_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -6518,6 +7116,48 @@ def main():
                 drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
                 if drive_origin_pos_map is not None:
                     drive_origin_row_col = map_world_to_grid(drive_origin_pos_map[0], drive_origin_pos_map[2])
+                should_try_start_frame_lock = bool(start_frame_lock_requested)
+                if (
+                    (not should_try_start_frame_lock)
+                    and start_frame_auto_lock_enabled
+                    and (not start_frame_locked_once)
+                    and (not mining_running)
+                    and (now - float(start_frame_last_attempt_time)) >= float(start_frame_auto_retry_sec)
+                ):
+                    should_try_start_frame_lock = True
+                if should_try_start_frame_lock:
+                    start_frame_lock_requested = False
+                    start_frame_last_attempt_time = float(now)
+                    if tracking_enabled and (not tracking_pose_ok):
+                        if not start_frame_locked_once:
+                            start_frame_last_status = "Start frame: tracking is not locked."
+                            start_frame_last_error_m = None
+                            print(start_frame_last_status)
+                    else:
+                        try:
+                            _img_raw = image_left.get_data()
+                            if _img_raw is not None:
+                                if _img_raw.ndim == 3 and _img_raw.shape[2] == 4:
+                                    _img_bgr = cv2.cvtColor(_img_raw, cv2.COLOR_BGRA2BGR)
+                                elif _img_raw.ndim == 3 and _img_raw.shape[2] >= 3:
+                                    _img_bgr = _img_raw[:, :, :3].copy()
+                                else:
+                                    _img_bgr = None
+                            else:
+                                _img_bgr = None
+                            if _img_bgr is None:
+                                if not start_frame_locked_once:
+                                    start_frame_last_status = "Start frame: no usable camera frame."
+                                    start_frame_last_error_m = None
+                                    print(start_frame_last_status)
+                            else:
+                                if apply_start_frame_from_tags(_img_bgr, cloud, R_world_cam, t_map):
+                                    start_frame_locked_once = True
+                        except Exception as exc:
+                            start_frame_last_status = f"Start frame: lock failed ({exc})."
+                            start_frame_last_error_m = None
+                            print(start_frame_last_status)
+                    publish_map_ui_state(force=True)
                 if xyz.size > 0:
                     if map_integration_ok:
                         # Transform to world frame if tracking is enabled.
@@ -6736,6 +7376,30 @@ def main():
                         map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
                         map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
                         map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
+                    if map_vis is not None and start_frame_last_map_points:
+                        tag_pts = []
+                        for item in start_frame_last_map_points:
+                            rc = occ_map.world_to_grid(float(item["map_x"]), float(item["map_z"]))
+                            if rc is None:
+                                continue
+                            rr, cc = int(rc[0]), int(rc[1])
+                            tag_pts.append((rr, cc, int(item["id"])))
+                        if len(tag_pts) >= 2:
+                            poly_pts = np.array([[cc, rr] for rr, cc, _ in tag_pts], dtype=np.int32)
+                            cv2.polylines(map_vis, [poly_pts], False, (255, 120, 255), 1, cv2.LINE_AA)
+                        for rr, cc, tag_id in tag_pts:
+                            cv2.circle(map_vis, (cc, rr), 3, (255, 120, 255), -1)
+                            cv2.circle(map_vis, (cc, rr), 5, (255, 255, 255), 1)
+                            cv2.putText(
+                                map_vis,
+                                str(tag_id),
+                                (cc + 6, max(10, rr - 4)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.32,
+                                (255, 200, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
                     if demo_auto_enabled and ensure_demo_rover_pose(actual_rover_pos_map, actual_rover_forward_world):
                         rover_pos_map = np.array(demo_rover_pos_map, dtype=np.float32).reshape(3,)
                         rover_forward_world = np.array(
@@ -7166,6 +7830,23 @@ def main():
                                     0.0,
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
+                            elif excavation_pattern_test_active:
+                                pattern_state = excavation_pattern_state(now)
+                                if pattern_state is None or pattern_state.get("done"):
+                                    excavation_pattern_test_active = False
+                                    excavation_pattern_test_started_at = 0.0
+                                    reset_auto_drive_shape(now)
+                                    send_nt_command(False, 0.0, 0.0, 0.1)
+                                    print("Excavation pattern test completed.")
+                                    publish_map_ui_state(force=True)
+                                    continue
+                                reset_auto_drive_shape(now)
+                                send_nt_command(
+                                    True,
+                                    float(pattern_state.get("fwd", 0.0)),
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
                             elif test_drive_forward_active:
                                 if now >= test_drive_forward_until:
                                     test_drive_forward_active = False
@@ -7257,16 +7938,7 @@ def main():
                                 reset_auto_drive_shape(now)
                                 # Mining automation has direct drive control
                                 # (DIGGING creep, BACKUP reverse, DEPOSITING reverse).
-                                if mining.state == auto_mining.MiningState.DIGGING:
-                                    dig_profile_playback_cmd = dig_profiles.playback_sample(
-                                        now - float(mining.phase_start),
-                                        phase="dig",
-                                    )
-                                elif mining.state == auto_mining.MiningState.BACKUP:
-                                    dig_profile_playback_cmd = dig_profiles.playback_sample(
-                                        now - float(mining.phase_start),
-                                        phase="retract",
-                                    )
+                                dig_profile_playback_cmd = None
                                 if dig_profile_playback_cmd is not None:
                                     mine_fwd, mine_turn = mix_ds_drive(
                                         dig_profile_playback_cmd["fwd"],
@@ -7569,6 +8241,60 @@ def main():
                             2,
                             cv2.LINE_AA,
                         )
+
+                    start_frame_marker_detections = detect_start_frame_markers_2d(img)
+                    if start_frame_marker_detections:
+                        marker_centers = []
+                        for item in start_frame_marker_detections:
+                            pts = np.asarray(item["corners"], dtype=np.int32).reshape(-1, 1, 2)
+                            center_xy = (
+                                int(round(float(item["center"][0]))),
+                                int(round(float(item["center"][1]))),
+                            )
+                            marker_centers.append(center_xy)
+                            cv2.polylines(vis, [pts], True, (255, 0, 255), 2, cv2.LINE_AA)
+                            cv2.circle(vis, center_xy, 4, (255, 255, 255), -1)
+                            cv2.putText(
+                                vis,
+                                f"TAG {int(item['id'])}",
+                                (center_xy[0] + 8, max(18, center_xy[1] - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.56,
+                                (255, 0, 255),
+                                2,
+                                cv2.LINE_AA,
+                            )
+                        if len(marker_centers) >= 2:
+                            cv2.polylines(
+                                vis,
+                                [np.asarray(marker_centers, dtype=np.int32).reshape(-1, 1, 2)],
+                                False,
+                                (255, 160, 255),
+                                1,
+                                cv2.LINE_AA,
+                            )
+
+                    if start_frame_locked_once:
+                        sf_text = "SF LOCKED"
+                        sf_color = (60, 215, 80)
+                    elif start_frame_auto_lock_enabled:
+                        sf_text = "SF SEARCHING"
+                        sf_color = (0, 215, 255)
+                    else:
+                        sf_text = "SF IDLE"
+                        sf_color = (180, 180, 180)
+                    if start_frame_marker_detections:
+                        sf_text += " " + ",".join(str(int(item["id"])) for item in start_frame_marker_detections)
+                    cv2.putText(
+                        vis,
+                        sf_text,
+                        (10, h - 14),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.62,
+                        sf_color,
+                        2,
+                        cv2.LINE_AA,
+                    )
 
                     # Human detection overlay
                     human_person_map_points = []
