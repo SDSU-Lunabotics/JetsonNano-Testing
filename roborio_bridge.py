@@ -137,6 +137,7 @@ DATA_KEYS = {
     "Deposit/TailgateExtensionPct": "number",
     "Deposit/TailgatePositionCalibrated": "boolean",
     "Deposit/TailgateState": "string",
+    "Deposit/TailgateDirection": "string",
     "Deposit/TailgateMoving": "boolean",
     "Deposit/TailgateOpen": "boolean",
     "Deposit/TailgateClosed": "boolean",
@@ -146,6 +147,7 @@ DATA_KEYS = {
     "Tailgate/ExtensionPct": "number",
     "Tailgate/PositionCalibrated": "boolean",
     "Tailgate/State": "string",
+    "Tailgate/Direction": "string",
     "Tailgate/Moving": "boolean",
     "Tailgate/Open": "boolean",
     "Tailgate/Closed": "boolean",
@@ -155,6 +157,7 @@ DATA_KEYS = {
     "Jetson/TailgateExtensionPct": "number",
     "Jetson/TailgatePositionCalibrated": "boolean",
     "Jetson/TailgateState": "string",
+    "Jetson/TailgateDirection": "string",
     "MainRover/CurrentLimitEnabled": "boolean",
     "MainRover/DriveCurrentLimitA": "number",
     "MainRover/ExcavCurrentLimitA": "number",
@@ -492,7 +495,16 @@ def read_dynamic_actuator_values():
         return {}
 
     values = {}
-    actuator_tokens = ("tailgate", "gateactuator", "gate_actuator", "dooractuator", "door_actuator")
+    actuator_tokens = (
+        "actuator",
+        "excav",
+        "excavator",
+        "tailgate",
+        "gateactuator",
+        "gate_actuator",
+        "dooractuator",
+        "door_actuator",
+    )
 
     for key in keys:
         normalized = re.sub(r"[^a-z0-9]+", "", key.lower())

@@ -102,6 +102,7 @@ class DepositionTelemetry(BaseModel):
     tailgate_extension_pct: Optional[float] = None
     tailgate_position_calibrated: Optional[bool] = None
     tailgate_state: Optional[str] = None
+    tailgate_direction: Optional[str] = None
     tailgate_moving: Optional[bool] = None
     tailgate_open: Optional[bool] = None
     tailgate_closed: Optional[bool] = None
