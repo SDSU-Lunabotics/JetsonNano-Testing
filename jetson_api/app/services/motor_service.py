@@ -172,6 +172,76 @@ def _first_str(values: Dict[str, Any], *keys: str) -> Optional[str]:
     return None
 
 
+def _normalize_key(value: str) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _dynamic_key(
+    values: Dict[str, Any],
+    *,
+    required: tuple[str, ...],
+    any_of: tuple[str, ...] = (),
+    excluded: tuple[str, ...] = (),
+) -> Optional[str]:
+    for key, value in values.items():
+        if value is None:
+            continue
+        normalized = _normalize_key(key)
+        if any(token in normalized for token in excluded):
+            continue
+        if not all(token in normalized for token in required):
+            continue
+        if any_of and not any(token in normalized for token in any_of):
+            continue
+        return key
+    return None
+
+
+def _first_float_dynamic(
+    values: Dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    required: tuple[str, ...],
+    any_of: tuple[str, ...] = (),
+    excluded: tuple[str, ...] = (),
+) -> Optional[float]:
+    exact = _first_float(values, *keys)
+    if exact is not None:
+        return exact
+    dynamic = _dynamic_key(values, required=required, any_of=any_of, excluded=excluded)
+    return None if dynamic is None else _optional_float(values.get(dynamic))
+
+
+def _first_bool_dynamic(
+    values: Dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    required: tuple[str, ...],
+    any_of: tuple[str, ...] = (),
+    excluded: tuple[str, ...] = (),
+) -> Optional[bool]:
+    exact = _first_bool(values, *keys)
+    if exact is not None:
+        return exact
+    dynamic = _dynamic_key(values, required=required, any_of=any_of, excluded=excluded)
+    return None if dynamic is None else _optional_bool(values.get(dynamic))
+
+
+def _first_str_dynamic(
+    values: Dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    required: tuple[str, ...],
+    any_of: tuple[str, ...] = (),
+    excluded: tuple[str, ...] = (),
+) -> Optional[str]:
+    exact = _first_str(values, *keys)
+    if exact is not None:
+        return exact
+    dynamic = _dynamic_key(values, required=required, any_of=any_of, excluded=excluded)
+    return None if dynamic is None else _optional_str(values.get(dynamic))
+
+
 def _parse_motor_id(value: Any) -> MotorId:
     raw = str(value).strip()
     candidates = [
@@ -304,25 +374,72 @@ def _parse_motor_warnings(raw_warnings: Any) -> List[MotorWarning]:
 
 
 def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetry:
-    left_extension_inches = _optional_float(values.get("Excav/BotLeftInches"))
-    if left_extension_inches is None:
-        left_extension_inches = _optional_float(values.get("Jetson/ExcavatorLeftExtensionInches"))
+    left_extension_inches = _first_float_dynamic(
+        values,
+        (
+            "Excav/BotLeftInches",
+            "Jetson/ExcavatorLeftExtensionInches",
+            "Jetson/ExcavatorLeftInches",
+            "Jetson/LeftActuatorInches",
+            "Excavator/LeftInches",
+            "Excavator/LeftExtensionInches",
+        ),
+        required=("left",),
+        any_of=("inch",),
+        excluded=("right", "tailgate", "gate"),
+    )
 
-    right_extension_inches = _optional_float(values.get("Excav/BotRightInches"))
-    if right_extension_inches is None:
-        right_extension_inches = _optional_float(values.get("Jetson/ExcavatorRightExtensionInches"))
+    right_extension_inches = _first_float_dynamic(
+        values,
+        (
+            "Excav/BotRightInches",
+            "Jetson/ExcavatorRightExtensionInches",
+            "Jetson/ExcavatorRightInches",
+            "Jetson/RightActuatorInches",
+            "Excavator/RightInches",
+            "Excavator/RightExtensionInches",
+        ),
+        required=("right",),
+        any_of=("inch",),
+        excluded=("left", "tailgate", "gate"),
+    )
 
-    left_extension_pct = _optional_float(values.get("Excav/BotLeftExtensionPct"))
-    if left_extension_pct is None:
-        left_extension_pct = _optional_float(values.get("Jetson/ExcavatorLeftExtensionPct"))
+    left_extension_pct = _first_float_dynamic(
+        values,
+        (
+            "Excav/BotLeftExtensionPct",
+            "Jetson/ExcavatorLeftExtensionPct",
+            "Jetson/LeftActuatorExtensionPct",
+            "Excavator/LeftExtensionPct",
+        ),
+        required=("left",),
+        any_of=("pct", "percent"),
+        excluded=("right", "tailgate", "gate"),
+    )
 
-    right_extension_pct = _optional_float(values.get("Excav/BotRightExtensionPct"))
-    if right_extension_pct is None:
-        right_extension_pct = _optional_float(values.get("Jetson/ExcavatorRightExtensionPct"))
+    right_extension_pct = _first_float_dynamic(
+        values,
+        (
+            "Excav/BotRightExtensionPct",
+            "Jetson/ExcavatorRightExtensionPct",
+            "Jetson/RightActuatorExtensionPct",
+            "Excavator/RightExtensionPct",
+        ),
+        required=("right",),
+        any_of=("pct", "percent"),
+        excluded=("left", "tailgate", "gate"),
+    )
 
-    position_calibrated = _optional_bool(values.get("Excav/BottomPositionCalibrated"))
-    if position_calibrated is None:
-        position_calibrated = _optional_bool(values.get("Jetson/ExcavatorBottomPositionCalibrated"))
+    position_calibrated = _first_bool_dynamic(
+        values,
+        (
+            "Excav/BottomPositionCalibrated",
+            "Jetson/ExcavatorBottomPositionCalibrated",
+        ),
+        required=("calibrated",),
+        any_of=("excav", "actuator", "bottom"),
+        excluded=("tailgate", "gate"),
+    )
 
     return JetsonMotorTelemetry(
         drive=DriveTelemetry(
@@ -346,12 +463,24 @@ def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetr
             left_extension_pct=left_extension_pct,
             right_extension_pct=right_extension_pct,
             position_calibrated=position_calibrated,
-            bottom_left_counts=_optional_float(values.get("Excav/BotLeftCounts")),
-            bottom_right_counts=_optional_float(values.get("Excav/BotRightCounts")),
-            bottom_left_inches=_optional_float(values.get("Excav/BotLeftInches")),
-            bottom_right_inches=_optional_float(values.get("Excav/BotRightInches")),
-            bottom_left_extension_pct=_optional_float(values.get("Excav/BotLeftExtensionPct")),
-            bottom_right_extension_pct=_optional_float(values.get("Excav/BotRightExtensionPct")),
+            bottom_left_counts=_first_float_dynamic(
+                values,
+                ("Excav/BotLeftCounts", "Jetson/ExcavatorLeftCounts", "Jetson/LeftActuatorCounts"),
+                required=("left",),
+                any_of=("count",),
+                excluded=("right", "tailgate", "gate"),
+            ),
+            bottom_right_counts=_first_float_dynamic(
+                values,
+                ("Excav/BotRightCounts", "Jetson/ExcavatorRightCounts", "Jetson/RightActuatorCounts"),
+                required=("right",),
+                any_of=("count",),
+                excluded=("left", "tailgate", "gate"),
+            ),
+            bottom_left_inches=left_extension_inches,
+            bottom_right_inches=right_extension_inches,
+            bottom_left_extension_pct=left_extension_pct,
+            bottom_right_extension_pct=right_extension_pct,
             jetson_left_extension_inches=_optional_float(values.get("Jetson/ExcavatorLeftExtensionInches")),
             jetson_right_extension_inches=_optional_float(values.get("Jetson/ExcavatorRightExtensionInches")),
             jetson_left_extension_pct=_optional_float(values.get("Jetson/ExcavatorLeftExtensionPct")),
@@ -375,73 +504,131 @@ def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetr
             depositing=_optional_bool(values.get("Deposit/Depositing")),
             door_state=_optional_str(values.get("Deposit/DoorState")),
             torque_current_a=_optional_float(values.get("Deposit/TorqueCurrentA")),
-            tailgate_counts=_first_float(
+            tailgate_counts=_first_float_dynamic(
                 values,
-                "Deposit/TailgateCounts",
-                "Tailgate/Counts",
-                "Jetson/TailgateCounts",
-                "Jetson/GateActuatorCounts",
-                "GateActuator/Counts",
+                (
+                    "Deposit/TailgateCounts",
+                    "Tailgate/Counts",
+                    "Jetson/TailgateCounts",
+                    "Jetson/GateActuatorCounts",
+                    "GateActuator/Counts",
+                ),
+                required=("count",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_inches=_first_float(
+            tailgate_inches=_first_float_dynamic(
                 values,
-                "Deposit/TailgateInches",
-                "Tailgate/Inches",
-                "Jetson/TailgateInches",
-                "Jetson/GateActuatorInches",
-                "GateActuator/Inches",
+                (
+                    "Deposit/TailgateInches",
+                    "Tailgate/Inches",
+                    "Jetson/TailgateInches",
+                    "Jetson/GateActuatorInches",
+                    "GateActuator/Inches",
+                ),
+                required=("inch",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right", "pct", "percent", "count"),
             ),
-            tailgate_extension_pct=_first_float(
+            tailgate_extension_pct=_first_float_dynamic(
                 values,
-                "Deposit/TailgateExtensionPct",
-                "Tailgate/ExtensionPct",
-                "Jetson/TailgateExtensionPct",
-                "Jetson/GateActuatorExtensionPct",
-                "GateActuator/ExtensionPct",
+                (
+                    "Deposit/TailgateExtensionPct",
+                    "Tailgate/ExtensionPct",
+                    "Jetson/TailgateExtensionPct",
+                    "Jetson/GateActuatorExtensionPct",
+                    "GateActuator/ExtensionPct",
+                ),
+                required=("extension",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right", "inch", "count"),
             ),
-            tailgate_position_calibrated=_first_bool(
+            tailgate_position_calibrated=_first_bool_dynamic(
                 values,
-                "Deposit/TailgatePositionCalibrated",
-                "Tailgate/PositionCalibrated",
-                "Jetson/TailgatePositionCalibrated",
-                "Jetson/GateActuatorPositionCalibrated",
-                "GateActuator/PositionCalibrated",
+                (
+                    "Deposit/TailgatePositionCalibrated",
+                    "Tailgate/PositionCalibrated",
+                    "Jetson/TailgatePositionCalibrated",
+                    "Jetson/GateActuatorPositionCalibrated",
+                    "GateActuator/PositionCalibrated",
+                ),
+                required=("calibrated",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_state=_first_str(
+            tailgate_state=_first_str_dynamic(
                 values,
-                "Deposit/TailgateState",
-                "Tailgate/State",
-                "Jetson/TailgateState",
-                "Jetson/GateActuatorState",
-                "GateActuator/State",
+                (
+                    "Deposit/TailgateState",
+                    "Tailgate/State",
+                    "Jetson/TailgateState",
+                    "Jetson/GateActuatorState",
+                    "GateActuator/State",
+                ),
+                required=("state",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_moving=_first_bool(
+            tailgate_direction=_first_str_dynamic(
                 values,
-                "Deposit/TailgateMoving",
-                "Tailgate/Moving",
-                "Jetson/TailgateMoving",
-                "GateActuator/Moving",
+                (
+                    "Deposit/TailgateDirection",
+                    "Tailgate/Direction",
+                    "Jetson/TailgateDirection",
+                    "Jetson/GateActuatorDirection",
+                    "GateActuator/Direction",
+                ),
+                required=("direction",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_open=_first_bool(
+            tailgate_moving=_first_bool_dynamic(
                 values,
-                "Deposit/TailgateOpen",
-                "Tailgate/Open",
-                "Jetson/TailgateOpen",
-                "GateActuator/Open",
+                (
+                    "Deposit/TailgateMoving",
+                    "Tailgate/Moving",
+                    "Jetson/TailgateMoving",
+                    "GateActuator/Moving",
+                ),
+                required=("moving",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_closed=_first_bool(
+            tailgate_open=_first_bool_dynamic(
                 values,
-                "Deposit/TailgateClosed",
-                "Tailgate/Closed",
-                "Jetson/TailgateClosed",
-                "GateActuator/Closed",
+                (
+                    "Deposit/TailgateOpen",
+                    "Tailgate/Open",
+                    "Jetson/TailgateOpen",
+                    "GateActuator/Open",
+                ),
+                required=("open",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
-            tailgate_torque_current_a=_first_float(
+            tailgate_closed=_first_bool_dynamic(
                 values,
-                "Deposit/TailgateTorqueCurrentA",
-                "Tailgate/TorqueCurrentA",
-                "Jetson/TailgateTorqueCurrentA",
-                "GateActuator/TorqueCurrentA",
+                (
+                    "Deposit/TailgateClosed",
+                    "Tailgate/Closed",
+                    "Jetson/TailgateClosed",
+                    "GateActuator/Closed",
+                ),
+                required=("closed",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
+            ),
+            tailgate_torque_current_a=_first_float_dynamic(
+                values,
+                (
+                    "Deposit/TailgateTorqueCurrentA",
+                    "Tailgate/TorqueCurrentA",
+                    "Jetson/TailgateTorqueCurrentA",
+                    "GateActuator/TorqueCurrentA",
+                ),
+                required=("current",),
+                any_of=("tailgate", "gateactuator"),
+                excluded=("excav", "left", "right"),
             ),
         ),
         current_limits=CurrentLimitsTelemetry(
@@ -598,6 +785,7 @@ def _build_motor_health_rows(
                 "tailgate_extension_pct": telemetry.deposition.tailgate_extension_pct,
                 "tailgate_position_calibrated": telemetry.deposition.tailgate_position_calibrated,
                 "tailgate_state": telemetry.deposition.tailgate_state,
+                "tailgate_direction": telemetry.deposition.tailgate_direction,
                 "tailgate_moving": telemetry.deposition.tailgate_moving,
                 "tailgate_open": telemetry.deposition.tailgate_open,
                 "tailgate_closed": telemetry.deposition.tailgate_closed,
