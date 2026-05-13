@@ -7116,12 +7116,20 @@ def main():
                 drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
                 if drive_origin_pos_map is not None:
                     drive_origin_row_col = map_world_to_grid(drive_origin_pos_map[0], drive_origin_pos_map[2])
+                mining_running_now = mining.state in (
+                    auto_mining.MiningState.PLAN_SWEEP,
+                    auto_mining.MiningState.NAVIGATE_DIG,
+                    auto_mining.MiningState.DIGGING,
+                    auto_mining.MiningState.BACKUP,
+                    auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                    auto_mining.MiningState.DEPOSITING,
+                )
                 should_try_start_frame_lock = bool(start_frame_lock_requested)
                 if (
                     (not should_try_start_frame_lock)
                     and start_frame_auto_lock_enabled
                     and (not start_frame_locked_once)
-                    and (not mining_running)
+                    and (not mining_running_now)
                     and (now - float(start_frame_last_attempt_time)) >= float(start_frame_auto_retry_sec)
                 ):
                     should_try_start_frame_lock = True
