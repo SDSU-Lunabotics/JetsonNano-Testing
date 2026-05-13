@@ -1320,8 +1320,11 @@ def main():
     whole_map_enabled = False
     smooth_map_enabled = True
     bidirectional_auto_enabled = True
+    demo_auto_enabled = False
     show_all_dig_profiles = False
     last_drive_send = 0.0
+    demo_rover_pos_map = None
+    demo_rover_heading_rad = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
     manual_mode = bool(args.manual_start)
@@ -2303,6 +2306,62 @@ def main():
         print(f"Bidirectional auto {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def ensure_demo_rover_pose(seed_pos_map=None, seed_forward_world=None):
+        nonlocal demo_rover_pos_map, demo_rover_heading_rad
+        if demo_rover_pos_map is not None:
+            return True
+        if seed_pos_map is not None:
+            demo_rover_pos_map = np.array(seed_pos_map, dtype=np.float32).reshape(3,)
+        else:
+            seed_rc = (
+                mining.preferred_start_rc
+                or (mining._poly_centroid(mining.excav_corners_rc) if mining.excav_corners_rc else None)
+                or goal_cell
+                or (occ_map.grid_h // 2, occ_map.grid_w // 2)
+            )
+            if seed_rc is None:
+                return False
+            seed_world = occ_map.grid_to_world(int(seed_rc[0]), int(seed_rc[1]))
+            if seed_world is None:
+                return False
+            demo_rover_pos_map = np.array(
+                [float(seed_world[0]), 0.0, float(seed_world[1])],
+                dtype=np.float32,
+            )
+        if seed_forward_world is not None:
+            fwd = np.array(seed_forward_world, dtype=np.float32).reshape(3,)
+            demo_rover_heading_rad = math.atan2(float(fwd[2]), float(fwd[0]))
+        else:
+            demo_rover_heading_rad = 0.0
+        return True
+
+    def advance_demo_rover(fwd_cmd, turn_cmd, duration):
+        nonlocal demo_rover_pos_map, demo_rover_heading_rad
+        if (not demo_auto_enabled) or (not ensure_demo_rover_pose()):
+            return
+        dt = max(0.02, min(0.25, float(duration)))
+        turn_rate_rad_per_sec = math.radians(135.0)
+        demo_rover_heading_rad += float(turn_cmd) * turn_rate_rad_per_sec * dt
+        speed_mps = 0.90 * max(-1.0, min(1.0, float(fwd_cmd)))
+        demo_rover_pos_map[0] += math.cos(demo_rover_heading_rad) * speed_mps * dt
+        demo_rover_pos_map[2] += math.sin(demo_rover_heading_rad) * speed_mps * dt
+
+    def set_demo_auto(enabled, source="button", seed_pos_map=None, seed_forward_world=None):
+        nonlocal demo_auto_enabled, demo_rover_pos_map, demo_rover_heading_rad
+        enabled = bool(enabled)
+        if demo_auto_enabled == enabled:
+            return
+        demo_auto_enabled = enabled
+        if enabled:
+            demo_rover_pos_map = None
+            demo_rover_heading_rad = 0.0
+            ensure_demo_rover_pose(seed_pos_map, seed_forward_world)
+        else:
+            demo_rover_pos_map = None
+            demo_rover_heading_rad = 0.0
+        print(f"Demo Auto {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def set_show_all_dig_profiles(enabled, source="button"):
         nonlocal show_all_dig_profiles
         enabled = bool(enabled)
@@ -2920,6 +2979,7 @@ def main():
             "drive_turn_speed_min": 0.20,
             "drive_turn_speed_max": 1.00,
             "bidirectional_auto": bool(bidirectional_auto_enabled),
+            "demo_auto": bool(demo_auto_enabled),
             "drive_calibration": drive_cal_state,
             "dig_profiles": dig_ui_state,
             "actuators": {
@@ -3054,6 +3114,13 @@ def main():
                     "label": "Bidirectional Auto",
                     "command": "bidirectional_auto",
                     "active": bool(bidirectional_auto_enabled),
+                    "enabled": True,
+                },
+                {
+                    "id": "demo_auto",
+                    "label": "Demo Auto",
+                    "command": "demo_auto",
+                    "active": bool(demo_auto_enabled),
                     "enabled": True,
                 },
                 {
@@ -3565,6 +3632,7 @@ def main():
         nonlocal reset_map_confirm, status_scroll_drag_active, status_scroll_drag_offset
         nonlocal status_view_drag_active, status_view_drag_anchor_y, status_view_drag_anchor_scroll
         nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
+        nonlocal demo_rover_pos_map
 
         def scroll_from_thumb_top(track_rect, thumb_rect, thumb_top):
             if track_rect is None or thumb_rect is None:
@@ -3724,6 +3792,8 @@ def main():
                     manual_mode = False
                     manual_fwd = 0.0
                     manual_turn = 0.0
+                    if demo_auto_enabled:
+                        demo_rover_pos_map = None
                     mining.start_run()
                     print("Auto Run: START requested via button")
                 return
@@ -3847,6 +3917,12 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_bidirectional_auto(not bidirectional_auto_enabled, "button")
+                return
+        rect = status_button_rects.get("demo_auto")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_demo_auto(not demo_auto_enabled, "button")
                 return
         rect = status_button_rects.get("test_drive_forward")
         if rect is not None:
@@ -4089,6 +4165,7 @@ def main():
                 return
     def process_external_map_command():
         nonlocal last_map_command_seq, reset_map_confirm, paint_brush_radius
+        nonlocal demo_rover_pos_map
         try:
             if not args.map_command_file or (not os.path.exists(args.map_command_file)):
                 return
@@ -4139,6 +4216,8 @@ def main():
                 print("Auto Run: ABORTED via external command")
             else:
                 emergency_stop = False
+                if demo_auto_enabled:
+                    demo_rover_pos_map = None
                 mining.start_run()
                 print("Auto Run: START requested via external command")
         elif action == "paint_safe":
@@ -4210,6 +4289,8 @@ def main():
             set_steering_flip(not args.steering_flip, "external command")
         elif action == "bidirectional_auto":
             set_bidirectional_auto(not bidirectional_auto_enabled, "external command")
+        elif action == "demo_auto":
+            set_demo_auto(not demo_auto_enabled, "external command")
         elif action == "test_drive_forward":
             set_test_drive_forward(not test_drive_forward_active, "external command")
         elif action == "camera_view_flip":
@@ -4438,6 +4519,18 @@ def main():
             # Clear string-based legacy command channels when auto-drive is off.
             sd.putString("Jetson/Command", "")
             sd.putBoolean("Jetson/CommandReady", False)
+            sd.putNumber("Jetson/CommandForward", 0.0)
+            sd.putNumber("Jetson/CommandTurn", 0.0)
+            nt_ready_high = False
+            nt_ready_stuck_since = 0.0
+            return
+
+        if demo_auto_enabled:
+            advance_demo_rover(fwd, turn, duration)
+            sd.putString("Jetson/Command", "")
+            sd.putBoolean("Jetson/CommandReady", False)
+            sd.putNumber("Jetson/CommandForward", 0.0)
+            sd.putNumber("Jetson/CommandTurn", 0.0)
             nt_ready_high = False
             nt_ready_stuck_since = 0.0
             return
@@ -5218,7 +5311,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 4 * (button_h + 10) + 232
+        cal_section_h = 72 + 5 * (button_h + 10) + 232
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -5236,7 +5329,8 @@ def main():
         steering_flip_rect = grid_rect(cal_body_y, 2, 0)
         test_drive_forward_rect = grid_rect(cal_body_y, 2, 1)
         bidirectional_auto_rect = grid_rect(cal_body_y, 2, 2)
-        cal_slider_y = cal_body_y + 4 * (button_h + 10) + 50
+        demo_auto_rect = grid_rect(cal_body_y, 3, 0)
+        cal_slider_y = cal_body_y + 5 * (button_h + 10) + 50
         cal_slider_x0 = card_x0 + card_inner + 8
         cal_slider_x1 = card_x1 - card_inner - 8
         drive_speed_slider_rect = (cal_slider_x0, cal_slider_y, cal_slider_x1, cal_slider_y + 44)
@@ -5312,16 +5406,24 @@ def main():
             (90, 90, 20),
             (255, 235, 120),
         )
+        draw_control_button(
+            demo_auto_rect,
+            "Demo Auto: ON" if demo_auto_enabled else "Demo Auto",
+            True,
+            bool(demo_auto_enabled),
+            (80, 50, 150),
+            (185, 140, 255),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
-            cal_body_y + 4 * (button_h + 10) + 14,
+            cal_body_y + 5 * (button_h + 10) + 14,
             (180, 220, 255),
             0.44,
             x=card_x0 + card_inner,
         )
         put_control_line(
             drive_calibration.last_result[:88],
-            cal_body_y + 4 * (button_h + 10) + 38,
+            cal_body_y + 5 * (button_h + 10) + 38,
             (210, 230, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5766,6 +5868,7 @@ def main():
             ("steering_flip", steering_flip_rect),
             ("test_drive_forward", test_drive_forward_rect),
             ("bidirectional_auto", bidirectional_auto_rect),
+            ("demo_auto", demo_auto_rect),
             ("drive_speed_slider", drive_speed_slider_rect),
             ("turn_speed_slider", turn_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
@@ -6408,6 +6511,8 @@ def main():
                     t_map,
                     current_mount_yaw_deg,
                 )
+                actual_rover_pos_map = np.array(rover_pos_map, dtype=np.float32).reshape(3,)
+                actual_rover_forward_world = np.array(rover_forward_world, dtype=np.float32).reshape(3,)
                 cam_row_col = map_world_to_grid(t_map[0], t_map[2])
                 rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
                 drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
@@ -6631,6 +6736,31 @@ def main():
                         map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
                         map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
                         map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
+                    if demo_auto_enabled and ensure_demo_rover_pose(actual_rover_pos_map, actual_rover_forward_world):
+                        rover_pos_map = np.array(demo_rover_pos_map, dtype=np.float32).reshape(3,)
+                        rover_forward_world = np.array(
+                            [
+                                math.cos(demo_rover_heading_rad),
+                                0.0,
+                                math.sin(demo_rover_heading_rad),
+                            ],
+                            dtype=np.float32,
+                        )
+                        rover_right_world = np.array(
+                            [
+                                -math.sin(demo_rover_heading_rad),
+                                0.0,
+                                math.cos(demo_rover_heading_rad),
+                            ],
+                            dtype=np.float32,
+                        )
+                        cam_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
+                        rover_row_col = map_world_to_grid(rover_pos_map[0], rover_pos_map[2])
+                        drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
+                        if drive_origin_pos_map is not None:
+                            drive_origin_row_col = map_world_to_grid(
+                                drive_origin_pos_map[0], drive_origin_pos_map[2]
+                            )
                     # Draw camera position marker (blue square).
                     # Mining tick: may override goal_cell or supply a direct drive command.
                     _mine_goal, _mine_drive, _mine_status = mining.tick(
