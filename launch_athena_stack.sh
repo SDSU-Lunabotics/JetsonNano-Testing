@@ -14,6 +14,7 @@ LOCAL_BACKEND_DIR="$HOME/Downloads/Lunabotics-UI/backend/src"
 LOCAL_FRONTEND_DIR="$HOME/Downloads/Lunabotics-UI/frontend"
 
 SSH_BASE="sshpass -p '${JETSON_PASS}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${JETSON_USER}@${JETSON_IP}"
+JETSON_STOP_CMD="pkill -f 'roborio_bridge.py' 2>/dev/null || true; pkill -f 'uvicorn app.main:app.*--port 8000' 2>/dev/null || true; sleep 1"
 JETSON_API_CMD="cd ${JETSON_API_DIR} && python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload || { echo; echo Jetson API failed.; echo If the error says No module named uvicorn, run this on the Jetson:; echo cd ${JETSON_API_DIR} \&\& python3 -m pip install -r requirements.txt; }"
 
 open_terminal() {
@@ -33,6 +34,8 @@ EOF
 }
 
 echo "Launching ATHENA stack on macOS..."
+echo "Stopping stale Jetson bridge/API processes..."
+eval "$SSH_BASE '${JETSON_STOP_CMD}'"
 
 open_terminal "Terminal 1 - Jetson Roborio Bridge" \
 "$SSH_BASE 'cd ${JETSON_PROJECT_DIR} && python3 roborio_bridge.py'"

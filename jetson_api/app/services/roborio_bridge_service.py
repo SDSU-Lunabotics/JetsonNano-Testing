@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import time
 import requests
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from app.core.settings import settings
 
 
 class RoboRIOBridgeService:
     def __init__(self) -> None:
         self._base_url = settings.roborio_bridge_url
-        self._status_cache: Dict[str, Any] | None = None
+        self._status_cache: Optional[Dict[str, Any]] = None
         self._status_cache_expires_at: float = 0.0
 
     def _get(self, path: str) -> Dict[str, Any]:

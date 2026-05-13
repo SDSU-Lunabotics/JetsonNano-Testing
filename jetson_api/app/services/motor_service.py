@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.schemas.common import Fault, FaultCode, MotorId
 from app.schemas.motors import (
@@ -179,9 +179,9 @@ def _normalize_key(value: str) -> str:
 def _dynamic_key(
     values: Dict[str, Any],
     *,
-    required: tuple[str, ...],
-    any_of: tuple[str, ...] = (),
-    excluded: tuple[str, ...] = (),
+    required: Tuple[str, ...],
+    any_of: Tuple[str, ...] = (),
+    excluded: Tuple[str, ...] = (),
 ) -> Optional[str]:
     for key, value in values.items():
         if value is None:
@@ -199,11 +199,11 @@ def _dynamic_key(
 
 def _first_float_dynamic(
     values: Dict[str, Any],
-    keys: tuple[str, ...],
+    keys: Tuple[str, ...],
     *,
-    required: tuple[str, ...],
-    any_of: tuple[str, ...] = (),
-    excluded: tuple[str, ...] = (),
+    required: Tuple[str, ...],
+    any_of: Tuple[str, ...] = (),
+    excluded: Tuple[str, ...] = (),
 ) -> Optional[float]:
     exact = _first_float(values, *keys)
     if exact is not None:
@@ -214,11 +214,11 @@ def _first_float_dynamic(
 
 def _first_bool_dynamic(
     values: Dict[str, Any],
-    keys: tuple[str, ...],
+    keys: Tuple[str, ...],
     *,
-    required: tuple[str, ...],
-    any_of: tuple[str, ...] = (),
-    excluded: tuple[str, ...] = (),
+    required: Tuple[str, ...],
+    any_of: Tuple[str, ...] = (),
+    excluded: Tuple[str, ...] = (),
 ) -> Optional[bool]:
     exact = _first_bool(values, *keys)
     if exact is not None:
@@ -229,11 +229,11 @@ def _first_bool_dynamic(
 
 def _first_str_dynamic(
     values: Dict[str, Any],
-    keys: tuple[str, ...],
+    keys: Tuple[str, ...],
     *,
-    required: tuple[str, ...],
-    any_of: tuple[str, ...] = (),
-    excluded: tuple[str, ...] = (),
+    required: Tuple[str, ...],
+    any_of: Tuple[str, ...] = (),
+    excluded: Tuple[str, ...] = (),
 ) -> Optional[str]:
     exact = _first_str(values, *keys)
     if exact is not None:
