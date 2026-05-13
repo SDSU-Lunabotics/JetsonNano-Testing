@@ -66,13 +66,11 @@ class MiningAutomation:
     ----------
     cfg : dict
         Configuration keys (all optional, with defaults):
-          dig_duration          float  52.0  Total seconds for the excavation pattern
-          dig_speed             float  0.20  Motor value during excavation forward creep
-          backup_duration       float  5.0   Reverse seconds per excavation cycle
-          backup_speed          float  0.35  Motor value during excavation reverse
-          dig_cycles            int    4     Number of excavation cycles
-          dig_pullup_duration   float  2.0   Seconds spent pulling up during each reverse
-          deposit_duration      float  14.0  Seconds reversing into deposit zone while dumping
+          dig_duration          float  5.0   Seconds of forward creep per strip
+          dig_speed             float  0.20  Motor value during dig creep
+          backup_duration       float  2.0   Seconds to reverse after dig
+          backup_speed          float  0.35  Motor value during backup
+          deposit_duration      float  5.0   Seconds reversing into deposit zone
           deposit_backup_speed  float  0.35  Motor value during deposit reverse
           deposit_approach_dist float  1.0   Fallback metres outside deposit center
           deposit_boundary_inset_m float 0.05 Rear edge inset into deposit zone
@@ -92,10 +90,8 @@ class MiningAutomation:
         # Zone corners stored as (row, col) grid indices
         self.excav_corners_rc = []    # set after 4 clicks in DRAW_EXCAV
         self.deposit_corners_rc = []  # set after 4 clicks in DRAW_DEPOSIT
-        self.starting_corners_rc = [] # optional field-frame preset for localization/starting area
         self._click_buffer = []       # accumulates corners while drawing
         self.deposit_zone_preset_side = None
-        self.starting_zone_preset_side = None
 
         # Dig sweep
         self.dig_points_rc = []       # boustrophedon waypoints inside excav zone
@@ -244,77 +240,6 @@ class MiningAutomation:
         )
         return True
 
-    def set_starting_zone_preset(self, occ_map):
-        """
-        Stamp the official/known starting zone rectangle in the field frame.
-
-        The rectangle is configured from its inside corner at the divider/ingress
-        side of the arena, then extended by width/depth along the arena axes.
-        This avoids depending on arena wall measurements during autonomy.
-        """
-        if self._zones_edit_blocked():
-            print(f"[Mining] Cannot redefine zones while running "
-                  f"(state={self.state.value}). Press 't' to abort first.")
-            return False
-
-        side_name = str(self.cfg.get("starting_zone_side", "right") or "").strip().lower()
-        if side_name not in ("left", "right"):
-            print(f"[Mining] Invalid starting zone side: {side_name}")
-            return False
-
-        origin_x = self._cfg_float("starting_zone_origin_x_m", 0.0)
-        origin_z = self._cfg_float("starting_zone_origin_z_m", 0.0)
-        width_x = max(0.10, self._cfg_float("starting_zone_width_m", 1.50))
-        depth_z = max(0.10, self._cfg_float("starting_zone_depth_m", 1.50))
-        apply_to_excav = self._cfg_bool("starting_zone_apply_to_excav", True)
-
-        if side_name == "right":
-            min_x, max_x = origin_x, origin_x + width_x
-        else:
-            min_x, max_x = origin_x - width_x, origin_x
-        min_z, max_z = origin_z, origin_z + depth_z
-
-        corners_world = [
-            (min_x, min_z),
-            (max_x, min_z),
-            (max_x, max_z),
-            (min_x, max_z),
-        ]
-
-        corners_rc = []
-        for world_x, world_z in corners_world:
-            rc = occ_map.world_to_grid(float(world_x), float(world_z))
-            if rc is None:
-                print(
-                    "[Mining] Starting-zone preset is outside the current map bounds. "
-                    "Check the starting-zone origin/size env values and map alignment."
-                )
-                return False
-            corners_rc.append(rc)
-
-        self.starting_corners_rc = corners_rc
-        self.starting_zone_preset_side = side_name
-        self.state = MiningState.IDLE
-        self._click_buffer = []
-
-        if apply_to_excav:
-            self.excav_corners_rc = list(corners_rc)
-            self.preferred_start_rc = None
-
-        if self.excav_corners_rc and self.deposit_corners_rc:
-            self.save_zones(occ_map)
-        else:
-            self.save_zones(occ_map)
-
-        print(
-            f"[Mining] Starting zone set from preset "
-            f"(side={side_name}, inside corner x={origin_x:+.2f}m z={origin_z:.2f}m, "
-            f"size {width_x:.2f}m x {depth_z:.2f}m)."
-        )
-        if apply_to_excav:
-            print("[Mining] Excavation zone also stamped from the starting-zone overlap preset.")
-        return True
-
     def start_pick_dig_start(self):
         """Begin collecting one map click for the preferred dig start."""
         self._start_pick_dig_start()
@@ -413,17 +338,16 @@ class MiningAutomation:
 
         # --- Digging: slow forward creep ---
         if s == MiningState.DIGGING:
-            pattern = self.excavation_pattern_command(now)
-            if pattern is None:
-                self.state = MiningState.ABORTED
-                return None, (0.0, 0.0), "ABORTED"
-            if bool(pattern.get("done")):
+            dig_speed = float(self.cfg.get("dig_speed", 0.20))
+            dig_dur   = float(self.cfg.get("dig_duration", 5.0))
+            elapsed   = now - self.phase_start
+            if elapsed >= dig_dur:
                 self.visited.add(self.dig_index)
-                print(f"[Mining] Excavation pattern complete ({self.dig_index + 1}). Navigating to deposit.")
-                self.state = MiningState.NAVIGATE_DEPOSIT
-                self._deposit_approach_rc = None
-                return (None, (0.0, 0.0), "NAV_DEPOSIT")
-            return (None, (float(pattern.get("fwd", 0.0)), 0.0), str(pattern.get("label", "DIGGING")))
+                print(f"[Mining] Dig complete ({self.dig_index + 1}). Backing up.")
+                self.state = MiningState.BACKUP
+                self.phase_start = now
+            pct = min(1.0, elapsed / max(0.01, dig_dur)) * 100
+            return (None, (dig_speed, 0.0), f"DIGGING {pct:.0f}%")
 
         # --- Backup after dig ---
         if s == MiningState.BACKUP:
@@ -520,14 +444,6 @@ class MiningAutomation:
             cr, cc = _clamp(int(cr), int(cc))
             cv2.putText(map_vis, "DEP", (max(0, cc - 9), max(8, cr + 4)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 220, 0), 1, cv2.LINE_AA)
-
-        # -- Starting zone (green outline) --
-        if self.starting_corners_rc:
-            _draw_poly_outline(self.starting_corners_rc, (80, 255, 120))
-            cr, cc = self._poly_centroid(self.starting_corners_rc)
-            cr, cc = _clamp(int(cr), int(cc))
-            cv2.putText(map_vis, "START", (max(0, cc - 14), max(8, cr + 4)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, (80, 255, 120), 1, cv2.LINE_AA)
 
         # -- Deposit approach waypoint (magenta diamond) --
         if self._deposit_approach_rc is not None:
@@ -693,12 +609,9 @@ class MiningAutomation:
             data = {
                 "excav":   _rc_to_world(self.excav_corners_rc),
                 "deposit": _rc_to_world(self.deposit_corners_rc),
-                "starting": _rc_to_world(self.starting_corners_rc),
             }
             if self.deposit_zone_preset_side:
                 data["deposit_zone_preset"] = str(self.deposit_zone_preset_side)
-            if self.starting_zone_preset_side:
-                data["starting_zone_preset"] = str(self.starting_zone_preset_side)
             if self.preferred_start_rc is not None:
                 w_start = occ_map.grid_to_world(
                     self.preferred_start_rc[0],
@@ -742,15 +655,8 @@ class MiningAutomation:
                 if len(rc) == 4:
                     self.deposit_corners_rc = rc
                     loaded = True
-            if "starting" in data and len(data["starting"]) == 4:
-                rc = _world_to_rc(data["starting"])
-                if len(rc) == 4:
-                    self.starting_corners_rc = rc
-                    loaded = True
             preset_side = str(data.get("deposit_zone_preset", "")).strip().lower()
             self.deposit_zone_preset_side = preset_side if preset_side in ("left", "right") else None
-            start_side = str(data.get("starting_zone_preset", "")).strip().lower()
-            self.starting_zone_preset_side = start_side if start_side in ("left", "right") else None
             if "dig_start" in data and len(data["dig_start"]) == 2:
                 rc = occ_map.world_to_grid(
                     float(data["dig_start"][0]),
@@ -858,83 +764,6 @@ class MiningAutomation:
             return float(value)
         except Exception:
             return float(default)
-
-    def excavation_pattern_command(self, now):
-        """
-        Return the current scripted excavation command during DIGGING.
-
-        Pattern:
-          - 4 cycles
-          - 5s lower + forward + extend
-          - 5s reverse, with the first 2s acting as the pull-up portion
-          - final retract for (5 - 2) * 4 = 12s with no rover movement
-        """
-        if self.state != MiningState.DIGGING:
-            return None
-        forward_sec = max(0.1, self._cfg_float("dig_forward_duration", 5.0))
-        reverse_sec = max(0.1, self._cfg_float("backup_duration", 5.0))
-        pullup_sec = max(0.0, min(reverse_sec, self._cfg_float("dig_pullup_duration", 2.0)))
-        cycles = max(1, int(round(self._cfg_float("dig_cycles", 4))))
-        net_extend_sec = max(0.0, forward_sec - pullup_sec)
-        final_retract_sec = max(0.0, net_extend_sec * float(cycles))
-        total_cycle_sec = forward_sec + reverse_sec
-        total_active_sec = total_cycle_sec * float(cycles)
-        elapsed = max(0.0, float(now) - float(self.phase_start))
-        dig_speed = float(self.cfg.get("dig_speed", 0.20))
-        reverse_speed = float(self.cfg.get("backup_speed", 0.35))
-
-        if elapsed >= total_active_sec + final_retract_sec:
-            return {
-                "done": True,
-                "fwd": 0.0,
-                "lower": False,
-                "digger": False,
-                "left_extend": False,
-                "right_extend": False,
-                "label": "DIGGING 100%",
-            }
-
-        if elapsed < total_active_sec:
-            cycle_index = int(elapsed // total_cycle_sec)
-            cycle_elapsed = elapsed - float(cycle_index) * total_cycle_sec
-            if cycle_elapsed < forward_sec:
-                progress = (elapsed / max(0.01, total_active_sec + final_retract_sec)) * 100.0
-                return {
-                    "done": False,
-                    "fwd": dig_speed,
-                    "lower": True,
-                    "digger": True,
-                    "left_extend": True,
-                    "right_extend": True,
-                    "label": f"DIG {cycle_index + 1}/{cycles} FWD {progress:.0f}%",
-                }
-            reverse_elapsed = cycle_elapsed - forward_sec
-            progress = (elapsed / max(0.01, total_active_sec + final_retract_sec)) * 100.0
-            return {
-                "done": False,
-                "fwd": -reverse_speed,
-                "lower": False,
-                "digger": True,
-                "left_extend": False,
-                "right_extend": False,
-                "label": (
-                    f"DIG {cycle_index + 1}/{cycles} PULLUP {progress:.0f}%"
-                    if reverse_elapsed < pullup_sec
-                    else f"DIG {cycle_index + 1}/{cycles} REV {progress:.0f}%"
-                ),
-            }
-
-        retract_elapsed = elapsed - total_active_sec
-        progress = (elapsed / max(0.01, total_active_sec + final_retract_sec)) * 100.0
-        return {
-            "done": False,
-            "fwd": 0.0,
-            "lower": False,
-            "digger": False,
-            "left_extend": False,
-            "right_extend": False,
-            "label": f"RETRACT {retract_elapsed:.1f}/{final_retract_sec:.1f}s {progress:.0f}%",
-        }
 
     @staticmethod
     def _poly_centroid(corners_rc):

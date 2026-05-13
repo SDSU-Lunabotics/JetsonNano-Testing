@@ -42,7 +42,6 @@ class DriveCalibrationManager:
         self.last_result = "Calibration idle."
         self.last_saved_flip = None
         self.last_saved_hard_drive_flip = None
-        self.last_saved_steering_flip = None
         self.last_saved_display_heading_flip = None
         self.last_saved_camera_map_angle_deg = None
         self.last_saved_camera_deposit_angle_deg = None
@@ -58,7 +57,6 @@ class DriveCalibrationManager:
                 "version": 1,
                 "drive_heading_flip": None,
                 "hard_drive_flip": None,
-                "steering_flip": None,
                 "display_heading_flip": None,
                 "camera_map_angle_deg": None,
                 "camera_deposit_angle_deg": None,
@@ -72,9 +70,6 @@ class DriveCalibrationManager:
         hard_flip = data.get("hard_drive_flip")
         if isinstance(hard_flip, bool):
             self.last_saved_hard_drive_flip = bool(hard_flip)
-        steering_flip = data.get("steering_flip")
-        if isinstance(steering_flip, bool):
-            self.last_saved_steering_flip = bool(steering_flip)
         display_flip = data.get("display_heading_flip")
         if isinstance(display_flip, bool):
             self.last_saved_display_heading_flip = bool(display_flip)
@@ -93,7 +88,6 @@ class DriveCalibrationManager:
                 "version": 1,
                 "drive_heading_flip": self.last_saved_flip,
                 "hard_drive_flip": self.last_saved_hard_drive_flip,
-                "steering_flip": self.last_saved_steering_flip,
                 "display_heading_flip": self.last_saved_display_heading_flip,
                 "camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
                 "camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,
@@ -106,7 +100,6 @@ class DriveCalibrationManager:
         self,
         drive_heading_flip,
         hard_drive_flip,
-        steering_flip,
         display_heading_flip,
         camera_map_angle_deg,
         camera_deposit_angle_deg,
@@ -114,7 +107,6 @@ class DriveCalibrationManager:
     ):
         self.last_saved_flip = None if drive_heading_flip is None else bool(drive_heading_flip)
         self.last_saved_hard_drive_flip = None if hard_drive_flip is None else bool(hard_drive_flip)
-        self.last_saved_steering_flip = None if steering_flip is None else bool(steering_flip)
         self.last_saved_display_heading_flip = (
             None if display_heading_flip is None else bool(display_heading_flip)
         )
@@ -131,7 +123,6 @@ class DriveCalibrationManager:
         self.save_runtime_settings(
             drive_heading_flip,
             self.last_saved_hard_drive_flip,
-            self.last_saved_steering_flip,
             self.last_saved_display_heading_flip,
             self.last_saved_camera_map_angle_deg,
             self.last_saved_camera_deposit_angle_deg,
@@ -223,7 +214,6 @@ class DriveCalibrationManager:
             "last_result": self.last_result,
             "saved_drive_heading_flip": self.last_saved_flip,
             "saved_hard_drive_flip": self.last_saved_hard_drive_flip,
-            "saved_steering_flip": self.last_saved_steering_flip,
             "saved_display_heading_flip": self.last_saved_display_heading_flip,
             "saved_camera_map_angle_deg": self.last_saved_camera_map_angle_deg,
             "saved_camera_deposit_angle_deg": self.last_saved_camera_deposit_angle_deg,
@@ -583,250 +573,4 @@ class DigProfileLibrary:
             "selected": copy.deepcopy(self.selected),
             "cursor": copy.deepcopy(self.cursor),
             "profiles": profiles,
-        }
-
-
-class ControllerMacroLibrary:
-    def __init__(self, path):
-        self.path = path
-        self.macros = []
-        self.selected = None
-        self.cursor = None
-        self.recording = False
-        self.recording_name_base = None
-        self.recording_started_at = 0.0
-        self.recording_samples = []
-        self.last_recorded_signature = None
-        self.last_recorded_t = -1.0
-        self.sample_period_sec = 0.05
-        self._load()
-
-    def _default_payload(self):
-        return {
-            "version": 1,
-            "selected": None,
-            "cursor": None,
-            "macros": [],
-        }
-
-    def _slugify_name(self, name):
-        raw = str(name or "").strip().lower()
-        if not raw:
-            return ""
-        raw = raw.replace(" ", "_")
-        raw = re.sub(r"[^a-z0-9_\-]+", "", raw)
-        raw = re.sub(r"_+", "_", raw).strip("_-")
-        return raw
-
-    def _make_unique_name(self, base_name):
-        existing = {str(item.get("name", "")) for item in self.macros}
-        if base_name not in existing:
-            return base_name
-        idx = 2
-        while True:
-            candidate = f"{base_name}_{idx}"
-            if candidate not in existing:
-                return candidate
-            idx += 1
-
-    def _load(self):
-        data = _read_json(self.path, self._default_payload())
-        macros = data.get("macros", [])
-        self.macros = []
-        for macro in macros:
-            if not isinstance(macro, dict) or not isinstance(macro.get("name"), str):
-                continue
-            self.macros.append(copy.deepcopy(macro))
-        self.selected = data.get("selected") if self.get_macro(data.get("selected")) else None
-        self.cursor = data.get("cursor") if self.get_macro(data.get("cursor")) else None
-        self._normalize_cursor_state()
-
-    def _save(self):
-        _write_json_atomic(
-            self.path,
-            {
-                "version": 1,
-                "selected": self.selected,
-                "cursor": self.cursor,
-                "macros": copy.deepcopy(self.macros),
-                "updated_ms": int(time.time() * 1000),
-            },
-        )
-
-    def _normalize_cursor_state(self):
-        items = self.list_macros()
-        names = [item["name"] for item in items]
-        if self.selected not in names:
-            self.selected = names[0] if names else None
-        if self.cursor not in names:
-            self.cursor = self.selected or (names[0] if names else None)
-
-    def list_macros(self):
-        return sorted(self.macros, key=lambda item: int(item.get("created_ms", 0)), reverse=True)
-
-    def get_macro(self, name):
-        if not name:
-            return None
-        for macro in self.macros:
-            if macro.get("name") == name:
-                return macro
-        return None
-
-    def get_selected_macro(self):
-        return self.get_macro(self.selected)
-
-    def get_cursor_macro(self):
-        return self.get_macro(self.cursor)
-
-    def cycle_cursor(self, step):
-        items = self.list_macros()
-        if not items:
-            self.cursor = None
-            self._save()
-            return None
-        names = [item["name"] for item in items]
-        try:
-            idx = names.index(self.cursor)
-        except ValueError:
-            idx = 0
-        idx = (idx + int(step)) % len(names)
-        self.cursor = names[idx]
-        self._save()
-        return self.get_cursor_macro()
-
-    def select_cursor(self):
-        macro = self.get_cursor_macro()
-        if macro is None:
-            return None
-        self.selected = macro["name"]
-        self._save()
-        return macro
-
-    def begin_recording(self, name_base=None):
-        if self.recording:
-            return False
-        self.recording = True
-        self.recording_name_base = self._slugify_name(name_base)
-        self.recording_started_at = time.time()
-        self.recording_samples = []
-        self.last_recorded_signature = None
-        self.last_recorded_t = -1.0
-        return True
-
-    def capture_sample(
-        self,
-        now,
-        fwd,
-        turn,
-        digger_on,
-        lower_on,
-        left_extend_on,
-        right_extend_on,
-        door_open_on,
-        door_close_on,
-    ):
-        if not self.recording:
-            return
-        elapsed = max(0.0, float(now) - float(self.recording_started_at))
-        sample = {
-            "t": round(elapsed, 3),
-            "fwd": round(float(fwd), 4),
-            "turn": round(float(turn), 4),
-            "digger_on": bool(digger_on),
-            "lower_on": bool(lower_on),
-            "left_extend_on": bool(left_extend_on),
-            "right_extend_on": bool(right_extend_on),
-            "door_open_on": bool(door_open_on),
-            "door_close_on": bool(door_close_on),
-        }
-        signature = (
-            sample["fwd"],
-            sample["turn"],
-            sample["digger_on"],
-            sample["lower_on"],
-            sample["left_extend_on"],
-            sample["right_extend_on"],
-            sample["door_open_on"],
-            sample["door_close_on"],
-        )
-        if (
-            (not self.recording_samples)
-            or signature != self.last_recorded_signature
-            or (elapsed - self.last_recorded_t) >= self.sample_period_sec
-        ):
-            self.recording_samples.append(sample)
-            self.last_recorded_signature = signature
-            self.last_recorded_t = elapsed
-
-    def stop_recording(self, save=True):
-        if not self.recording:
-            return None
-        samples = list(self.recording_samples)
-        name_base = self.recording_name_base
-        self.recording = False
-        self.recording_name_base = None
-        self.recording_started_at = 0.0
-        self.recording_samples = []
-        self.last_recorded_signature = None
-        self.last_recorded_t = -1.0
-        if (not save) or len(samples) < 2:
-            return None
-        created_ms = int(time.time() * 1000)
-        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(created_ms / 1000.0))
-        if name_base:
-            name = self._make_unique_name(f"controller_{name_base}")
-        else:
-            name = f"controller_{stamp}"
-        macro = {
-            "name": name,
-            "created_ms": created_ms,
-            "duration_sec": float(samples[-1]["t"]),
-            "samples": samples,
-        }
-        self.macros = [item for item in self.macros if item.get("name") != name]
-        self.macros.append(macro)
-        self.selected = name
-        self.cursor = name
-        self._normalize_cursor_state()
-        self._save()
-        return macro
-
-    def playback_sample(self, elapsed_sec):
-        macro = self.get_selected_macro()
-        if macro is None:
-            return None
-        samples = macro.get("samples") or []
-        if not samples:
-            return None
-        times = [float(sample.get("t", 0.0)) for sample in samples]
-        idx = bisect.bisect_right(times, float(elapsed_sec)) - 1
-        idx = max(0, min(idx, len(samples) - 1))
-        sample = samples[idx]
-        return {
-            "macro_name": macro["name"],
-            "fwd": float(sample.get("fwd", 0.0)),
-            "turn": float(sample.get("turn", 0.0)),
-            "digger_on": bool(sample.get("digger_on", False)),
-            "lower_on": bool(sample.get("lower_on", False)),
-            "left_extend_on": bool(sample.get("left_extend_on", False)),
-            "right_extend_on": bool(sample.get("right_extend_on", False)),
-            "door_open_on": bool(sample.get("door_open_on", False)),
-            "door_close_on": bool(sample.get("door_close_on", False)),
-            "duration_sec": float(macro.get("duration_sec", 0.0)),
-        }
-
-    def ui_state(self):
-        return {
-            "recording": bool(self.recording),
-            "selected": self.selected,
-            "cursor": self.cursor,
-            "macros": [
-                {
-                    "name": item["name"],
-                    "duration_sec": float(item.get("duration_sec", 0.0)),
-                    "selected": item["name"] == self.selected,
-                    "cursor": item["name"] == self.cursor,
-                }
-                for item in self.list_macros()
-            ],
         }

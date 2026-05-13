@@ -1125,34 +1125,67 @@ def main():
 
         start_w = float(_mining_cfg.get("starting_zone_width_m", 1.50))
         start_d = float(_mining_cfg.get("starting_zone_depth_m", 1.50))
-        berm_u = max(
-            abs(float(_mining_cfg.get("berm_left_center_x_m", -6.80))),
-            abs(float(_mining_cfg.get("berm_right_center_x_m", 6.80))),
-        )
-        berm_v = float(_mining_cfg.get("berm_center_z_m", 3.57))
-        berm_w = float(_mining_cfg.get("berm_width_m", 1.50))
-        berm_d = float(_mining_cfg.get("berm_depth_m", 0.90))
         apply_start_to_excav = str(_mining_cfg.get("starting_zone_apply_to_excav", "1")).strip().lower() not in ("0", "false", "no", "off", "")
 
         def transform_local_poly(local_poly):
             local_arr = np.asarray(local_poly, dtype=np.float32).reshape(-1, 2)
             return (local_arr @ R2.T) + t2
 
+        def transform_world_to_local(world_poly):
+            world_arr = np.asarray(world_poly, dtype=np.float32).reshape(-1, 2)
+            return (world_arr - t2) @ R2
+
         start_local = np.array(
             [[0.0, 0.0], [start_w, 0.0], [start_w, start_d], [0.0, start_d]],
             dtype=np.float32,
         )
-        berm_local = np.array(
+        start_world = transform_local_poly(start_local)
+
+        map_world = np.array(
             [
-                [berm_u - 0.5 * berm_w, berm_v - 0.5 * berm_d],
-                [berm_u + 0.5 * berm_w, berm_v - 0.5 * berm_d],
-                [berm_u + 0.5 * berm_w, berm_v + 0.5 * berm_d],
-                [berm_u - 0.5 * berm_w, berm_v + 0.5 * berm_d],
+                [float(occ_map.x_min), float(occ_map.z_min)],
+                [float(occ_map.x_max), float(occ_map.z_min)],
+                [float(occ_map.x_max), float(occ_map.z_max)],
+                [float(occ_map.x_min), float(occ_map.z_max)],
             ],
             dtype=np.float32,
         )
-        start_world = transform_local_poly(start_local)
-        berm_world = transform_local_poly(berm_local)
+        map_local = transform_world_to_local(map_world)
+        local_u_min = float(np.min(map_local[:, 0]))
+        local_u_max = float(np.max(map_local[:, 0]))
+        local_v_min = float(np.min(map_local[:, 1]))
+        local_v_max = float(np.max(map_local[:, 1]))
+        span_u = max(0.0, local_u_max - local_u_min)
+        span_v = max(0.0, local_v_max - local_v_min)
+
+        if span_u >= span_v:
+            excav_axis = "u"
+            split_value = start_w + max(0.0, (local_u_max - start_w) * 0.5)
+            split_value = min(max(split_value, local_u_min), local_u_max)
+            excav_local = np.array(
+                [
+                    [split_value, local_v_min],
+                    [local_u_max, local_v_min],
+                    [local_u_max, local_v_max],
+                    [split_value, local_v_max],
+                ],
+                dtype=np.float32,
+            )
+        else:
+            excav_axis = "v"
+            split_value = start_d + max(0.0, (local_v_max - start_d) * 0.5)
+            split_value = min(max(split_value, local_v_min), local_v_max)
+            excav_local = np.array(
+                [
+                    [local_u_min, split_value],
+                    [local_u_max, split_value],
+                    [local_u_max, local_v_max],
+                    [local_u_min, local_v_max],
+                ],
+                dtype=np.float32,
+            )
+
+        excav_world = transform_local_poly(excav_local)
 
         def world_poly_to_rc(poly_world):
             out = []
@@ -1164,8 +1197,8 @@ def main():
             return out
 
         start_rc = world_poly_to_rc(start_world)
-        berm_rc = world_poly_to_rc(berm_world)
-        if start_rc is None or berm_rc is None:
+        excav_rc = world_poly_to_rc(excav_world)
+        if start_rc is None or (apply_start_to_excav and excav_rc is None):
             start_frame_last_error_m = None
             start_frame_last_status = "Start frame: transformed zones fell outside current map bounds."
             print(start_frame_last_status)
@@ -1173,18 +1206,18 @@ def main():
 
         mining.starting_corners_rc = list(start_rc)
         mining.starting_zone_preset_side = None
-        if apply_start_to_excav:
-            mining.excav_corners_rc = list(start_rc)
-            mining.preferred_start_rc = None
-        mining.deposit_corners_rc = list(berm_rc)
+        mining.deposit_corners_rc = list(start_rc)
         mining.deposit_zone_preset_side = None
+        if apply_start_to_excav:
+            mining.excav_corners_rc = list(excav_rc)
+            mining.preferred_start_rc = None
         mining._deposit_approach_rc = None
         mining.save_zones(occ_map)
 
         start_frame_last_error_m = float(fit_err)
         start_frame_last_status = (
             f"{status_prefix} from tags {start_frame_last_ids} "
-            f"(fit {float(fit_err):.03f} m)."
+            f"(fit {float(fit_err):.03f} m, deposit=start, excav={excav_axis}-half)."
         )
         print(start_frame_last_status)
         return True

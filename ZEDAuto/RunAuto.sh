@@ -192,15 +192,8 @@ fi
 if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
-  cmd+=(--drive-speed "${DRIVE_SPEED:-1.0}")
+  cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
   cmd+=(--drive-forward-slew-per-sec "${DRIVE_FORWARD_SLEW_PER_SEC:-1.4}")
-  cmd+=(--drive-turn-k "${DRIVE_TURN_K:-1.15}")
-  cmd+=(--drive-max-turn-cmd "${DRIVE_MAX_TURN_CMD:-1.00}")
-  cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-20.0}")
-  cmd+=(--drive-stop-turn-deg "${DRIVE_STOP_TURN_DEG:-40.0}")
-  cmd+=(--drive-min-turn-forward-scale "${DRIVE_MIN_TURN_FORWARD_SCALE:-0.20}")
-  cmd+=(--drive-goal-tol-m "${DRIVE_GOAL_TOL_M:-0.45}")
-  cmd+=(--drive-heading-tol-deg "${DRIVE_HEADING_TOL_DEG:-16.0}")
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
   cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
   cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
@@ -270,6 +263,22 @@ if [[ -n "${MAP_PUBLISH_URL:-}" ]]; then
   cmd+=(--map-publish-timeout-ms "${MAP_PUBLISH_TIMEOUT_MS:-250}")
   cmd+=(--map-publish-source "${MAP_PUBLISH_SOURCE:-zed_ground_wall}")
 fi
+if [[ "${AUTO_START_LIDAR:-0}" == "1" ]]; then
+  cmd+=(--auto-start-lidar)
+  cmd+=(--lidar-host "${LIDAR_HOST:-10.0.9.60}")
+  cmd+=(--lidar-pose-file "${LIDAR_POSE_FILE:-/tmp/lidar_pose.json}")
+  cmd+=(--lidar-overlay-file "${LIDAR_OVERLAY_FILE:-/tmp/lidar_overlay.json}")
+  cmd+=(--lidar-overlay-stride "${LIDAR_OVERLAY_STRIDE:-1}")
+  if [[ -n "${LIDAR_PYTHON:-}" ]]; then cmd+=(--lidar-python "${LIDAR_PYTHON}"); fi
+  if [[ -n "${LIDAR_SCRIPT_PATH:-}" ]]; then cmd+=(--lidar-script "${LIDAR_SCRIPT_PATH}"); fi
+  if [[ "${LIDAR_WEBUI:-1}" == "1" ]]; then
+    cmd+=(--lidar-webui)
+    cmd+=(--lidar-viewer-id "${LIDAR_VIEWER_ID:-view}")
+  else
+    cmd+=(--lidar-no-webui)
+    cmd+=(--lidar-port "${LIDAR_PORT:-2111}")
+  fi
+fi
 if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
 if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 if [[ "${MANUAL_START:-0}" == "1" ]]; then cmd+=(--manual-start); fi
@@ -290,11 +299,6 @@ if [[ -n "${ROCK_MODEL:-}" ]]; then
   cmd+=(--rock-conf "${ROCK_CONF:-0.35}")
   cmd+=(--rock-every "${ROCK_EVERY:-5}")
   cmd+=(--rock-stamp "${ROCK_STAMP:-6.0}")
-  if [[ "${ROCK_DEBUG:-0}" == "1" ]]; then cmd+=(--rock-debug); fi
-  if [[ -n "${ROCK_SNAPSHOT_DIR:-}" ]]; then
-    cmd+=(--rock-snapshot-dir "${ROCK_SNAPSHOT_DIR}")
-    cmd+=(--rock-snapshot-cooldown "${ROCK_SNAPSHOT_COOLDOWN:-2.0}")
-  fi
   cmd+=(--rock-classes "${ROCK_CLASSES:-rock,stone,boulder}")
 fi
 if [[ "${LANDMARK_MEMORY:-1}" == "1" ]]; then
