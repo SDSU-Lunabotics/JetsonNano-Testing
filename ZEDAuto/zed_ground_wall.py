@@ -336,18 +336,18 @@ def main():
     parser.add_argument("--spatial-filter", default="none", help="Mesh filter: none|low|medium|high")
     parser.add_argument("--drive", action="store_true", help="Enable RoboRIO driving commands")
     parser.add_argument("--roborio-ip", default="10.0.9.2", help="RoboRIO IP for NetworkTables")
-    parser.add_argument("--drive-speed", type=float, default=0.7, help="Forward speed command (0-1)")
+    parser.add_argument("--drive-speed", type=float, default=1.0, help="Forward speed command (0-1)")
     parser.add_argument(
         "--drive-forward-slew-per-sec",
         type=float,
         default=1.4,
         help="Max change rate of forward command during auto path driving (command units per second)",
     )
-    parser.add_argument("--drive-turn-k", type=float, default=0.65, help="Turn gain for heading error")
+    parser.add_argument("--drive-turn-k", type=float, default=1.15, help="Turn gain for heading error")
     parser.add_argument(
         "--drive-max-turn-cmd",
         type=float,
-        default=0.50,
+        default=1.00,
         help="Maximum absolute turn command while auto-driving (0-1)",
     )
     parser.add_argument(
@@ -886,7 +886,7 @@ def main():
         else:
             print("ZED SDK ObjectDetectionParameters not available; human detection disabled.")
     human_detect_enabled = bool(human_detect_available)
-    rock_detect_enabled = bool(rock_model is not None)
+    rock_detect_enabled = False
 
     # Simple 2D occupancy map settings (XZ plane, Y up).
     # X: left/right, Z: forward. Units: meters.
@@ -1318,7 +1318,8 @@ def main():
     last_map_window_shape = None
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
-    smooth_map_enabled = False
+    smooth_map_enabled = True
+    bidirectional_auto_enabled = True
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
@@ -2292,12 +2293,37 @@ def main():
         print(f"Steering flip {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_bidirectional_auto(enabled, source="button"):
+        nonlocal bidirectional_auto_enabled
+        enabled = bool(enabled)
+        if bidirectional_auto_enabled == enabled:
+            return
+        bidirectional_auto_enabled = enabled
+        print(f"Bidirectional auto {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
     def set_drive_speed(value, source="slider"):
         value = max(0.10, min(1.00, float(value)))
         if abs(float(args.drive_speed) - value) <= 1e-6:
             return
         args.drive_speed = value
         print(f"Auto drive speed set to {args.drive_speed:.2f} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_turn_speed(value, source="slider"):
+        value = max(0.20, min(1.00, float(value)))
+        new_turn_k = max(0.30, min(1.60, 0.15 + value))
+        if (
+            abs(float(args.drive_max_turn_cmd) - value) <= 1e-6
+            and abs(float(args.drive_turn_k) - new_turn_k) <= 1e-6
+        ):
+            return
+        args.drive_max_turn_cmd = value
+        args.drive_turn_k = new_turn_k
+        print(
+            f"Auto turn speed set to {value:.2f} via {source} "
+            f"(turn_k={args.drive_turn_k:.2f}, max_turn={args.drive_max_turn_cmd:.2f})."
+        )
         publish_map_ui_state(force=True)
 
     def set_display_heading_flip(enabled, source="button"):
@@ -2878,6 +2904,10 @@ def main():
             "drive_speed": float(args.drive_speed),
             "drive_speed_min": 0.10,
             "drive_speed_max": 1.00,
+            "drive_turn_speed": float(args.drive_max_turn_cmd),
+            "drive_turn_speed_min": 0.20,
+            "drive_turn_speed_max": 1.00,
+            "bidirectional_auto": bool(bidirectional_auto_enabled),
             "drive_calibration": drive_cal_state,
             "dig_profiles": dig_ui_state,
             "actuators": {
@@ -3005,6 +3035,13 @@ def main():
                     "label": "Flip Steering",
                     "command": "steering_flip",
                     "active": bool(args.steering_flip),
+                    "enabled": True,
+                },
+                {
+                    "id": "bidirectional_auto",
+                    "label": "Bidirectional Auto",
+                    "command": "bidirectional_auto",
+                    "active": bool(bidirectional_auto_enabled),
                     "enabled": True,
                 },
                 {
@@ -3621,6 +3658,13 @@ def main():
                 frac = (x - x0) / max(1, x1 - x0)
                 set_drive_speed(0.10 + frac * 0.90, "slider")
                 return
+        rect = status_button_rects.get("turn_speed_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = (x - x0) / max(1, x1 - x0)
+                set_turn_speed(0.20 + frac * 0.80, "slider")
+                return
         if is_drag:
             return
         rect = status_button_rects.get("dig_name_input")
@@ -3785,6 +3829,12 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_steering_flip(not args.steering_flip, "button")
+                return
+        rect = status_button_rects.get("bidirectional_auto")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_bidirectional_auto(not bidirectional_auto_enabled, "button")
                 return
         rect = status_button_rects.get("test_drive_forward")
         if rect is not None:
@@ -4140,6 +4190,8 @@ def main():
             set_hard_drive_flip(not args.hard_drive_flip, "external command")
         elif action == "steering_flip":
             set_steering_flip(not args.steering_flip, "external command")
+        elif action == "bidirectional_auto":
+            set_bidirectional_auto(not bidirectional_auto_enabled, "external command")
         elif action == "test_drive_forward":
             set_test_drive_forward(not test_drive_forward_active, "external command")
         elif action == "camera_view_flip":
@@ -4243,6 +4295,12 @@ def main():
             except Exception:
                 value = float(args.drive_speed)
             set_drive_speed(value, "external command")
+        elif action == "set_turn_speed":
+            try:
+                value = float(payload.get("value", args.drive_max_turn_cmd))
+            except Exception:
+                value = float(args.drive_max_turn_cmd)
+            set_turn_speed(value, "external command")
 
         last_map_command_seq = seq
 
@@ -5140,7 +5198,7 @@ def main():
         )
         cursor_y += zones_section_h + card_gap
 
-        cal_section_h = 72 + 4 * (button_h + 10) + 150
+        cal_section_h = 72 + 4 * (button_h + 10) + 232
         cal_body_y = section_frame(
             cursor_y,
             cal_section_h,
@@ -5157,10 +5215,13 @@ def main():
         camera_view_flip_rect = grid_rect(cal_body_y, 1, 2)
         steering_flip_rect = grid_rect(cal_body_y, 2, 0)
         test_drive_forward_rect = grid_rect(cal_body_y, 2, 1)
+        bidirectional_auto_rect = grid_rect(cal_body_y, 2, 2)
         cal_slider_y = cal_body_y + 4 * (button_h + 10) + 50
         cal_slider_x0 = card_x0 + card_inner + 8
         cal_slider_x1 = card_x1 - card_inner - 8
         drive_speed_slider_rect = (cal_slider_x0, cal_slider_y, cal_slider_x1, cal_slider_y + 44)
+        turn_slider_y = cal_slider_y + 80
+        turn_speed_slider_rect = (cal_slider_x0, turn_slider_y, cal_slider_x1, turn_slider_y + 44)
         draw_control_button(
             drive_calibration_mode_rect,
             "Drive Cal: ON" if drive_calibration.active else "Drive Cal",
@@ -5223,6 +5284,14 @@ def main():
             (20, 130, 60),
             (120, 255, 170),
         )
+        draw_control_button(
+            bidirectional_auto_rect,
+            "Bidirectional: ON" if bidirectional_auto_enabled else "Bidirectional Auto",
+            True,
+            bool(bidirectional_auto_enabled),
+            (90, 90, 20),
+            (255, 235, 120),
+        )
         put_control_line(
             f"Calibration status: {'ACTIVE' if drive_calibration.active else 'IDLE'}",
             cal_body_y + 4 * (button_h + 10) + 14,
@@ -5260,6 +5329,33 @@ def main():
         put_control_line(
             "Faster",
             cal_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=max(cal_slider_x0, cal_slider_x1 - 44),
+        )
+        put_control_line(
+            f"Auto turn: {float(args.drive_max_turn_cmd):.2f}",
+            turn_slider_y - 2,
+            (255, 220, 150),
+            0.42,
+            x=card_x0 + card_inner,
+        )
+        cv2.rectangle(controls, (cal_slider_x0, turn_slider_y + 18), (cal_slider_x1, turn_slider_y + 34), (60, 60, 60), -1)
+        cv2.rectangle(controls, (cal_slider_x0, turn_slider_y + 18), (cal_slider_x1, turn_slider_y + 34), (120, 120, 120), 1)
+        turn_speed_frac = (max(0.20, min(1.00, float(args.drive_max_turn_cmd))) - 0.20) / 0.80
+        turn_speed_knob_x = int(cal_slider_x0 + turn_speed_frac * (cal_slider_x1 - cal_slider_x0))
+        cv2.circle(controls, (turn_speed_knob_x, turn_slider_y + 26), 11, (255, 170, 70), -1)
+        cv2.circle(controls, (turn_speed_knob_x, turn_slider_y + 26), 11, (255, 235, 180), 1)
+        put_control_line(
+            "Gentler",
+            turn_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=cal_slider_x0,
+        )
+        put_control_line(
+            "Sharper",
+            turn_slider_y + 52,
             (180, 180, 180),
             0.36,
             x=max(cal_slider_x0, cal_slider_x1 - 44),
@@ -5617,7 +5713,9 @@ def main():
             ("hard_drive_flip", hard_drive_flip_rect),
             ("steering_flip", steering_flip_rect),
             ("test_drive_forward", test_drive_forward_rect),
+            ("bidirectional_auto", bidirectional_auto_rect),
             ("drive_speed_slider", drive_speed_slider_rect),
+            ("turn_speed_slider", turn_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
@@ -6802,13 +6900,26 @@ def main():
                             if controller_macros.recording:
                                 record_fwd = 0.0
                                 record_turn = 0.0
-                                if manual_mode:
+                                telemetry_fwd = float("nan")
+                                telemetry_turn = float("nan")
+                                if sd is not None:
+                                    telemetry_fwd = float(sd.getNumber("Jetson/DriveForward", float("nan")))
+                                    telemetry_turn = float(sd.getNumber("Jetson/DriveTurn", float("nan")))
+                                if math.isfinite(telemetry_fwd) and math.isfinite(telemetry_turn):
+                                    # Match the known-good mini-rover recorder: capture what the
+                                    # rover is actually executing, not just the controller intent.
+                                    record_fwd = telemetry_fwd
+                                    record_turn = telemetry_turn
+                                elif manual_mode:
                                     record_fwd, record_turn = mix_ds_drive(manual_fwd, manual_turn)
                                 elif args.ds_joystick:
-                                    # In main-rover mode the Xbox path stays on the RoboRIO side,
-                                    # so record the DS axes directly instead of Jetson manual commands.
+                                    # Fallback if live drive telemetry is unavailable.
                                     record_fwd = float(ds_joystick_fwd)
                                     record_turn = float(ds_joystick_turn)
+                                if abs(record_fwd) < 0.05:
+                                    record_fwd = 0.0
+                                if abs(record_turn) < 0.05:
+                                    record_turn = 0.0
                                 controller_macros.capture_sample(
                                     now,
                                     record_fwd,
@@ -6987,7 +7098,10 @@ def main():
                                     1.0 / max(1.0, args.drive_rate_hz),
                                 )
                             else:
-                                reverse_path_drive = mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
+                                reverse_path_drive = (
+                                    bidirectional_auto_enabled
+                                    and mining.state == auto_mining.MiningState.NAVIGATE_DEPOSIT
+                                )
                                 target_rc = pick_drive_target(draw_path, drive_origin_row_col, goal_cell)
                                 if target_rc is not None:
                                     target_world = occ_map.grid_to_world(target_rc[0], target_rc[1])
@@ -7042,6 +7156,20 @@ def main():
                                 forward = drive_forward_world_from_rover(rover_forward_world)
                                 heading = math.atan2(float(forward[2]), float(forward[0]))
                                 target = math.atan2(dz, dx)  # dz = target_z - curr_z, dx = target_x - curr_x
+                                if bidirectional_auto_enabled and mining.state != auto_mining.MiningState.NAVIGATE_DIG:
+                                    forward_err = target - heading
+                                    while forward_err > math.pi:
+                                        forward_err -= 2 * math.pi
+                                    while forward_err < -math.pi:
+                                        forward_err += 2 * math.pi
+                                    reverse_target = target + math.pi
+                                    reverse_err = reverse_target - heading
+                                    while reverse_err > math.pi:
+                                        reverse_err -= 2 * math.pi
+                                    while reverse_err < -math.pi:
+                                        reverse_err += 2 * math.pi
+                                    if abs(reverse_err) + math.radians(12.0) < abs(forward_err):
+                                        reverse_path_drive = True
                                 if reverse_path_drive:
                                     # For deposition, point the rover nose away from the waypoint
                                     # so negative forward backs the rear toward the deposit area.

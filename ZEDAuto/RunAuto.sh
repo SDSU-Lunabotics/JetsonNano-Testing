@@ -192,10 +192,10 @@ fi
 if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
-  cmd+=(--drive-speed "${DRIVE_SPEED:-0.7}")
+  cmd+=(--drive-speed "${DRIVE_SPEED:-1.0}")
   cmd+=(--drive-forward-slew-per-sec "${DRIVE_FORWARD_SLEW_PER_SEC:-1.4}")
-  cmd+=(--drive-turn-k "${DRIVE_TURN_K:-0.65}")
-  cmd+=(--drive-max-turn-cmd "${DRIVE_MAX_TURN_CMD:-0.50}")
+  cmd+=(--drive-turn-k "${DRIVE_TURN_K:-1.15}")
+  cmd+=(--drive-max-turn-cmd "${DRIVE_MAX_TURN_CMD:-1.00}")
   cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-20.0}")
   cmd+=(--drive-stop-turn-deg "${DRIVE_STOP_TURN_DEG:-40.0}")
   cmd+=(--drive-min-turn-forward-scale "${DRIVE_MIN_TURN_FORWARD_SCALE:-0.20}")
