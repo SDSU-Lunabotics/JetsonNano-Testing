@@ -1320,6 +1320,7 @@ def main():
     whole_map_enabled = False
     smooth_map_enabled = True
     bidirectional_auto_enabled = True
+    show_all_dig_profiles = False
     last_drive_send = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
@@ -2300,6 +2301,17 @@ def main():
             return
         bidirectional_auto_enabled = enabled
         print(f"Bidirectional auto {'ENABLED' if enabled else 'DISABLED'} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def set_show_all_dig_profiles(enabled, source="button"):
+        nonlocal show_all_dig_profiles
+        enabled = bool(enabled)
+        if show_all_dig_profiles == enabled:
+            return
+        show_all_dig_profiles = enabled
+        print(
+            f"View-all dig recordings {'ENABLED' if enabled else 'DISABLED'} via {source}."
+        )
         publish_map_ui_state(force=True)
 
     def set_drive_speed(value, source="slider"):
@@ -3930,6 +3942,12 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 delete_browsed_dig_profile("button")
                 return
+        rect = status_button_rects.get("dig_profiles_view_all")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_show_all_dig_profiles(not show_all_dig_profiles, "button")
+                return
         rect = status_button_rects.get("controller_record")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -4255,6 +4273,8 @@ def main():
             cycle_controller_macro_cursor(1, "external command")
         elif action == "controller_use":
             use_browsed_controller_macro("external command")
+        elif action == "dig_profiles_view_all":
+            set_show_all_dig_profiles(not show_all_dig_profiles, "external command")
         elif action == "draw_excav_zone":
             if mining_buttons_enabled():
                 set_brush_tool(None)
@@ -5487,7 +5507,16 @@ def main():
         )
         cursor_y += actuators_section_h + card_gap
 
-        dig_section_h = 72 + 6 * (button_h + 10) + 220
+        current_dig_profiles = dig_profiles.list_profiles(
+            dig_profiles.active_style, dig_profiles.active_phase
+        )
+        visible_dig_rows = (
+            len(current_dig_profiles)
+            if show_all_dig_profiles
+            else min(4, len(current_dig_profiles))
+        )
+        visible_dig_rows = max(4, visible_dig_rows)
+        dig_section_h = 72 + 7 * (button_h + 10) + 190 + visible_dig_rows * 20
         dig_body_y = section_frame(
             cursor_y,
             dig_section_h,
@@ -5505,17 +5534,18 @@ def main():
         dig_profile_prev_rect = grid_rect(dig_body_y, 2, 0)
         dig_profile_next_rect = grid_rect(dig_body_y, 2, 1)
         dig_profile_delete_rect = grid_rect(dig_body_y, 2, 2)
-        controller_record_rect = grid_rect(dig_body_y, 3, 0)
-        controller_preview_rect = grid_rect(dig_body_y, 3, 1)
-        controller_stop_rect = grid_rect(dig_body_y, 3, 2)
-        controller_prev_rect = grid_rect(dig_body_y, 4, 0)
-        controller_next_rect = grid_rect(dig_body_y, 4, 1)
-        controller_use_rect = grid_rect(dig_body_y, 4, 2)
+        dig_profiles_view_all_rect = grid_rect(dig_body_y, 3, 0)
+        controller_record_rect = grid_rect(dig_body_y, 4, 0)
+        controller_preview_rect = grid_rect(dig_body_y, 4, 1)
+        controller_stop_rect = grid_rect(dig_body_y, 4, 2)
+        controller_prev_rect = grid_rect(dig_body_y, 5, 0)
+        controller_next_rect = grid_rect(dig_body_y, 5, 1)
+        controller_use_rect = grid_rect(dig_body_y, 5, 2)
         draw_control_button(dig_style_cycle_rect, f"Dig Style: {dig_profiles.active_style.title()}", True, False)
         draw_control_button(dig_phase_cycle_rect, f"Phase: {dig_profiles.active_phase.title()}", True, False)
         draw_control_button(
             dig_profile_use_rect,
-            "Use Profile",
+            "Use Dig Record",
             bool(dig_profiles.get_cursor_profile() is not None),
             False,
         )
@@ -5562,6 +5592,14 @@ def main():
             "Delete Profile",
             bool(dig_profiles.get_cursor_profile() is not None),
             False,
+        )
+        draw_control_button(
+            dig_profiles_view_all_rect,
+            "View All Digs: ON" if show_all_dig_profiles else "View All Digs",
+            True,
+            bool(show_all_dig_profiles),
+            (70, 100, 140),
+            (150, 220, 255),
         )
         draw_control_button(
             controller_record_rect,
@@ -5612,7 +5650,7 @@ def main():
                 else "Recording: OFF"
             )
         )
-        summary_y = dig_body_y + 5 * (button_h + 10) + 34
+        summary_y = dig_body_y + 6 * (button_h + 10) + 34
         put_control_line(
             f"Active {dig_profiles.active_style.upper()} {dig_profiles.active_phase.upper()} | {recording_text}",
             summary_y,
@@ -5620,13 +5658,23 @@ def main():
             0.42,
             x=card_x0 + card_inner,
         )
-        put_control_line(f"Short dig: {selected_short_dig[:42]}", summary_y + 24, (235, 235, 235), 0.40, x=card_x0 + card_inner)
-        put_control_line(f"Short retract: {selected_short_retract[:38]}", summary_y + 46, (235, 235, 235), 0.40, x=card_x0 + card_inner)
-        put_control_line(f"Long dig: {selected_long_dig[:43]}", summary_y + 68, (235, 235, 235), 0.40, x=card_x0 + card_inner)
-        put_control_line(f"Long retract: {selected_long_retract[:39]}", summary_y + 90, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        active_selected_name = (
+            dig_profiles.selected.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) or "none"
+        )
+        put_control_line(
+            f"Using now: {active_selected_name[:44]}",
+            summary_y + 24,
+            (255, 255, 190),
+            0.42,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(f"Short dig: {selected_short_dig[:42]}", summary_y + 48, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Short retract: {selected_short_retract[:38]}", summary_y + 70, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Long dig: {selected_long_dig[:43]}", summary_y + 92, (235, 235, 235), 0.40, x=card_x0 + card_inner)
+        put_control_line(f"Long retract: {selected_long_retract[:39]}", summary_y + 114, (235, 235, 235), 0.40, x=card_x0 + card_inner)
         put_control_line(
             f"Browse {dig_profiles.active_style}/{dig_profiles.active_phase}: {cursor_name[:26]} ({cursor_duration:.2f}s)",
-            summary_y + 114,
+            summary_y + 138,
             (255, 230, 190),
             0.40,
             x=card_x0 + card_inner,
@@ -5638,22 +5686,26 @@ def main():
         controller_selected_name = controller_selected_macro["name"] if controller_selected_macro is not None else "none"
         put_control_line(
             f"Controller selected: {controller_selected_name[:30]}",
-            summary_y + 138,
+            summary_y + 162,
             (220, 210, 255),
             0.40,
             x=card_x0 + card_inner,
         )
         put_control_line(
             f"Browse controller: {controller_cursor_name[:24]} ({controller_cursor_duration:.2f}s)",
-            summary_y + 160,
+            summary_y + 184,
             (220, 210, 255),
             0.40,
             x=card_x0 + card_inner,
         )
-        visible_profiles = dig_profiles.list_profiles(dig_profiles.active_style, dig_profiles.active_phase)[:4]
+        visible_profiles = (
+            current_dig_profiles
+            if show_all_dig_profiles
+            else current_dig_profiles[:4]
+        )
         put_control_line(
-            f"{dig_profiles.active_style.title()} {dig_profiles.active_phase.title()} profiles:",
-            summary_y + 186,
+            f"{dig_profiles.active_style.title()} {dig_profiles.active_phase.title()} recordings ({len(current_dig_profiles)} total):",
+            summary_y + 210,
             (170, 210, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -5661,7 +5713,7 @@ def main():
         for idx, profile in enumerate(visible_profiles):
             marker = "* " if profile["name"] == dig_profiles.selected.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else "  "
             cursor_marker = ">" if profile["name"] == dig_profiles.cursor.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else " "
-            line_y = summary_y + 208 + idx * 20
+            line_y = summary_y + 232 + idx * 20
             put_control_line(
                 f"{cursor_marker}{marker}{profile['name'][:34]} ({float(profile.get('duration_sec', 0.0)):.2f}s)",
                 line_y,
@@ -5729,6 +5781,7 @@ def main():
             ("dig_profile_next", dig_profile_next_rect),
             ("dig_profile_use", dig_profile_use_rect),
             ("dig_profile_delete", dig_profile_delete_rect),
+            ("dig_profiles_view_all", dig_profiles_view_all_rect),
             ("controller_record", controller_record_rect),
             ("controller_preview", controller_preview_rect),
             ("controller_stop", controller_stop_rect),
