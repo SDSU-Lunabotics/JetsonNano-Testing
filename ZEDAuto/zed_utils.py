@@ -1,20 +1,3 @@
-import json
-import time
-def write_lidar_pose_json(x, y, yaw_rad, path="/tmp/lidar_pose.json"):
-    """
-    Write the current pose (x, y, yaw) to a JSON file for lidar integration.
-    """
-    payload = {
-        "x": float(x),
-        "y": float(y),
-        "yaw_rad": float(yaw_rad),
-        "timestamp": time.time(),
-    }
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-    except Exception as exc:
-        print(f"[LidarPose] Failed to write pose to {path}: {exc}")
 import os
 import time
 import numpy as np

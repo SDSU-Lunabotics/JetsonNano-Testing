@@ -54,6 +54,21 @@ class DriveCalibrationState(BaseModel):
     saved_camera_deposit_angle_deg: Optional[float] = None
 
 
+class ActuatorUiState(BaseModel):
+    left_extension_pct: Optional[float] = None
+    right_extension_pct: Optional[float] = None
+    left_extension_inches: Optional[float] = None
+    right_extension_inches: Optional[float] = None
+    bottom_position_calibrated: Optional[bool] = None
+    sync_fault: Optional[bool] = None
+    left_extend_command: bool = False
+    right_extend_command: bool = False
+    dig_command: bool = False
+    lower_command: bool = False
+    door_open_command: bool = False
+    door_close_command: bool = False
+
+
 class MapUiStateResponse(BaseModel):
     available: bool = False
     source: Optional[str] = None
@@ -66,6 +81,7 @@ class MapUiStateResponse(BaseModel):
     brush_radius_min: Optional[int] = None
     brush_radius_max: Optional[int] = None
     drive_calibration: Optional[DriveCalibrationState] = None
+    actuators: Optional[ActuatorUiState] = None
     controls: List[MapUiControl] = Field(default_factory=list)
 
 
@@ -74,10 +90,13 @@ class MapUiCommandRequest(BaseModel):
         description=(
             "UI map action. Supported values include paint_obstacle, paint_safe, erase_safe, "
             "clear_all, lock_green, reset_map, reset_confirm, reset_cancel, localize_scan, "
+            "direct_nav, main_rover_mode, camera_view, set_control_mode, auto_run, draw_excav_zone, "
+            "draw_deposit_zone, set_starting_zone, lock_start_frame, pick_dig_start, brush_minus, brush_plus, set_brush_radius."
+            "auto_digger, camera_overlay, drive_heading_flip, display_heading_flip, direct_nav, "
             "direct_nav, main_rover_mode, camera_view, set_control_mode, draw_excav_zone, "
-            "draw_deposit_zone, set_berm_left, set_berm_right, pick_dig_start, "
+            "draw_deposit_zone, set_starting_zone, lock_start_frame, set_berm_left, set_berm_right, pick_dig_start, "
             "brush_minus, brush_plus, set_brush_radius, "
-            "auto_digger, camera_overlay, lidar_view, lidar_only_view, drive_heading_flip, hard_drive_flip, "
+            "auto_digger, camera_overlay, drive_heading_flip, hard_drive_flip, "
             "camera_view_flip, display_heading_flip, "
             "drive_calibration_mode, drive_calibration_cancel, dig_style_cycle, "
             "dig_phase_cycle, dig_record_dig, dig_record_retract, dig_record_stop, "
@@ -85,7 +104,7 @@ class MapUiCommandRequest(BaseModel):
             "test_excavation_dig, "
             "test_excavation_left_extend, test_excavation_right_extend, "
             "test_excavation_lower, door_open, door_close, stop_actuators, "
-            "main_rover_mode, camera_view, draw_excav_zone, draw_deposit_zone, "
+            "main_rover_mode, camera_view, draw_excav_zone, draw_deposit_zone, set_starting_zone, lock_start_frame, "
             "set_berm_left, set_berm_right, pick_dig_start, brush_minus, "
             "brush_plus, set_brush_radius."
         )

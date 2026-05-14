@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.map import (
+    ActuatorUiState,
     DriveCalibrationState,
     MapFrameIngestResponse,
     MapStreamStatus,
@@ -48,10 +49,9 @@ _SUPPORTED_UI_COMMANDS = {
     "main_rover_mode",
     "camera_view",
     "set_control_mode",
+    "auto_run",
     "auto_digger",
     "camera_overlay",
-    "lidar_view",
-    "lidar_only_view",
     "drive_heading_flip",
     "hard_drive_flip",
     "camera_view_flip",
@@ -79,6 +79,8 @@ _SUPPORTED_UI_COMMANDS = {
     "camera_view",
     "draw_excav_zone",
     "draw_deposit_zone",
+    "set_starting_zone",
+    "lock_start_frame",
     "set_berm_left",
     "set_berm_right",
     "pick_dig_start",
@@ -99,8 +101,11 @@ def _default_ui_controls() -> List[MapUiControl]:
         MapUiControl(id="paint_safe", label="Paint Safe", command="paint_safe"),
         MapUiControl(id="erase_safe", label="Erase Safe", command="erase_safe"),
         MapUiControl(id="clear_all", label="Clear All", command="clear_all"),
+        MapUiControl(id="auto_run", label="Start Auto Run", command="auto_run"),
         MapUiControl(id="draw_excav_zone", label="Draw Excav Zone", command="draw_excav_zone"),
         MapUiControl(id="draw_deposit_zone", label="Draw Deposit Zone", command="draw_deposit_zone"),
+        MapUiControl(id="set_starting_zone", label="Set Starting Zone", command="set_starting_zone"),
+        MapUiControl(id="lock_start_frame", label="Lock Start Frame", command="lock_start_frame"),
         MapUiControl(id="set_berm_left", label="Berm: Left", command="set_berm_left"),
         MapUiControl(id="set_berm_right", label="Berm: Right", command="set_berm_right"),
     ]
@@ -146,6 +151,14 @@ def _read_ui_state() -> MapUiStateResponse:
         except Exception:
             drive_calibration = None
 
+    actuators = None
+    actuators_raw = payload.get("actuators")
+    if isinstance(actuators_raw, dict):
+        try:
+            actuators = ActuatorUiState(**actuators_raw)
+        except Exception:
+            actuators = None
+
     return MapUiStateResponse(
         available=bool(payload.get("available", True)),
         source=payload.get("source"),
@@ -158,6 +171,7 @@ def _read_ui_state() -> MapUiStateResponse:
         brush_radius_min=payload.get("brush_radius_min"),
         brush_radius_max=payload.get("brush_radius_max"),
         drive_calibration=drive_calibration,
+        actuators=actuators,
         controls=controls,
     )
 
