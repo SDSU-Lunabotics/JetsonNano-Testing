@@ -79,6 +79,8 @@ _SUPPORTED_UI_COMMANDS = {
     "camera_view",
     "draw_excav_zone",
     "draw_deposit_zone",
+    "set_starting_zone",
+    "lock_start_frame",
     "set_berm_left",
     "set_berm_right",
     "pick_dig_start",
@@ -102,6 +104,8 @@ def _default_ui_controls() -> List[MapUiControl]:
         MapUiControl(id="auto_run", label="Start Auto Run", command="auto_run"),
         MapUiControl(id="draw_excav_zone", label="Draw Excav Zone", command="draw_excav_zone"),
         MapUiControl(id="draw_deposit_zone", label="Draw Deposit Zone", command="draw_deposit_zone"),
+        MapUiControl(id="set_starting_zone", label="Set Starting Zone", command="set_starting_zone"),
+        MapUiControl(id="lock_start_frame", label="Lock Start Frame", command="lock_start_frame"),
         MapUiControl(id="set_berm_left", label="Berm: Left", command="set_berm_left"),
         MapUiControl(id="set_berm_right", label="Berm: Right", command="set_berm_right"),
     ]
