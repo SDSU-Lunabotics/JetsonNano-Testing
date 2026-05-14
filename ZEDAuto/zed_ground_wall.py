@@ -9122,7 +9122,7 @@ def main():
                             cv2.LINE_AA,
                         )
 
-                    if camera_publisher is not None and not driver_priority_active and not low_latency_mode:
+                    if camera_publisher is not None and not driver_priority_active and (not low_latency_mode or args.camera_only):
                         camera_publisher.push_frame(vis)
 
                     if not args.no_gui:
