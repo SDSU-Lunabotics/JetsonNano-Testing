@@ -761,6 +761,8 @@ def main():
         except Exception as exc:
             print(f"IMU heading fallback unavailable: {exc}")
 
+    resizable_flags = 0
+    fixed_flags = 0
     if not HAS_CV2:
         print("OpenCV not found. Install it for live visualization:")
         print("  sudo apt install -y python3-opencv")
@@ -1651,9 +1653,17 @@ def main():
     demo_rover_heading_rad = 0.0
     manual_fwd = 0.0
     manual_turn = 0.0
-    manual_mode = bool(args.manual_start)
+    manual_mode = True
+    no_mapping_mode = True
     if manual_mode:
         print("Manual drive mode: ON (startup)")
+    if no_mapping_mode:
+        print("No Mapping mode: ON (startup, camera-only path)")
+        if HAS_CV2 and (not args.no_gui):
+            try:
+                cv2.destroyWindow("ZED Occupancy Map (XZ)")
+            except Exception:
+                pass
     last_w_time = 0.0
     last_s_time = 0.0
     last_a_time = 0.0
@@ -1676,6 +1686,7 @@ def main():
     ds_joystick_fwd = 0.0           # DS controller forward axis from NT
     ds_joystick_turn = 0.0          # DS controller turn axis from NT
     driver_priority_active = False
+    driver_priority_suppressed_until = 0.0
     status_cmd_enabled = False
     status_cmd_fwd = 0.0
     status_cmd_turn = 0.0
@@ -1704,6 +1715,15 @@ def main():
     controller_macro_preview_active = False
     controller_macro_preview_started_at = 0.0
     controller_macro_preview_name = None
+    low_latency_mode = False
+    low_latency_restore_state = {
+        "camera_overlay_enabled": True,
+        "human_detect_enabled": False,
+        "rock_detect_enabled": False,
+        "camera_publish_enabled": True,
+        "map_publish_enabled": True,
+    }
+    digger_speed_scale = 1.0
     actuator_left_extension_pct = None
     actuator_right_extension_pct = None
     actuator_left_extension_inches = None
@@ -2216,6 +2236,49 @@ def main():
             print("Manual drive mode: ON (localization canceled, auto paused)")
         else:
             print("Manual drive mode: OFF (auto resumed)")
+
+    def set_no_mapping_mode(enabled, source="button"):
+        nonlocal no_mapping_mode, map_window_ready
+        enabled = bool(enabled)
+        mining_running_now = mining.state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+        if enabled and mining_running_now:
+            print("No Mapping mode unavailable while Auto Run is active.")
+            return
+        if no_mapping_mode == enabled:
+            return
+        no_mapping_mode = enabled
+        if not args.no_gui and HAS_CV2:
+            try:
+                if enabled:
+                    cv2.destroyWindow("ZED Occupancy Map (XZ)")
+                    map_window_ready = False
+                else:
+                    cv2.namedWindow("ZED Occupancy Map (XZ)", fixed_flags)
+                    map_window_ready = False
+            except Exception:
+                pass
+        state = "ON" if no_mapping_mode else "OFF"
+        print(f"No Mapping mode: {state} via {source}.")
+        publish_map_ui_state(force=True)
+
+    def suppress_driver_priority(seconds, source="auto"):
+        nonlocal driver_priority_suppressed_until, driver_priority_active
+        seconds = max(0.0, float(seconds))
+        if seconds <= 0.0:
+            return
+        driver_priority_suppressed_until = max(
+            float(driver_priority_suppressed_until),
+            time.time() + seconds,
+        )
+        driver_priority_active = False
+        print(f"Driver-priority override suppressed for {seconds:.1f}s ({source}).")
 
     def update_localization_scan_state():
         return
@@ -2746,6 +2809,35 @@ def main():
         print(f"Rock YOLO {'ENABLED' if enabled else 'DISABLED'} via {source}.")
         publish_map_ui_state(force=True)
 
+    def set_low_latency_mode(enabled, source="button"):
+        nonlocal low_latency_mode, low_latency_restore_state
+        enabled = bool(enabled)
+        if low_latency_mode == enabled:
+            return
+        if enabled:
+            low_latency_restore_state = {
+                "camera_overlay_enabled": bool(camera_overlay_enabled),
+                "human_detect_enabled": bool(human_detect_enabled),
+                "rock_detect_enabled": bool(rock_detect_enabled),
+                "camera_publish_enabled": bool(camera_publisher is not None),
+                "map_publish_enabled": bool(map_publisher is not None),
+            }
+            set_camera_overlay_enabled(False, source)
+            set_human_detect_enabled(False, source)
+            set_rock_detect_enabled(False, source)
+            low_latency_mode = True
+            print("Low latency mode ENABLED via %s. Heavy detection and publish paths reduced." % source)
+        else:
+            low_latency_mode = False
+            if low_latency_restore_state.get("camera_overlay_enabled", False):
+                set_camera_overlay_enabled(True, source)
+            if low_latency_restore_state.get("human_detect_enabled", False):
+                set_human_detect_enabled(True, source)
+            if low_latency_restore_state.get("rock_detect_enabled", False):
+                set_rock_detect_enabled(True, source)
+            print("Low latency mode DISABLED via %s." % source)
+        publish_map_ui_state(force=True)
+
     def save_calibration_settings(result_text):
         drive_calibration.save_runtime_settings(
             bool(args.drive_heading_flip),
@@ -2915,6 +3007,15 @@ def main():
             f"Auto turn speed set to {value:.2f} via {source} "
             f"(turn_k={args.drive_turn_k:.2f}, max_turn={args.drive_max_turn_cmd:.2f})."
         )
+        publish_map_ui_state(force=True)
+
+    def set_digger_speed(value, source="slider"):
+        nonlocal digger_speed_scale
+        value = max(0.10, min(1.00, float(value)))
+        if abs(float(digger_speed_scale) - value) <= 1e-6:
+            return
+        digger_speed_scale = value
+        print(f"Digger speed set to {digger_speed_scale:.2f} via {source}.")
         publish_map_ui_state(force=True)
 
     def set_display_heading_flip(enabled, source="button"):
@@ -3610,6 +3711,13 @@ def main():
                     "enabled": bool(rock_model is not None),
                 },
                 {
+                    "id": "low_latency_mode",
+                    "label": "Low Latency",
+                    "command": "low_latency_mode",
+                    "active": bool(low_latency_mode),
+                    "enabled": True,
+                },
+                {
                     "id": "drive_heading_flip",
                     "label": "Flip Drive",
                     "command": "drive_heading_flip",
@@ -4294,6 +4402,31 @@ def main():
                 frac = (x - x0) / max(1, x1 - x0)
                 set_turn_speed(0.20 + frac * 0.80, "slider")
                 return
+        rect = status_button_rects.get("digger_speed_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = (x - x0) / max(1, x1 - x0)
+                set_digger_speed(0.10 + frac * 0.90, "slider")
+                return
+        rect = status_button_rects.get("manual_mode_toggle")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_manual_drive_mode(not manual_mode, "setup button")
+                return
+        rect = status_button_rects.get("no_mapping_mode")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_no_mapping_mode(not no_mapping_mode, "setup button")
+                return
+        rect = status_button_rects.get("setup_low_latency_mode")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_low_latency_mode(not low_latency_mode, "setup button")
+                return
         if is_drag:
             return
         rect = status_button_rects.get("dig_name_input")
@@ -4341,6 +4474,8 @@ def main():
                     manual_mode = False
                     manual_fwd = 0.0
                     manual_turn = 0.0
+                    set_no_mapping_mode(False, "auto run button")
+                    suppress_driver_priority(1.25, "auto run button")
                     if demo_auto_enabled:
                         demo_rover_pos_map = None
                     mining.start_run()
@@ -4448,6 +4583,12 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 set_rock_detect_enabled(not rock_detect_enabled, "button")
+                return
+        rect = status_button_rects.get("low_latency_mode")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                set_low_latency_mode(not low_latency_mode, "button")
                 return
         rect = status_button_rects.get("drive_heading_flip")
         if rect is not None:
@@ -4804,6 +4945,8 @@ def main():
                 print("Auto Run: ABORTED via external command")
             else:
                 emergency_stop = False
+                set_no_mapping_mode(False, "auto run external command")
+                suppress_driver_priority(1.25, "auto run external command")
                 if demo_auto_enabled:
                     demo_rover_pos_map = None
                 mining.start_run()
@@ -4871,6 +5014,8 @@ def main():
             set_human_detect_enabled(not human_detect_enabled, "external command")
         elif action == "rock_detect_toggle":
             set_rock_detect_enabled(not rock_detect_enabled, "external command")
+        elif action == "low_latency_mode":
+            set_low_latency_mode(not low_latency_mode, "external command")
         elif action == "drive_heading_flip":
             set_drive_heading_flip(not args.drive_heading_flip, "external command")
         elif action == "hard_drive_flip":
@@ -5065,6 +5210,10 @@ def main():
                 excavator_enabled = True
             if auto_excavation_pattern is not None and playback_cmd is None:
                 excavator_enabled = excavator_enabled or bool(auto_excavation_pattern.get("digger"))
+            if excavator_enabled:
+                digger_pwm_period_sec = 0.25
+                digger_phase = (now % digger_pwm_period_sec) / digger_pwm_period_sec
+                excavator_enabled = bool(digger_phase < max(0.10, min(1.00, float(digger_speed_scale))))
             excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
@@ -5250,6 +5399,8 @@ def main():
             args.driver_priority_mode
             and (abs(ds_joystick_fwd) >= threshold or abs(ds_joystick_turn) >= threshold)
         )
+        if time.time() < float(driver_priority_suppressed_until):
+            driver_priority_active = False
         return ds_joystick_fwd, ds_joystick_turn
 
     def nt_connections_summary():
@@ -5616,6 +5767,7 @@ def main():
         jump_bar_h = 40
         jump_gap = 10
         jump_buttons = [
+            ("jump_setup", "Setup"),
             ("jump_map_tools", "Map"),
             ("jump_zones_camera", "Zones"),
             ("jump_calibration", "Calibration"),
@@ -5742,6 +5894,44 @@ def main():
 
         section_offsets = {}
         cursor_y = 12
+
+        setup_section_h = 72 + (button_h + 10) + 18
+        setup_body_y = section_frame(
+            cursor_y,
+            setup_section_h,
+            "Setup",
+            "Startup and low-latency camera-only controls for manual operation.",
+            (170, 210, 255),
+            "setup",
+        )
+        manual_mode_rect = grid_rect(setup_body_y, 0, 0)
+        no_mapping_rect = grid_rect(setup_body_y, 0, 1)
+        setup_low_latency_rect = grid_rect(setup_body_y, 0, 2)
+        draw_control_button(
+            manual_mode_rect,
+            "Manual: ON" if manual_mode else "Manual",
+            True,
+            manual_mode,
+            (0, 130, 210),
+            (120, 220, 255),
+        )
+        draw_control_button(
+            no_mapping_rect,
+            "No Mapping: ON" if no_mapping_mode else "No Mapping",
+            True,
+            no_mapping_mode,
+            (0, 150, 90),
+            (110, 255, 180),
+        )
+        draw_control_button(
+            setup_low_latency_rect,
+            "Low Latency: ON" if low_latency_mode else "Low Latency",
+            True,
+            low_latency_mode,
+            (80, 60, 180),
+            (180, 160, 255),
+        )
+        cursor_y += setup_section_h + card_gap
 
         map_section_h = 72 + 5 * (button_h + 10) + 84
         map_body_y = section_frame(
@@ -5948,6 +6138,15 @@ def main():
             (180, 60, 20),
             (255, 180, 120),
         )
+        low_latency_rect = grid_rect(zones_body_y, 3, 2)
+        draw_control_button(
+            low_latency_rect,
+            "Low Latency: ON" if low_latency_mode else "Low Latency",
+            True,
+            low_latency_mode,
+            (80, 60, 180),
+            (180, 160, 255),
+        )
         cursor_y += zones_section_h + card_gap
 
         cal_section_h = 72 + 5 * (button_h + 10) + 272
@@ -6148,7 +6347,7 @@ def main():
         )
         cursor_y += cal_section_h + card_gap
 
-        actuators_section_h = 72 + 3 * (button_h + 10) + 102
+        actuators_section_h = 72 + 4 * (button_h + 10) + 118
         actuators_body_y = section_frame(
             cursor_y,
             actuators_section_h,
@@ -6165,6 +6364,10 @@ def main():
         door_open_rect = grid_rect(actuators_body_y, 2, 0)
         door_close_rect = grid_rect(actuators_body_y, 2, 1)
         test_excavation_pattern_rect = grid_rect(actuators_body_y, 2, 2)
+        digger_slider_y = actuators_body_y + 3 * (button_h + 10) + 10
+        digger_slider_x0 = card_x0 + card_inner
+        digger_slider_x1 = card_x1 - card_inner
+        digger_speed_slider_rect = (digger_slider_x0, digger_slider_y, digger_slider_x1, digger_slider_y + 44)
         draw_control_button(
             test_excavation_lower_rect,
             "Lower Cycle: ON" if test_excavation_lower_active else "Lower Cycle",
@@ -6229,6 +6432,33 @@ def main():
             (90, 40, 160),
             (205, 150, 255),
         )
+        put_control_line(
+            f"Digger speed: {float(digger_speed_scale):.2f}",
+            digger_slider_y - 2,
+            (255, 220, 150),
+            0.42,
+            x=card_x0 + card_inner,
+        )
+        cv2.rectangle(controls, (digger_slider_x0, digger_slider_y + 18), (digger_slider_x1, digger_slider_y + 34), (60, 60, 60), -1)
+        cv2.rectangle(controls, (digger_slider_x0, digger_slider_y + 18), (digger_slider_x1, digger_slider_y + 34), (120, 120, 120), 1)
+        digger_speed_frac = (max(0.10, min(1.00, float(digger_speed_scale))) - 0.10) / 0.90
+        digger_speed_knob_x = int(digger_slider_x0 + digger_speed_frac * (digger_slider_x1 - digger_slider_x0))
+        cv2.circle(controls, (digger_speed_knob_x, digger_slider_y + 26), 11, (255, 210, 70), -1)
+        cv2.circle(controls, (digger_speed_knob_x, digger_slider_y + 26), 11, (255, 245, 180), 1)
+        put_control_line(
+            "Slower",
+            digger_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=digger_slider_x0,
+        )
+        put_control_line(
+            "Faster",
+            digger_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=max(digger_slider_x0, digger_slider_x1 - 44),
+        )
         if excavation_pattern_test_active:
             _pattern_state = excavation_pattern_state(time.time())
             door_mode_text = (
@@ -6240,7 +6470,7 @@ def main():
             door_mode_text = "Manual door override active" if (test_door_open_active or test_door_close_active) else "Door auto: closes for dig, opens for deposit"
         put_control_line(
             door_mode_text,
-            actuators_body_y + 3 * (button_h + 10) + 10,
+            digger_slider_y + 76,
             (220, 232, 255),
             0.41,
             x=card_x0 + card_inner,
@@ -6506,6 +6736,7 @@ def main():
             )
         cursor_y += dig_section_h + 8
 
+        status_section_jump_targets["jump_setup"] = int(section_offsets.get("setup", 0))
         status_section_jump_targets["jump_map_tools"] = int(section_offsets.get("map_tools", 0))
         status_section_jump_targets["jump_zones_camera"] = int(section_offsets.get("zones_camera", 0))
         status_section_jump_targets["jump_calibration"] = int(section_offsets.get("calibration", 0))
@@ -6520,6 +6751,9 @@ def main():
         status_button_rects["controls_viewport"] = (0, controls_top, panel_w - 1, controls_bottom)
 
         for name, rect in (
+            ("manual_mode_toggle", manual_mode_rect),
+            ("no_mapping_mode", no_mapping_rect),
+            ("setup_low_latency_mode", setup_low_latency_rect),
             ("auto_run", auto_run_rect),
             ("auto_digger", auto_digger_rect),
             ("test_excavation_left_extend", test_excavation_left_extend_rect),
@@ -6548,6 +6782,7 @@ def main():
             ("camera_overlay", camera_overlay_rect),
             ("human_detect_toggle", human_detect_rect),
             ("rock_detect_toggle", rock_detect_rect),
+            ("low_latency_mode", low_latency_rect),
             ("drive_heading_flip", drive_heading_flip_rect),
             ("hard_drive_flip", hard_drive_flip_rect),
             ("steering_flip", steering_flip_rect),
@@ -6558,6 +6793,7 @@ def main():
             ("scan_start_frame", scan_start_frame_rect),
             ("drive_speed_slider", drive_speed_slider_rect),
             ("turn_speed_slider", turn_speed_slider_rect),
+            ("digger_speed_slider", digger_speed_slider_rect),
             ("camera_view_flip", camera_view_flip_rect),
             ("display_heading_flip", display_heading_flip_rect),
             ("drive_calibration_mode", drive_calibration_mode_rect),
@@ -7345,7 +7581,7 @@ def main():
                             print(start_frame_last_status)
                     publish_map_ui_state(force=True)
                 if xyz.size > 0:
-                    if map_integration_ok:
+                    if map_integration_ok and (not no_mapping_mode):
                         # Transform to world frame if tracking is enabled.
                         xyz_world = (R_world_cam @ xyz.T).T + t_map
                         x = -xyz_world[:, 0]
@@ -7552,16 +7788,18 @@ def main():
                                             )
                         except Exception:
                             pass  # never crash the main loop on detection errors
-                    map_vis = occ_map.render(whole_mode=whole_map_enabled)
-                    # Smooth mode: remove isolated red-dot noise from display.
-                    if smooth_map_enabled and map_vis is not None:
-                        kernel = np.ones((3, 3), np.uint8)
-                        red_ch = map_vis[:, :, 2]
-                        red_mask = (red_ch > 100).astype(np.uint8)
-                        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
-                        map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
-                        map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
-                        map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
+                    map_vis = None
+                    if not no_mapping_mode:
+                        map_vis = occ_map.render(whole_mode=whole_map_enabled)
+                        # Smooth mode: remove isolated red-dot noise from display.
+                        if smooth_map_enabled and map_vis is not None:
+                            kernel = np.ones((3, 3), np.uint8)
+                            red_ch = map_vis[:, :, 2]
+                            red_mask = (red_ch > 100).astype(np.uint8)
+                            red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
+                            map_vis[:, :, 2] = np.where(red_mask, red_ch, 0)
+                            map_vis[:, :, 0] = np.where(red_mask, map_vis[:, :, 0], 0)
+                            map_vis[:, :, 1] = np.where(red_mask, map_vis[:, :, 1], 0)
                     if map_vis is not None and start_frame_last_map_points:
                         tag_pts = []
                         for item in start_frame_last_map_points:
@@ -8293,8 +8531,10 @@ def main():
                     if mesh_viewer is not None:
                         mesh_viewer.poll()
                 else:
-                    map_vis = occ_map.render(whole_mode=whole_map_enabled)
-                    if args.heatmap:
+                    map_vis = None
+                    if not no_mapping_mode:
+                        map_vis = occ_map.render(whole_mode=whole_map_enabled)
+                    if args.heatmap and map_vis is not None:
                         heatmap_vis = heatmap_utils.render_heatmap(
                             occ_map,
                             mode=args.heatmap_mode,
@@ -8570,7 +8810,7 @@ def main():
                             cv2.LINE_AA,
                         )
 
-                    if camera_publisher is not None and not driver_priority_active:
+                    if camera_publisher is not None and not driver_priority_active and not low_latency_mode:
                         camera_publisher.push_frame(vis)
 
                     if not args.no_gui:
@@ -8587,7 +8827,7 @@ def main():
                             (occ_map.grid_w * args.map_scale, occ_map.grid_h * args.map_scale),
                             interpolation=cv2.INTER_NEAREST,
                         )
-                    if map_publisher is not None:
+                    if map_publisher is not None and not low_latency_mode:
                         map_publisher.push_frame(display_map_vis)
                     process_external_map_command()
                     publish_map_ui_state()
@@ -8624,6 +8864,9 @@ def main():
                                 interpolation=cv2.INTER_NEAREST,
                             )
                         cv2.imshow("ZED Heatmap (XZ)", heatmap_show)
+                elif no_mapping_mode:
+                    process_external_map_command()
+                    publish_map_ui_state()
                 if not args.no_gui:
                     status_panel = render_status_panel(rover_row_col)
                     last_status_panel_shape = status_panel.shape[:2]
@@ -8714,14 +8957,16 @@ def main():
                     if raw_key in END_KEYS:
                         set_status_scroll_to(status_scroll_max)
                     if key == ord("1"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_setup", 0))
                     if key == ord("2"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
                     if key == ord("3"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
                     if key == ord("4"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
                     if key == ord("5"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                    if key == ord("6"):
                         set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)

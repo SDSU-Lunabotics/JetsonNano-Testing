@@ -598,7 +598,7 @@ class ControllerMacroLibrary:
         self.recording_samples = []
         self.last_recorded_signature = None
         self.last_recorded_t = -1.0
-        self.sample_period_sec = 0.05
+        self.sample_period_sec = 0.02
         self._load()
 
     def _default_payload(self):
@@ -802,10 +802,23 @@ class ControllerMacroLibrary:
         idx = bisect.bisect_right(times, float(elapsed_sec)) - 1
         idx = max(0, min(idx, len(samples) - 1))
         sample = samples[idx]
+        next_idx = min(idx + 1, len(samples) - 1)
+        next_sample = samples[next_idx]
+        t0 = float(sample.get("t", 0.0))
+        t1 = float(next_sample.get("t", t0))
+        alpha = 0.0
+        if next_idx != idx and t1 > t0:
+            alpha = max(0.0, min(1.0, (float(elapsed_sec) - t0) / (t1 - t0)))
+
+        def _lerp(key):
+            v0 = float(sample.get(key, 0.0))
+            v1 = float(next_sample.get(key, v0))
+            return (1.0 - alpha) * v0 + alpha * v1
+
         return {
             "macro_name": macro["name"],
-            "fwd": float(sample.get("fwd", 0.0)),
-            "turn": float(sample.get("turn", 0.0)),
+            "fwd": float(_lerp("fwd")),
+            "turn": float(_lerp("turn")),
             "digger_on": bool(sample.get("digger_on", False)),
             "lower_on": bool(sample.get("lower_on", False)),
             "left_extend_on": bool(sample.get("left_extend_on", False)),
