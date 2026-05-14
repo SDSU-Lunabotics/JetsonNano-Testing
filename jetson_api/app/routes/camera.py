@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 
 from app.core.settings import settings
 from app.schemas.camera import (
+    CameraBackend,
     CameraStatus,
     CameraHeartbeatRequest,
     CameraHeartbeatResponse,
@@ -134,12 +135,13 @@ def post_camera_heartbeat(req: CameraHeartbeatRequest) -> CameraHeartbeatRespons
 async def post_camera_frame(
     request: Request,
     source: str = Query(default="zed_ground_wall"),
+    backend: CameraBackend = Query(default="zed"),
     timestamp_ms: Optional[int] = Query(default=None, ge=0),
 ) -> CameraFrameIngestResponse:
     payload = await request.body()
     frame_seq = camera_service.ingest_external_frame(
         payload,
-        backend="zed",
+        backend=backend,
         source=source,
         source_timestamp_ms=timestamp_ms,
     )
