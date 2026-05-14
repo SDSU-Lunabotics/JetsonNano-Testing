@@ -587,6 +587,11 @@ def main():
     parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
     parser.add_argument("--manual-start", action="store_true", help="Start in keyboard manual drive mode")
     parser.add_argument(
+        "--camera-only",
+        action="store_true",
+        help="Run a lightweight camera/controller mode: skip tracking, depth, mapping, and AI detection.",
+    )
+    parser.add_argument(
         "--nt-timeout-sec",
         type=float,
         default=3.0,
@@ -675,6 +680,14 @@ def main():
         help="Smoothing factor (0-1) for landmark-based pose correction while tracking is lost.",
     )
     args = parser.parse_args()
+
+    if args.camera_only:
+        args.tracking = False
+        args.area_memory = False
+        args.human_detect = False
+        args.rock_model = ""
+        args.landmark_memory = False
+        args.manual_start = True
 
     if args.rviz_config is None:
         args.rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
@@ -778,7 +791,8 @@ def main():
             resizable_flags = cv2.WINDOW_NORMAL | gui_normal
             fixed_flags = cv2.WINDOW_AUTOSIZE | gui_normal
             cv2.namedWindow("ZED Ground/Obstacle Segmentation", resizable_flags)
-            cv2.namedWindow("ZED Occupancy Map (XZ)", fixed_flags)
+            if not args.camera_only:
+                cv2.namedWindow("ZED Occupancy Map (XZ)", fixed_flags)
             cv2.namedWindow("ZED Drive Status", fixed_flags)
             cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
         except Exception:
@@ -1715,7 +1729,7 @@ def main():
     controller_macro_preview_active = False
     controller_macro_preview_started_at = 0.0
     controller_macro_preview_name = None
-    low_latency_mode = False
+    low_latency_mode = bool(args.camera_only)
     low_latency_restore_state = {
         "camera_overlay_enabled": True,
         "human_detect_enabled": False,
@@ -7173,6 +7187,199 @@ def main():
             update_localization_scan_state()
             refresh_camera_servo_state()
             refresh_ds_joystick_state()
+
+            if args.camera_only:
+                zed.retrieve_image(image_left, sl.VIEW.LEFT)
+
+                if sd is not None:
+                    now = time.time()
+                    if (now - last_drive_send) >= (1.0 / max(1.0, args.drive_rate_hz)):
+                        last_drive_send = now
+                        refresh_ds_joystick_state()
+                        if controller_macros.recording:
+                            record_fwd, record_turn = (
+                                mix_ds_drive(manual_fwd, manual_turn)
+                                if manual_mode else (float(ds_joystick_fwd), float(ds_joystick_turn))
+                            )
+                            if abs(record_fwd) < 0.05:
+                                record_fwd = 0.0
+                            if abs(record_turn) < 0.05:
+                                record_turn = 0.0
+                            controller_macros.capture_sample(
+                                now,
+                                record_fwd,
+                                record_turn,
+                                test_excavation_dig_active,
+                                test_excavation_lower_active,
+                                test_excavation_left_extend_active,
+                                test_excavation_right_extend_active,
+                                test_door_open_active,
+                                test_door_close_active,
+                            )
+                        if emergency_stop:
+                            reset_auto_drive_shape(now)
+                            send_nt_command(False, 0.0, 0.0, 0.1)
+                        elif excavation_pattern_test_active:
+                            pattern_state = excavation_pattern_state(now)
+                            if pattern_state is None or pattern_state.get("done"):
+                                excavation_pattern_test_active = False
+                                excavation_pattern_test_started_at = 0.0
+                                reset_auto_drive_shape(now)
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                                print("Excavation pattern test completed.")
+                                publish_map_ui_state(force=True)
+                            else:
+                                reset_auto_drive_shape(now)
+                                send_nt_command(
+                                    True,
+                                    float(pattern_state.get("fwd", 0.0)),
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
+                        elif test_drive_forward_active:
+                            if now >= test_drive_forward_until:
+                                test_drive_forward_active = False
+                                test_drive_forward_until = 0.0
+                                reset_auto_drive_shape(now)
+                                send_nt_command(False, 0.0, 0.0, 0.1)
+                                print("Forward drive test completed.")
+                                publish_map_ui_state(force=True)
+                            else:
+                                reset_auto_drive_shape(now)
+                                send_nt_command(
+                                    True,
+                                    max(0.0, min(1.0, float(args.drive_speed))) * 0.45,
+                                    0.0,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
+                        elif controller_macro_preview_active:
+                            elapsed_preview = now - float(controller_macro_preview_started_at)
+                            controller_macro_playback_cmd = controller_macros.playback_sample(elapsed_preview)
+                            macro_duration = 0.0
+                            if controller_macro_playback_cmd is not None:
+                                macro_duration = float(controller_macro_playback_cmd.get("duration_sec", 0.0))
+                            if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
+                                stop_controller_macro_preview("auto", completed=True)
+                            else:
+                                reset_auto_drive_shape(now)
+                                preview_fwd, preview_turn = mix_ds_drive(
+                                    controller_macro_playback_cmd["fwd"],
+                                    controller_macro_playback_cmd["turn"],
+                                )
+                                send_nt_command(
+                                    True,
+                                    preview_fwd,
+                                    preview_turn,
+                                    1.0 / max(1.0, args.drive_rate_hz),
+                                )
+                        elif manual_mode:
+                            reset_auto_drive_shape(now)
+                            _man_fwd, _man_turn = mix_ds_drive(manual_fwd, manual_turn)
+                            send_nt_command(
+                                True,
+                                _man_fwd,
+                                _man_turn,
+                                1.0 / max(1.0, args.drive_rate_hz),
+                            )
+                        else:
+                            reset_auto_drive_shape(now)
+                            send_nt_command(False, 0.0, 0.0, 0.1)
+
+                if HAS_CV2:
+                    img = image_left.get_data()
+                    vis = None
+                    if img is not None:
+                        if img.ndim == 2:
+                            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        elif img.ndim == 3:
+                            if img.shape[2] == 4:
+                                vis = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                            elif img.shape[2] == 1:
+                                vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                            elif img.shape[2] >= 3:
+                                vis = img[:, :, :3].copy()
+                    if vis is not None:
+                        cv2.putText(
+                            vis,
+                            "CAMERA ONLY",
+                            (10, 24),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 220, 255),
+                            2,
+                            cv2.LINE_AA,
+                        )
+                        if not args.no_gui:
+                            cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                    process_external_map_command()
+                    publish_map_ui_state()
+                    if not args.no_gui:
+                        status_panel = render_status_panel(None)
+                        last_status_panel_shape = status_panel.shape[:2]
+                        cv2.imshow("ZED Drive Status", status_panel)
+                        if not status_window_ready:
+                            cv2.setMouseCallback("ZED Drive Status", on_status_click)
+                            status_window_ready = True
+                        raw_key = cv2.waitKeyEx(1)
+                        key = (raw_key & 0xFF) if raw_key >= 0 else -1
+                        if key == ord("q"):
+                            break
+                        if key == ord("m"):
+                            set_manual_drive_mode(not manual_mode, "key")
+                        if key == ord("u"):
+                            set_main_rover_mode(not args.main_rover_mode)
+                        if raw_key in UP_KEYS:
+                            set_status_scroll(-80)
+                        if raw_key in DOWN_KEYS:
+                            set_status_scroll(80)
+                        if raw_key in PAGEUP_KEYS or key == ord("k"):
+                            set_status_scroll(-260)
+                        if raw_key in PAGEDOWN_KEYS or key == ord("j"):
+                            set_status_scroll(260)
+                        if raw_key in HOME_KEYS:
+                            set_status_scroll_to(0)
+                        if raw_key in END_KEYS:
+                            set_status_scroll_to(status_scroll_max)
+                        if key == ord("1"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_setup", 0))
+                        if key == ord("2"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
+                        if key == ord("3"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
+                        if key == ord("4"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
+                        if key == ord("5"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                        if key == ord("6"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
+                        now_key = time.time()
+                        if key == ord("w"):
+                            manual_fwd = max(0.0, min(1.0, args.drive_speed))
+                            last_w_time = now_key
+                        if key == ord("s"):
+                            manual_fwd = -max(0.0, min(1.0, args.drive_speed))
+                            last_s_time = now_key
+                        if key == ord("a"):
+                            manual_turn = max(0.0, min(1.0, args.drive_speed))
+                            last_a_time = now_key
+                        if key == ord("d"):
+                            manual_turn = -max(0.0, min(1.0, args.drive_speed))
+                            last_d_time = now_key
+                        if key == ord("x"):
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                        if key == ord(" "):
+                            emergency_stop = True
+                            manual_fwd = 0.0
+                            manual_turn = 0.0
+                        if manual_mode:
+                            if now_key - last_w_time > key_hold_timeout and now_key - last_s_time > key_hold_timeout:
+                                manual_fwd = 0.0
+                            if now_key - last_a_time > key_hold_timeout and now_key - last_d_time > key_hold_timeout:
+                                manual_turn = 0.0
+                    else:
+                        time.sleep(0.01)
+                    continue
 
             # Retrieve point cloud
             depth_status = zed.retrieve_measure(point_cloud, sl.MEASURE.XYZRGBA)
