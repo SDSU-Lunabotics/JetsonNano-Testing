@@ -280,6 +280,26 @@ def _parse_motor_warnings(raw_warnings: Any) -> List[MotorWarning]:
 
 
 def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetry:
+    left_extension_inches = _optional_float(values.get("Excav/BotLeftInches"))
+    if left_extension_inches is None:
+        left_extension_inches = _optional_float(values.get("Jetson/ExcavatorLeftExtensionInches"))
+
+    right_extension_inches = _optional_float(values.get("Excav/BotRightInches"))
+    if right_extension_inches is None:
+        right_extension_inches = _optional_float(values.get("Jetson/ExcavatorRightExtensionInches"))
+
+    left_extension_pct = _optional_float(values.get("Excav/BotLeftExtensionPct"))
+    if left_extension_pct is None:
+        left_extension_pct = _optional_float(values.get("Jetson/ExcavatorLeftExtensionPct"))
+
+    right_extension_pct = _optional_float(values.get("Excav/BotRightExtensionPct"))
+    if right_extension_pct is None:
+        right_extension_pct = _optional_float(values.get("Jetson/ExcavatorRightExtensionPct"))
+
+    position_calibrated = _optional_bool(values.get("Excav/BottomPositionCalibrated"))
+    if position_calibrated is None:
+        position_calibrated = _optional_bool(values.get("Jetson/ExcavatorBottomPositionCalibrated"))
+
     return JetsonMotorTelemetry(
         drive=DriveTelemetry(
             left_front=_drive_motor(values, "Kraken/LeftFront"),
@@ -297,8 +317,22 @@ def _build_jetson_motor_telemetry(values: Dict[str, Any]) -> JetsonMotorTelemetr
             belt_output=_optional_float(values.get("Excav/BeltOutput")),
             belt_leader_torque_current_a=_optional_float(values.get("Excav/BeltLeaderTorqueCurrentA")),
             belt_follower_torque_current_a=_optional_float(values.get("Excav/BeltFollowerTorqueCurrentA")),
+            left_extension_inches=left_extension_inches,
+            right_extension_inches=right_extension_inches,
+            left_extension_pct=left_extension_pct,
+            right_extension_pct=right_extension_pct,
+            position_calibrated=position_calibrated,
             bottom_left_counts=_optional_float(values.get("Excav/BotLeftCounts")),
             bottom_right_counts=_optional_float(values.get("Excav/BotRightCounts")),
+            bottom_left_inches=_optional_float(values.get("Excav/BotLeftInches")),
+            bottom_right_inches=_optional_float(values.get("Excav/BotRightInches")),
+            bottom_left_extension_pct=_optional_float(values.get("Excav/BotLeftExtensionPct")),
+            bottom_right_extension_pct=_optional_float(values.get("Excav/BotRightExtensionPct")),
+            jetson_left_extension_inches=_optional_float(values.get("Jetson/ExcavatorLeftExtensionInches")),
+            jetson_right_extension_inches=_optional_float(values.get("Jetson/ExcavatorRightExtensionInches")),
+            jetson_left_extension_pct=_optional_float(values.get("Jetson/ExcavatorLeftExtensionPct")),
+            jetson_right_extension_pct=_optional_float(values.get("Jetson/ExcavatorRightExtensionPct")),
+            jetson_bottom_position_calibrated=_optional_bool(values.get("Jetson/ExcavatorBottomPositionCalibrated")),
             bottom_diff_counts=_optional_float(values.get("Excav/BottomDiffCounts")),
             sync_fault=_optional_bool(values.get("Excav/SyncFault")),
             manual_bypass_sync=_optional_bool(values.get("Excav/ManualBypassSync")),
@@ -391,7 +425,16 @@ def _build_motor_health_rows(
         ),
         MotorHealth(
             motor_id=MotorId.excavator,
-            connected=True if _has_any(values, "Excav/BeltRunning", "Excav/BeltOutput", "Excav/BeltLeaderTorqueCurrentA", "Excav/BeltFollowerTorqueCurrentA", "Excav/State") else None,
+            connected=True if _has_any(
+                values,
+                "Excav/BeltRunning",
+                "Excav/BeltOutput",
+                "Excav/BeltLeaderTorqueCurrentA",
+                "Excav/BeltFollowerTorqueCurrentA",
+                "Excav/State",
+                "Jetson/ExcavatorLeftExtensionInches",
+                "Jetson/ExcavatorRightExtensionInches",
+            ) else None,
             enabled=_excavation_is_active(telemetry),
             active=_excavation_is_active(telemetry),
             current_a=_max_optional_float(
@@ -404,8 +447,22 @@ def _build_motor_health_rows(
             raw={
                 "belt_leader_torque_current_a": telemetry.excavation.belt_leader_torque_current_a,
                 "belt_follower_torque_current_a": telemetry.excavation.belt_follower_torque_current_a,
+                "left_extension_inches": telemetry.excavation.left_extension_inches,
+                "right_extension_inches": telemetry.excavation.right_extension_inches,
+                "left_extension_pct": telemetry.excavation.left_extension_pct,
+                "right_extension_pct": telemetry.excavation.right_extension_pct,
+                "position_calibrated": telemetry.excavation.position_calibrated,
                 "bottom_left_counts": telemetry.excavation.bottom_left_counts,
                 "bottom_right_counts": telemetry.excavation.bottom_right_counts,
+                "bottom_left_inches": telemetry.excavation.bottom_left_inches,
+                "bottom_right_inches": telemetry.excavation.bottom_right_inches,
+                "bottom_left_extension_pct": telemetry.excavation.bottom_left_extension_pct,
+                "bottom_right_extension_pct": telemetry.excavation.bottom_right_extension_pct,
+                "jetson_left_extension_inches": telemetry.excavation.jetson_left_extension_inches,
+                "jetson_right_extension_inches": telemetry.excavation.jetson_right_extension_inches,
+                "jetson_left_extension_pct": telemetry.excavation.jetson_left_extension_pct,
+                "jetson_right_extension_pct": telemetry.excavation.jetson_right_extension_pct,
+                "jetson_bottom_position_calibrated": telemetry.excavation.jetson_bottom_position_calibrated,
                 "bottom_diff_counts": telemetry.excavation.bottom_diff_counts,
                 "position_reference": telemetry.excavation.position_reference,
                 "bottom_position_calibrated": telemetry.excavation.bottom_position_calibrated,

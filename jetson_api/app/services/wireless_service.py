@@ -20,7 +20,7 @@ from app.services.state_service import now_ms
 class WirelessService:
     def __init__(self) -> None:
         self._state_path = Path(settings.wireless_state_file)
-        self._team_ssid = "TEAM_00"
+        self._team_ssid = "TEAM_24"
         self._bandwidth_samples: Dict[str, Tuple[int, int]] = {}
         self._load_state()
 
