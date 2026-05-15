@@ -1843,6 +1843,54 @@ def main():
         except Exception:
             pass
 
+    def handle_focused_text_input(key):
+        nonlocal dig_name_input_focused, dig_name_input_text
+        nonlocal map_size_input_focused, map_size_input_text
+
+        if dig_name_input_focused:
+            if key == 13:  # Enter
+                dig_name_input_focused = False
+                dig_name_input_text = dig_name_input_text.strip()
+                if dig_name_input_text:
+                    print(f"Dig profile name set: {dig_name_input_text}")
+            elif key == 8 or key == 127:  # Backspace/Delete
+                dig_name_input_text = dig_name_input_text[:-1]
+            elif key == 27:  # Escape
+                dig_name_input_focused = False
+            elif key >= 0:
+                ch = chr(key)
+                if ch.isalnum() or ch in " _-.":
+                    dig_name_input_text += ch
+            return True
+
+        if map_size_input_focused:
+            if key == 13:  # Enter - apply the new rover size
+                map_size_input_focused = False
+                raw = map_size_input_text.strip().lower().replace(" ", "")
+                map_size_input_text = ""
+                try:
+                    size_ft = float(raw)
+                    new_size_m = round(size_ft * 0.3048, 4)
+                    if new_size_m <= 0:
+                        raise ValueError("must be positive")
+                    args.rover_size_m = new_size_m
+                    mining.cfg["rover_size_m"] = new_size_m
+                    print(f"Rover size updated to {size_ft:.2f} ft ({new_size_m:.3f} m)")
+                except Exception as _e:
+                    print(f"Rover size parse error: {_e}. Enter a single number in feet, e.g. '2' or '1.5'.")
+            elif key == 8 or key == 127:  # Backspace/Delete
+                map_size_input_text = map_size_input_text[:-1]
+            elif key == 27:  # Escape - cancel
+                map_size_input_focused = False
+                map_size_input_text = ""
+            elif key >= 0:
+                ch = chr(key)
+                if ch in "0123456789.":
+                    map_size_input_text += ch
+            return True
+
+        return False
+
     def _json_vec3(value):
         arr = np.array(value, dtype=np.float32).reshape(3,)
         return [float(arr[0]), float(arr[1]), float(arr[2])]
@@ -7501,6 +7549,8 @@ def main():
                             status_window_ready = True
                         raw_key = cv2.waitKeyEx(1)
                         key = (raw_key & 0xFF) if raw_key >= 0 else -1
+                        if handle_focused_text_input(key):
+                            continue
                         if key == ord("q"):
                             break
                         if key == ord("m"):
@@ -9305,44 +9355,8 @@ def main():
                     raw_key = cv2.waitKeyEx(1)
                     key = (raw_key & 0xFF) if raw_key >= 0 else -1
                     # Route keys to focused text input fields first.
-                    if dig_name_input_focused:
-                        if key == 13:  # Enter
-                            dig_name_input_focused = False
-                            dig_name_input_text = dig_name_input_text.strip()
-                            if dig_name_input_text:
-                                print(f"Dig profile name set: {dig_name_input_text}")
-                        elif key == 8 or key == 127:  # Backspace/Delete
-                            dig_name_input_text = dig_name_input_text[:-1]
-                        elif key == 27:  # Escape
-                            dig_name_input_focused = False
-                        elif key >= 0:
-                            ch = chr(key)
-                            if ch.isalnum() or ch in " _-.":
-                                dig_name_input_text += ch
-                    elif map_size_input_focused:
-                        if key == 13:  # Enter — apply the new rover size
-                            map_size_input_focused = False
-                            raw = map_size_input_text.strip().lower().replace(" ", "")
-                            map_size_input_text = ""
-                            try:
-                                size_ft = float(raw)
-                                new_size_m = round(size_ft * 0.3048, 4)
-                                if new_size_m <= 0:
-                                    raise ValueError("must be positive")
-                                args.rover_size_m = new_size_m
-                                mining.cfg["rover_size_m"] = new_size_m
-                                print(f"Rover size updated to {size_ft:.2f} ft ({new_size_m:.3f} m)")
-                            except Exception as _e:
-                                print(f"Rover size parse error: {_e}. Enter a single number in feet, e.g. '2' or '1.5'.")
-                        elif key == 8 or key == 127:  # Backspace/Delete
-                            map_size_input_text = map_size_input_text[:-1]
-                        elif key == 27:  # Escape — cancel
-                            map_size_input_focused = False
-                            map_size_input_text = ""
-                        elif key >= 0:
-                            ch = chr(key)
-                            if ch in "0123456789.":
-                                map_size_input_text += ch
+                    if handle_focused_text_input(key):
+                        continue
                     else:
                         # Mining keys: r=run, t=abort. Zone boxes are button-only.
                         if key == ord("r"):
