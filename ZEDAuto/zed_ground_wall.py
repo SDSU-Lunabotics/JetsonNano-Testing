@@ -1734,27 +1734,72 @@ def main():
     controller_cycle_phase_started_at = 0.0
     controller_cycle_preview_name = None
     controller_cycle_mechanism_hold_sec = 3.0
+    controller_macro_last_tailgate_open = None
 
     def current_controller_macro_mechanism_state():
+        nonlocal controller_macro_last_tailgate_open
+        digger_on = bool(test_excavation_dig_active)
+        conveyor_on = False
+        lower_on = bool(test_excavation_lower_active)
+        left_extend_on = bool(test_excavation_left_extend_active)
+        right_extend_on = bool(test_excavation_right_extend_active)
+        door_open_state = bool(test_door_open_active)
+        door_open_pulse = bool(test_door_open_active)
+        door_close_pulse = bool(test_door_close_active)
         if sd is not None:
             try:
-                return {
-                    "digger_on": bool(sd.getBoolean("Jetson/ExcavatorEnabled", bool(test_excavation_dig_active))),
-                    "lower_on": bool(sd.getBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active))),
-                    "left_extend_on": bool(sd.getBoolean("Jetson/ExcavatorLeftExtend", bool(test_excavation_left_extend_active))),
-                    "right_extend_on": bool(sd.getBoolean("Jetson/ExcavatorRightExtend", bool(test_excavation_right_extend_active))),
-                    "door_open_on": bool(sd.getBoolean("Jetson/DoorActuatorsOpen", bool(test_door_open_active))),
-                    "door_close_on": bool(sd.getBoolean("Jetson/DoorActuatorsClose", bool(test_door_close_active))),
-                }
+                digger_on = bool(
+                    sd.getBoolean(
+                        "Jetson/ExcavatorEnabled",
+                        sd.getBoolean(
+                            "Controls/ExcavatorEnabled",
+                            sd.getBoolean("Excav/BeltRunning", bool(test_excavation_dig_active)),
+                        ),
+                    )
+                )
+                conveyor_on = bool(
+                    sd.getBoolean(
+                        "Jetson/ConveyorEnabled",
+                        sd.getBoolean(
+                            "Controls/DepositionEnabled",
+                            sd.getBoolean("Deposit/Depositing", False),
+                        ),
+                    )
+                )
+                lower_on = bool(sd.getBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active)))
+                left_extend_on = bool(sd.getBoolean("Jetson/ExcavatorLeftExtend", bool(test_excavation_left_extend_active)))
+                right_extend_on = bool(sd.getBoolean("Jetson/ExcavatorRightExtend", bool(test_excavation_right_extend_active)))
+                door_open_state = bool(
+                    sd.getBoolean(
+                        "Deposit/DoorOpen",
+                        sd.getBoolean(
+                            "Controls/Placeholder/TailgateOpen",
+                            sd.getBoolean("Jetson/DoorActuatorsOpen", bool(test_door_open_active)),
+                        ),
+                    )
+                )
+                door_open_pulse = bool(sd.getBoolean("Jetson/DoorActuatorsOpen", bool(test_door_open_active)))
+                door_close_pulse = bool(sd.getBoolean("Jetson/DoorActuatorsClose", bool(test_door_close_active)))
             except Exception:
                 pass
+
+        if controller_macro_last_tailgate_open is None:
+            controller_macro_last_tailgate_open = bool(door_open_state)
+        else:
+            if door_open_state and not controller_macro_last_tailgate_open:
+                door_open_pulse = True
+            elif (not door_open_state) and controller_macro_last_tailgate_open:
+                door_close_pulse = True
+            controller_macro_last_tailgate_open = bool(door_open_state)
+
         return {
-            "digger_on": bool(test_excavation_dig_active),
-            "lower_on": bool(test_excavation_lower_active),
-            "left_extend_on": bool(test_excavation_left_extend_active),
-            "right_extend_on": bool(test_excavation_right_extend_active),
-            "door_open_on": bool(test_door_open_active),
-            "door_close_on": bool(test_door_close_active),
+            "digger_on": bool(digger_on),
+            "conveyor_on": bool(conveyor_on),
+            "lower_on": bool(lower_on),
+            "left_extend_on": bool(left_extend_on),
+            "right_extend_on": bool(right_extend_on),
+            "door_open_on": bool(door_open_pulse),
+            "door_close_on": bool(door_close_pulse),
         }
     low_latency_mode = bool(args.camera_only)
     low_latency_restore_state = {
@@ -3383,7 +3428,7 @@ def main():
         publish_map_ui_state(force=True)
 
     def start_controller_recording(source="button"):
-        nonlocal dig_name_input_focused
+        nonlocal dig_name_input_focused, controller_macro_last_tailgate_open
         name_base = str(dig_name_input_text or "").strip()
         if not name_base:
             dig_name_input_focused = True
@@ -3413,6 +3458,7 @@ def main():
         if not controller_macros.begin_recording(name_base=name_base):
             print("Failed to start controller macro recording.")
             return
+        controller_macro_last_tailgate_open = None
         print(
             "Recording controller macro. Drive and use actuators/door controls, "
             "then stop recording to save it."
@@ -5397,6 +5443,8 @@ def main():
                 excavator_lower_requested = excavator_lower_requested or bool(auto_excavation_pattern.get("lower"))
             conveyor_enabled = enabled and mining.state == auto_mining.MiningState.DEPOSITING
             if playback_cmd is not None:
+                conveyor_enabled = conveyor_enabled or bool(playback_cmd.get("conveyor_on", False))
+            if playback_cmd is not None:
                 left_extend_enabled = test_excavation_left_extend_active or bool(playback_cmd.get("left_extend_on", False))
                 right_extend_enabled = test_excavation_right_extend_active or bool(playback_cmd.get("right_extend_on", False))
             else:
@@ -6943,7 +6991,15 @@ def main():
 
         status_scroll_max = max(0, content_h - controls_h)
         status_scroll_y = max(0, min(status_scroll_y, status_scroll_max))
-        panel[controls_top:controls_bottom, :] = controls[status_scroll_y:status_scroll_y + controls_h, :]
+        panel[controls_top:controls_bottom, :] = (24, 24, 28)
+        src_y0 = max(0, min(int(status_scroll_y), controls.shape[0]))
+        visible_h = min(
+            controls_h,
+            max(0, int(content_h) - src_y0),
+            max(0, controls.shape[0] - src_y0),
+        )
+        if visible_h > 0:
+            panel[controls_top:controls_top + visible_h, :] = controls[src_y0:src_y0 + visible_h, :]
         cv2.rectangle(panel, (0, controls_top), (panel_w - 1, controls_bottom), (90, 90, 90), 1)
         status_button_rects["controls_viewport"] = (0, controls_top, panel_w - 1, controls_bottom)
 
@@ -7396,6 +7452,7 @@ def main():
                                 record_fwd,
                                 record_turn,
                                 mechanism_state["digger_on"],
+                                mechanism_state["conveyor_on"],
                                 mechanism_state["lower_on"],
                                 mechanism_state["left_extend_on"],
                                 mechanism_state["right_extend_on"],
@@ -8633,6 +8690,7 @@ def main():
                                     record_fwd,
                                     record_turn,
                                     mechanism_state["digger_on"],
+                                    mechanism_state["conveyor_on"],
                                     mechanism_state["lower_on"],
                                     mechanism_state["left_extend_on"],
                                     mechanism_state["right_extend_on"],
