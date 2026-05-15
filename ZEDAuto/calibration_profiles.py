@@ -791,15 +791,29 @@ class ControllerMacroLibrary:
         self._save()
         return macro
 
-    def playback_sample(self, elapsed_sec):
+    def playback_sample(self, elapsed_sec, mode="forward", mechanism_hold_sec=0.0, suppress_mechanisms=False):
         macro = self.get_selected_macro()
+        return self.playback_sample_for_macro(
+            macro,
+            elapsed_sec,
+            mode=mode,
+            mechanism_hold_sec=mechanism_hold_sec,
+            suppress_mechanisms=suppress_mechanisms,
+        )
+
+    def playback_sample_for_macro(self, macro, elapsed_sec, mode="forward", mechanism_hold_sec=0.0, suppress_mechanisms=False):
         if macro is None:
             return None
         samples = macro.get("samples") or []
         if not samples:
             return None
+        duration_sec = float(macro.get("duration_sec", 0.0))
+        mode = str(mode or "forward").strip().lower()
+        reverse_time = mode in ("reverse", "return", "inverted")
+        elapsed_sec = max(0.0, float(elapsed_sec))
+        sample_elapsed = max(0.0, duration_sec - elapsed_sec) if reverse_time else elapsed_sec
         times = [float(sample.get("t", 0.0)) for sample in samples]
-        idx = bisect.bisect_right(times, float(elapsed_sec)) - 1
+        idx = bisect.bisect_right(times, float(sample_elapsed)) - 1
         idx = max(0, min(idx, len(samples) - 1))
         sample = samples[idx]
         next_idx = min(idx + 1, len(samples) - 1)
@@ -808,24 +822,44 @@ class ControllerMacroLibrary:
         t1 = float(next_sample.get("t", t0))
         alpha = 0.0
         if next_idx != idx and t1 > t0:
-            alpha = max(0.0, min(1.0, (float(elapsed_sec) - t0) / (t1 - t0)))
+            alpha = max(0.0, min(1.0, (float(sample_elapsed) - t0) / (t1 - t0)))
 
         def _lerp(key):
             v0 = float(sample.get(key, 0.0))
             v1 = float(next_sample.get(key, v0))
             return (1.0 - alpha) * v0 + alpha * v1
 
+        def _bool_with_hold(key):
+            current_value = bool(sample.get(key, False))
+            if current_value or suppress_mechanisms:
+                return current_value and (not suppress_mechanisms)
+            hold_window = max(0.0, float(mechanism_hold_sec))
+            if hold_window <= 0.0:
+                return current_value
+            for prior in reversed(samples[: idx + 1]):
+                if bool(prior.get(key, False)):
+                    prior_t = float(prior.get("t", 0.0))
+                    return (float(sample_elapsed) - prior_t) <= hold_window
+            return False
+
+        drive_fwd = float(_lerp("fwd"))
+        drive_turn = float(_lerp("turn"))
+        if reverse_time:
+            drive_fwd = -drive_fwd
+            drive_turn = -drive_turn
+
         return {
             "macro_name": macro["name"],
-            "fwd": float(_lerp("fwd")),
-            "turn": float(_lerp("turn")),
-            "digger_on": bool(sample.get("digger_on", False)),
-            "lower_on": bool(sample.get("lower_on", False)),
-            "left_extend_on": bool(sample.get("left_extend_on", False)),
-            "right_extend_on": bool(sample.get("right_extend_on", False)),
-            "door_open_on": bool(sample.get("door_open_on", False)),
-            "door_close_on": bool(sample.get("door_close_on", False)),
-            "duration_sec": float(macro.get("duration_sec", 0.0)),
+            "fwd": drive_fwd,
+            "turn": drive_turn,
+            "digger_on": False if suppress_mechanisms else bool(sample.get("digger_on", False)),
+            "lower_on": _bool_with_hold("lower_on"),
+            "left_extend_on": _bool_with_hold("left_extend_on"),
+            "right_extend_on": _bool_with_hold("right_extend_on"),
+            "door_open_on": False if suppress_mechanisms else bool(sample.get("door_open_on", False)),
+            "door_close_on": False if suppress_mechanisms else bool(sample.get("door_close_on", False)),
+            "duration_sec": duration_sec,
+            "mode": mode,
         }
 
     def ui_state(self):
