@@ -8784,7 +8784,11 @@ def main():
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
                                 continue
-                            if driver_priority_active and not controller_macro_preview_active:
+                            if driver_priority_active and not (
+                                controller_macro_preview_active
+                                or controller_cycle_preview_active
+                                or dig_profile_preview_active
+                            ):
                                 # Let the RoboRIO/Xbox path own the drivetrain while the driver is actively commanding it.
                                 send_nt_command(False, 0.0, 0.0, 0.1)
                                 reset_auto_drive_shape(now)
