@@ -5545,7 +5545,9 @@ def main():
             nt_ready_stuck_since = 0.0
             return
 
-        # Avoid stomping in-flight commands if robot has not consumed CommandReady yet.
+        # Keep streaming numeric drive commands even if CommandReady desyncs.
+        # Playback should not stall the drivetrain just because the ready pulse
+        # failed to clear on one side of NT.
         remote_ready = sd.getBoolean("Jetson/CommandReady", False)
         if remote_ready and not nt_ready_high:
             if nt_ready_stuck_since <= 0.0:
@@ -5555,8 +5557,6 @@ def main():
                     print("Warning: stale CommandReady detected; clearing flag.")
                 sd.putBoolean("Jetson/CommandReady", False)
                 nt_ready_stuck_since = 0.0
-            else:
-                return
         else:
             nt_ready_stuck_since = 0.0
 
