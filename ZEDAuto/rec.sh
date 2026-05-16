@@ -90,9 +90,42 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
   cmd+=(--roborio-ip "${ROBORIO_IP:-10.0.9.2}")
   cmd+=(--drive-speed "${DRIVE_SPEED:-1.0}")
-  cmd+=(--main-rover-mode)
+  cmd+=(--drive-forward-slew-per-sec "${DRIVE_FORWARD_SLEW_PER_SEC:-1.4}")
+  cmd+=(--drive-turn-k "${DRIVE_TURN_K:-1.15}")
+  cmd+=(--drive-max-turn-cmd "${DRIVE_MAX_TURN_CMD:-1.00}")
+  cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-20.0}")
+  cmd+=(--drive-stop-turn-deg "${DRIVE_STOP_TURN_DEG:-40.0}")
+  cmd+=(--drive-min-turn-forward-scale "${DRIVE_MIN_TURN_FORWARD_SCALE:-0.20}")
+  cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
+  cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
+  cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
+  cmd+=(--backup-critical-dist-m "${BACKUP_CRITICAL_DIST_M:-0.30}")
+  cmd+=(--backup-critical-min-points "${BACKUP_CRITICAL_MIN_POINTS:-6}")
+  cmd+=(--backup-speed "${BACKUP_SPEED:-0.35}")
+  cmd+=(--backup-hold-sec "${BACKUP_HOLD_SEC:-0.40}")
+  cmd+=(--drive-ready-pulse-sec "${DRIVE_READY_PULSE_SEC:-0.10}")
+  cmd+=(--nt-health-period-sec "${NT_HEALTH_PERIOD_SEC:-1.0}")
+  cmd+=(--nt-enable-heartbeat-sec "${NT_ENABLE_HEARTBEAT_SEC:-0.10}")
+  cmd+=(--nt-command-ack-timeout-sec "${NT_COMMAND_ACK_TIMEOUT_SEC:-0.30}")
+  cmd+=(--nt-forward-scale "${NT_FORWARD_SCALE:-1.0}")
+  cmd+=(--nt-turn-scale "${NT_TURN_SCALE:-1.0}")
+  if [[ "${MAIN_ROVER_MODE:-1}" == "1" ]]; then
+    cmd+=(--main-rover-mode)
+  else
+    cmd+=(--no-main-rover-mode)
+  fi
+  if [[ "${MAIN_ROVER_DEBUG:-0}" == "1" ]]; then cmd+=(--main-rover-debug); fi
+  if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
+  if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
   if [[ "${HARD_DRIVE_FLIP:-1}" == "1" ]]; then cmd+=(--hard-drive-flip); fi
   if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  if [[ "${DRIVER_PRIORITY_MODE:-1}" == "1" ]]; then
+    cmd+=(--driver-priority-mode)
+  else
+    cmd+=(--no-driver-priority-mode)
+  fi
+  cmd+=(--driver-priority-threshold "${DRIVER_PRIORITY_THRESHOLD:-0.12}")
+  cmd+=(--driver-priority-sample-stride "${DRIVER_PRIORITY_SAMPLE_STRIDE:-12}")
   if [[ "${DS_JOYSTICK:-1}" == "1" ]]; then cmd+=(--ds-joystick); fi
   cmd+=(--ds-joystick-fwd-key "${DS_JOYSTICK_FWD_KEY:-DS/JoystickFwd}")
   cmd+=(--ds-joystick-turn-key "${DS_JOYSTICK_TURN_KEY:-DS/JoystickTurn}")

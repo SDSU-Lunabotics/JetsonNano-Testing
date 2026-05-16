@@ -1734,6 +1734,8 @@ def main():
     controller_cycle_phase_started_at = 0.0
     controller_cycle_preview_name = None
     controller_cycle_mechanism_hold_sec = 3.0
+    controller_cycle_return_drive_scale = 0.72
+    controller_cycle_return_turn_scale = 0.72
     controller_macro_last_tailgate_open = None
 
     def current_controller_macro_mechanism_state():
@@ -3440,7 +3442,9 @@ def main():
         reset_auto_drive_shape(controller_cycle_phase_started_at)
         print(
             f"Starting AutoRecord for {controller_cycle_preview_name} via {source} "
-            f"(return to recorded start using drive only, then replay forward once)."
+            f"(return to recorded start using drive only at "
+            f"{controller_cycle_return_drive_scale:.2f}x drive / "
+            f"{controller_cycle_return_turn_scale:.2f}x turn, then replay forward once)."
         )
         publish_map_ui_state(force=True)
 
@@ -6791,7 +6795,7 @@ def main():
                 )
             )
         )
-        record_section_h = 72 + 2 * (button_h + 10) + 120
+        record_section_h = 72 + 2 * (button_h + 10) + 140
         record_body_y = section_frame(
             cursor_y,
             record_section_h,
@@ -6862,8 +6866,15 @@ def main():
             x=card_x0 + card_inner,
         )
         put_control_line(
-            f"AutoRecord returns to the recorded start, then replays once | +{controller_cycle_mechanism_hold_sec:.1f}s lower/extend hold",
+            f"AutoRecord return: {controller_cycle_return_drive_scale:.2f}x drive / {controller_cycle_return_turn_scale:.2f}x turn, then replay once",
             record_summary_y + 66,
+            (185, 220, 255),
+            0.38,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Forward replay adds +{controller_cycle_mechanism_hold_sec:.1f}s hold for lower/extend actions",
+            record_summary_y + 86,
             (185, 220, 255),
             0.38,
             x=card_x0 + card_inner,
@@ -7598,9 +7609,11 @@ def main():
                                     stop_controller_cycle_preview("auto", completed=True)
                             else:
                                 reset_auto_drive_shape(now)
+                                preview_fwd = float(controller_macro_playback_cmd["fwd"])
+                                preview_turn = float(controller_macro_playback_cmd["turn"])
                                 preview_fwd, preview_turn = mix_ds_drive(
-                                    controller_macro_playback_cmd["fwd"],
-                                    controller_macro_playback_cmd["turn"],
+                                    preview_fwd,
+                                    preview_turn,
                                 )
                                 send_nt_command(
                                     True,
@@ -7619,9 +7632,11 @@ def main():
                                 stop_controller_macro_preview("auto", completed=True)
                             else:
                                 reset_auto_drive_shape(now)
+                                preview_fwd = float(controller_macro_playback_cmd["fwd"])
+                                preview_turn = float(controller_macro_playback_cmd["turn"])
                                 preview_fwd, preview_turn = mix_ds_drive(
-                                    controller_macro_playback_cmd["fwd"],
-                                    controller_macro_playback_cmd["turn"],
+                                    preview_fwd,
+                                    preview_turn,
                                 )
                                 send_nt_command(
                                     True,
