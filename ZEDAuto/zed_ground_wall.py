@@ -1730,7 +1730,7 @@ def main():
     controller_macro_preview_started_at = 0.0
     controller_macro_preview_name = None
     controller_cycle_preview_active = False
-    controller_cycle_phase = "forward"
+    controller_cycle_phase = "return"
     controller_cycle_phase_started_at = 0.0
     controller_cycle_preview_name = None
     controller_cycle_mechanism_hold_sec = 3.0
@@ -1741,6 +1741,9 @@ def main():
         digger_on = bool(test_excavation_dig_active)
         conveyor_on = False
         lower_on = bool(test_excavation_lower_active)
+        stow_on = False
+        manual_extend_on = False
+        manual_retract_on = False
         left_extend_on = bool(test_excavation_left_extend_active)
         right_extend_on = bool(test_excavation_right_extend_active)
         door_open_state = bool(test_door_open_active)
@@ -1750,31 +1753,42 @@ def main():
             try:
                 digger_on = bool(
                     sd.getBoolean(
-                        "Jetson/ExcavatorEnabled",
+                        "Controller/Action/ExcavatorEnabled",
                         sd.getBoolean(
-                            "Controls/ExcavatorEnabled",
+                            "Jetson/ExcavatorEnabled",
                             sd.getBoolean("Excav/BeltRunning", bool(test_excavation_dig_active)),
                         ),
                     )
                 )
                 conveyor_on = bool(
                     sd.getBoolean(
-                        "Jetson/ConveyorEnabled",
+                        "Controller/Action/DepositionEnabled",
                         sd.getBoolean(
-                            "Controls/DepositionEnabled",
+                            "Jetson/ConveyorEnabled",
                             sd.getBoolean("Deposit/Depositing", False),
                         ),
                     )
                 )
-                lower_on = bool(sd.getBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active)))
+                lower_on = bool(
+                    sd.getBoolean(
+                        "Controller/Action/MoveToDigZoneActive",
+                        sd.getBoolean("Jetson/ExcavatorLoweringSim", bool(test_excavation_lower_active)),
+                    )
+                )
+                stow_on = bool(sd.getBoolean("Controller/Action/StowingActive", False))
+                manual_extend_on = bool(sd.getBoolean("Controller/Action/ManualExtendActive", False))
+                manual_retract_on = bool(sd.getBoolean("Controller/Action/ManualRetractActive", False))
                 left_extend_on = bool(sd.getBoolean("Jetson/ExcavatorLeftExtend", bool(test_excavation_left_extend_active)))
                 right_extend_on = bool(sd.getBoolean("Jetson/ExcavatorRightExtend", bool(test_excavation_right_extend_active)))
                 door_open_state = bool(
                     sd.getBoolean(
-                        "Deposit/DoorOpen",
+                        "Controller/Action/TailgateOpen",
                         sd.getBoolean(
-                            "Controls/Placeholder/TailgateOpen",
-                            sd.getBoolean("Jetson/DoorActuatorsOpen", bool(test_door_open_active)),
+                            "Deposit/DoorOpen",
+                            sd.getBoolean(
+                                "Controls/Placeholder/TailgateOpen",
+                                sd.getBoolean("Jetson/DoorActuatorsOpen", bool(test_door_open_active)),
+                            ),
                         ),
                     )
                 )
@@ -1796,6 +1810,9 @@ def main():
             "digger_on": bool(digger_on),
             "conveyor_on": bool(conveyor_on),
             "lower_on": bool(lower_on),
+            "stow_on": bool(stow_on),
+            "manual_extend_on": bool(manual_extend_on),
+            "manual_retract_on": bool(manual_retract_on),
             "left_extend_on": bool(left_extend_on),
             "right_extend_on": bool(right_extend_on),
             "door_open_on": bool(door_open_pulse),
@@ -3356,17 +3373,17 @@ def main():
         nonlocal controller_cycle_preview_name
         if not controller_cycle_preview_active:
             return
-        name = controller_cycle_preview_name or "controller cycle"
+        name = controller_cycle_preview_name or "AutoRecord"
         controller_cycle_preview_active = False
-        controller_cycle_phase = "forward"
+        controller_cycle_phase = "return"
         controller_cycle_phase_started_at = 0.0
         controller_cycle_preview_name = None
         reset_auto_drive_shape(time.time())
         send_nt_command(False, 0.0, 0.0, 0.1)
         if completed:
-            print(f"Controller cycle completed for {name}.")
+            print(f"AutoRecord completed for {name}.")
         else:
-            print(f"Controller cycle stopped for {name} via {source}.")
+            print(f"AutoRecord stopped for {name} via {source}.")
         publish_map_ui_state(force=True)
 
     def start_controller_macro_preview(source="button"):
@@ -3401,29 +3418,29 @@ def main():
         nonlocal controller_cycle_preview_active, controller_cycle_phase, controller_cycle_phase_started_at
         nonlocal controller_cycle_preview_name
         if controller_macros.recording:
-            print("Stop controller recording before starting a controller cycle.")
+            print("Stop controller recording before starting AutoRecord.")
             return
         if dig_profiles.recording or dig_profile_preview_active:
-            print("Stop dig recording/playback before starting a controller cycle.")
+            print("Stop dig recording/playback before starting AutoRecord.")
             return
         if controller_macro_preview_active:
-            print("Stop normal controller playback before starting a controller cycle.")
+            print("Stop normal controller playback before starting AutoRecord.")
             return
         macro = resolve_preview_controller_macro()
         if macro is None:
-            print("No controller macro available to cycle.")
+            print("No controller macro available for AutoRecord.")
             return
         clear_navigation_goal()
         mining.abort()
-        set_manual_drive_mode(False, f"{source} controller cycle")
+        set_manual_drive_mode(False, f"{source} AutoRecord")
         controller_cycle_preview_active = True
-        controller_cycle_phase = "forward"
+        controller_cycle_phase = "return"
         controller_cycle_phase_started_at = time.time()
-        controller_cycle_preview_name = str(macro.get("name", "controller_cycle"))
+        controller_cycle_preview_name = str(macro.get("name", "controller_autorecord"))
         reset_auto_drive_shape(controller_cycle_phase_started_at)
         print(
-            f"Cycling controller macro {controller_cycle_preview_name} via {source} "
-            f"(forward, then return without dig/deposit actions)."
+            f"Starting AutoRecord for {controller_cycle_preview_name} via {source} "
+            f"(return to recorded start using drive only, then replay forward once)."
         )
         publish_map_ui_state(force=True)
 
@@ -4072,28 +4089,28 @@ def main():
                 },
                 {
                     "id": "controller_record",
-                    "label": "Record Controller",
+                    "label": "Record",
                     "command": "controller_record",
                     "active": bool(controller_macros.recording),
                     "enabled": bool(not controller_macros.recording),
                 },
                 {
                     "id": "controller_preview",
-                    "label": "Play Controller",
+                    "label": "Play Recording",
                     "command": "controller_preview",
                     "active": bool(controller_macro_preview_active),
                     "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
                 },
                 {
-                    "id": "controller_cycle",
-                    "label": "Cycle Return",
-                    "command": "controller_cycle",
+                    "id": "controller_autorecord",
+                    "label": "Start AutoRecord",
+                    "command": "controller_autorecord",
                     "active": bool(controller_cycle_preview_active),
                     "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
                 },
                 {
                     "id": "controller_stop",
-                    "label": "Stop Controller",
+                    "label": "Stop Recording",
                     "command": "controller_stop",
                     "active": bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
                     "enabled": bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
@@ -4949,7 +4966,7 @@ def main():
                 else:
                     start_controller_macro_preview("button")
                 return
-        rect = status_button_rects.get("controller_cycle")
+        rect = status_button_rects.get("controller_autorecord")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
@@ -5295,7 +5312,7 @@ def main():
                 stop_controller_macro_preview("external command")
             else:
                 start_controller_macro_preview("external command")
-        elif action == "controller_cycle":
+        elif action in ("controller_autorecord", "controller_cycle"):
             if controller_cycle_preview_active:
                 stop_controller_cycle_preview("external command")
             else:
@@ -5437,6 +5454,9 @@ def main():
             excavator_lower_requested = (lower_cycle_active and lower_cycle_elapsed < 5.0) or (
                 bool(playback_cmd.get("lower_on")) if playback_cmd is not None else auto_dig_active
             )
+            excavator_stow_requested = bool(playback_cmd.get("stow_on", False)) if playback_cmd is not None else False
+            excavator_manual_extend_requested = bool(playback_cmd.get("manual_extend_on", False)) if playback_cmd is not None else False
+            excavator_manual_retract_requested = bool(playback_cmd.get("manual_retract_on", False)) if playback_cmd is not None else False
             if pattern_state is not None:
                 excavator_lower_requested = excavator_lower_requested or bool(pattern_state.get("lower"))
             if auto_excavation_pattern is not None and playback_cmd is None:
@@ -5488,6 +5508,9 @@ def main():
             sd.putBoolean("Jetson/ExcavatorEnabled", bool(excavator_enabled))
             sd.putBoolean("Jetson/ConveyorEnabled", bool(conveyor_enabled))
             sd.putBoolean("Jetson/ExcavatorLoweringSim", bool(excavator_lower_requested))
+            sd.putBoolean("Jetson/ExcavatorStowingSim", bool(excavator_stow_requested))
+            sd.putBoolean("Jetson/ExcavatorManualExtend", bool(excavator_manual_extend_requested))
+            sd.putBoolean("Jetson/ExcavatorManualRetract", bool(excavator_manual_retract_requested))
             sd.putBoolean("Jetson/ExcavatorLeftExtend", bool(left_extend_enabled))
             sd.putBoolean("Jetson/ExcavatorRightExtend", bool(right_extend_enabled))
             sd.putBoolean("Jetson/DoorActuatorsOpen", bool(door_open_enabled and not door_close_enabled))
@@ -5994,6 +6017,7 @@ def main():
             ("jump_zones_camera", "Zones"),
             ("jump_calibration", "Calibration"),
             ("jump_actuators", "Actuators"),
+            ("jump_record", "Record"),
             ("jump_dig_profiles", "Dig"),
         ]
         jump_btn_w = int((panel_w - 32 - (len(jump_buttons) - 1) * jump_gap) / len(jump_buttons))
@@ -6742,6 +6766,110 @@ def main():
         )
         cursor_y += actuators_section_h + card_gap
 
+        controller_cursor_macro = controller_macros.get_cursor_macro()
+        controller_cursor_name = (
+            controller_cursor_macro["name"] if controller_cursor_macro is not None else "none"
+        )
+        controller_cursor_duration = (
+            float(controller_cursor_macro.get("duration_sec", 0.0))
+            if controller_cursor_macro is not None else 0.0
+        )
+        controller_selected_macro = controller_macros.get_selected_macro()
+        controller_selected_name = (
+            controller_selected_macro["name"] if controller_selected_macro is not None else "none"
+        )
+        record_mode_text = (
+            f"Recording: {str(dig_name_input_text or '').strip()[:28]}"
+            if controller_macros.recording
+            else (
+                f"Play: {str(controller_macro_preview_name or 'OFF')[:26]}"
+                if controller_macro_preview_active
+                else (
+                    f"AutoRecord: {controller_cycle_phase.title()} {str(controller_cycle_preview_name or '')[:18]}"
+                    if controller_cycle_preview_active and controller_cycle_preview_name
+                    else "Idle"
+                )
+            )
+        )
+        record_section_h = 72 + 2 * (button_h + 10) + 120
+        record_body_y = section_frame(
+            cursor_y,
+            record_section_h,
+            "Record",
+            "Controller record/playback plus AutoRecord return-to-start replay.",
+            (188, 144, 255),
+            "record",
+        )
+        controller_record_rect = grid_rect(record_body_y, 0, 0)
+        controller_preview_rect = grid_rect(record_body_y, 0, 1)
+        controller_autorecord_rect = grid_rect(record_body_y, 0, 2)
+        controller_stop_rect = grid_rect(record_body_y, 1, 0, span=3)
+        draw_control_button(
+            controller_record_rect,
+            "Record: ON" if controller_macros.recording else "Record",
+            bool(not controller_macros.recording),
+            bool(controller_macros.recording),
+            (80, 70, 170),
+            (180, 150, 255),
+        )
+        draw_control_button(
+            controller_preview_rect,
+            "Play Recording: ON" if controller_macro_preview_active else "Play Recording",
+            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
+            bool(controller_macro_preview_active),
+            (0, 110, 170),
+            (120, 220, 255),
+        )
+        draw_control_button(
+            controller_autorecord_rect,
+            (
+                f"AutoRecord: {controller_cycle_phase.title()}"
+                if controller_cycle_preview_active else "Start AutoRecord"
+            ),
+            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
+            bool(controller_cycle_preview_active),
+            (90, 110, 10),
+            (210, 255, 140),
+        )
+        draw_control_button(
+            controller_stop_rect,
+            "Stop Recording",
+            bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
+            bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
+            (170, 70, 0),
+            (255, 180, 120),
+        )
+        record_summary_y = record_body_y + 2 * (button_h + 10) + 24
+        put_control_line(
+            f"Selected controller: {controller_selected_name[:30]}",
+            record_summary_y,
+            (220, 210, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Browse controller: {controller_cursor_name[:24]} ({controller_cursor_duration:.2f}s)",
+            record_summary_y + 22,
+            (220, 210, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Record mode: {record_mode_text}",
+            record_summary_y + 44,
+            (220, 255, 200),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"AutoRecord returns to the recorded start, then replays once | +{controller_cycle_mechanism_hold_sec:.1f}s lower/extend hold",
+            record_summary_y + 66,
+            (185, 220, 255),
+            0.38,
+            x=card_x0 + card_inner,
+        )
+        cursor_y += record_section_h + card_gap
+
         current_dig_profiles = dig_profiles.list_profiles(
             dig_profiles.active_style, dig_profiles.active_phase
         )
@@ -6751,7 +6879,7 @@ def main():
             else min(4, len(current_dig_profiles))
         )
         visible_dig_rows = max(4, visible_dig_rows)
-        dig_section_h = 72 + 8 * (button_h + 10) + 190 + visible_dig_rows * 20
+        dig_section_h = 72 + 5 * (button_h + 10) + 190 + visible_dig_rows * 20
         dig_body_y = section_frame(
             cursor_y,
             dig_section_h,
@@ -6769,14 +6897,10 @@ def main():
         dig_profile_prev_rect = grid_rect(dig_body_y, 2, 0)
         dig_profile_next_rect = grid_rect(dig_body_y, 2, 1)
         dig_profile_delete_rect = grid_rect(dig_body_y, 2, 2)
-        dig_profiles_view_all_rect = grid_rect(dig_body_y, 3, 0)
-        controller_record_rect = grid_rect(dig_body_y, 4, 0)
-        controller_preview_rect = grid_rect(dig_body_y, 4, 1)
-        controller_stop_rect = grid_rect(dig_body_y, 4, 2)
-        controller_prev_rect = grid_rect(dig_body_y, 5, 0)
-        controller_next_rect = grid_rect(dig_body_y, 5, 1)
-        controller_use_rect = grid_rect(dig_body_y, 5, 2)
-        controller_cycle_rect = grid_rect(dig_body_y, 6, 0)
+        dig_profiles_view_all_rect = grid_rect(dig_body_y, 3, 0, span=3)
+        controller_prev_rect = grid_rect(dig_body_y, 4, 0)
+        controller_next_rect = grid_rect(dig_body_y, 4, 1)
+        controller_use_rect = grid_rect(dig_body_y, 4, 2)
         draw_control_button(dig_style_cycle_rect, f"Dig Style: {dig_profiles.active_style.title()}", True, False)
         draw_control_button(dig_phase_cycle_rect, f"Phase: {dig_profiles.active_phase.title()}", True, False)
         draw_control_button(
@@ -6837,41 +6961,6 @@ def main():
             (70, 100, 140),
             (150, 220, 255),
         )
-        draw_control_button(
-            controller_record_rect,
-            "Record Controller: ON" if controller_macros.recording else "Record Controller",
-            bool(not controller_macros.recording),
-            bool(controller_macros.recording),
-            (80, 70, 170),
-            (180, 150, 255),
-        )
-        draw_control_button(
-            controller_preview_rect,
-            "Play Controller: ON" if controller_macro_preview_active else "Play Controller",
-            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
-            bool(controller_macro_preview_active),
-            (0, 110, 170),
-            (120, 220, 255),
-        )
-        draw_control_button(
-            controller_cycle_rect,
-            (
-                f"Cycle Return: {controller_cycle_phase.title()}"
-                if controller_cycle_preview_active else "Cycle Return"
-            ),
-            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
-            bool(controller_cycle_preview_active),
-            (90, 110, 10),
-            (210, 255, 140),
-        )
-        draw_control_button(
-            controller_stop_rect,
-            "Stop Controller",
-            bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
-            bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
-            (170, 70, 0),
-            (255, 180, 120),
-        )
         draw_control_button(controller_prev_rect, "Ctrl Prev", True)
         draw_control_button(controller_next_rect, "Ctrl Next", True)
         draw_control_button(
@@ -6897,7 +6986,7 @@ def main():
                 else "Recording: OFF"
             )
         )
-        summary_y = dig_body_y + 7 * (button_h + 10) + 34
+        summary_y = dig_body_y + 5 * (button_h + 10) + 34
         put_control_line(
             f"Active {dig_profiles.active_style.upper()} {dig_profiles.active_phase.upper()} | {recording_text}",
             summary_y,
@@ -6926,36 +7015,6 @@ def main():
             0.40,
             x=card_x0 + card_inner,
         )
-        controller_cursor_macro = controller_macros.get_cursor_macro()
-        controller_cursor_name = controller_cursor_macro["name"] if controller_cursor_macro is not None else "none"
-        controller_cursor_duration = float(controller_cursor_macro.get("duration_sec", 0.0)) if controller_cursor_macro is not None else 0.0
-        controller_selected_macro = controller_macros.get_selected_macro()
-        controller_selected_name = controller_selected_macro["name"] if controller_selected_macro is not None else "none"
-        put_control_line(
-            f"Controller selected: {controller_selected_name[:30]}",
-            summary_y + 162,
-            (220, 210, 255),
-            0.40,
-            x=card_x0 + card_inner,
-        )
-        put_control_line(
-            f"Browse controller: {controller_cursor_name[:24]} ({controller_cursor_duration:.2f}s)",
-            summary_y + 184,
-            (220, 210, 255),
-            0.40,
-            x=card_x0 + card_inner,
-        )
-        put_control_line(
-            (
-                f"Controller cycle: {controller_cycle_phase.upper()} {controller_cycle_preview_name[:20]}"
-                if controller_cycle_preview_active and controller_cycle_preview_name
-                else f"Controller cycle: OFF | +{controller_cycle_mechanism_hold_sec:.1f}s lower/extend hold"
-            ),
-            summary_y + 206,
-            (220, 255, 200),
-            0.40,
-            x=card_x0 + card_inner,
-        )
         visible_profiles = (
             current_dig_profiles
             if show_all_dig_profiles
@@ -6963,7 +7022,7 @@ def main():
         )
         put_control_line(
             f"{dig_profiles.active_style.title()} {dig_profiles.active_phase.title()} recordings ({len(current_dig_profiles)} total):",
-            summary_y + 230,
+            summary_y + 162,
             (170, 210, 255),
             0.40,
             x=card_x0 + card_inner,
@@ -6971,7 +7030,7 @@ def main():
         for idx, profile in enumerate(visible_profiles):
             marker = "* " if profile["name"] == dig_profiles.selected.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else "  "
             cursor_marker = ">" if profile["name"] == dig_profiles.cursor.get(dig_profiles.active_style, {}).get(dig_profiles.active_phase) else " "
-            line_y = summary_y + 252 + idx * 20
+            line_y = summary_y + 184 + idx * 20
             put_control_line(
                 f"{cursor_marker}{marker}{profile['name'][:34]} ({float(profile.get('duration_sec', 0.0)):.2f}s)",
                 line_y,
@@ -6986,6 +7045,7 @@ def main():
         status_section_jump_targets["jump_zones_camera"] = int(section_offsets.get("zones_camera", 0))
         status_section_jump_targets["jump_calibration"] = int(section_offsets.get("calibration", 0))
         status_section_jump_targets["jump_actuators"] = int(section_offsets.get("actuators", 0))
+        status_section_jump_targets["jump_record"] = int(section_offsets.get("record", 0))
         status_section_jump_targets["jump_dig_profiles"] = int(section_offsets.get("dig_profiles", 0))
         content_h = max(controls_h + 1, cursor_y)
 
@@ -7063,7 +7123,7 @@ def main():
             ("dig_profiles_view_all", dig_profiles_view_all_rect),
             ("controller_record", controller_record_rect),
             ("controller_preview", controller_preview_rect),
-            ("controller_cycle", controller_cycle_rect),
+            ("controller_autorecord", controller_autorecord_rect),
             ("controller_stop", controller_stop_rect),
             ("controller_prev", controller_prev_rect),
             ("controller_next", controller_next_rect),
@@ -7162,7 +7222,7 @@ def main():
         put_line(
             (
                 f"Controls scroll: {status_scroll_y}/{status_scroll_max} | "
-                "Wheel, drag panel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-5 sections"
+                "Wheel, drag panel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-7 sections"
             ),
             controls_top - 8,
             (170, 200, 230),
@@ -7438,10 +7498,23 @@ def main():
                         refresh_ds_joystick_state()
                         controller_macro_playback_cmd = None
                         if controller_macros.recording:
-                            record_fwd, record_turn = (
-                                mix_ds_drive(manual_fwd, manual_turn)
-                                if manual_mode else (float(ds_joystick_fwd), float(ds_joystick_turn))
-                            )
+                            record_fwd = 0.0
+                            record_turn = 0.0
+                            telemetry_fwd = float("nan")
+                            telemetry_turn = float("nan")
+                            if sd is not None:
+                                telemetry_fwd = float(sd.getNumber("Jetson/DriveForward", float("nan")))
+                                telemetry_turn = float(sd.getNumber("Jetson/DriveTurn", float("nan")))
+                            if math.isfinite(telemetry_fwd) and math.isfinite(telemetry_turn):
+                                # Match the normal/full recorder path: capture what the rover
+                                # is actually executing, not just the controller intent.
+                                record_fwd = telemetry_fwd
+                                record_turn = telemetry_turn
+                            elif manual_mode:
+                                record_fwd, record_turn = mix_ds_drive(manual_fwd, manual_turn)
+                            else:
+                                record_fwd = float(ds_joystick_fwd)
+                                record_turn = float(ds_joystick_turn)
                             mechanism_state = current_controller_macro_mechanism_state()
                             if abs(record_fwd) < 0.05:
                                 record_fwd = 0.0
@@ -7454,6 +7527,9 @@ def main():
                                 mechanism_state["digger_on"],
                                 mechanism_state["conveyor_on"],
                                 mechanism_state["lower_on"],
+                                mechanism_state["stow_on"],
+                                mechanism_state["manual_extend_on"],
+                                mechanism_state["manual_retract_on"],
                                 mechanism_state["left_extend_on"],
                                 mechanism_state["right_extend_on"],
                                 mechanism_state["door_open_on"],
@@ -7512,17 +7588,14 @@ def main():
                             if cycle_macro is not None:
                                 macro_duration = float(cycle_macro.get("duration_sec", 0.0))
                             if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
-                                if controller_cycle_phase == "forward":
-                                    controller_cycle_phase = "return"
-                                    controller_cycle_phase_started_at = now
-                                    print("Controller cycle: returning to recorded start point.")
-                                    publish_map_ui_state(force=True)
-                                else:
+                                if controller_cycle_phase == "return":
                                     controller_cycle_phase = "forward"
                                     controller_cycle_phase_started_at = now
-                                    print("Controller cycle: restarting recorded pass.")
+                                    print("AutoRecord: reached recorded start point, replaying forward.")
                                     publish_map_ui_state(force=True)
-                                controller_macro_playback_cmd = None
+                                    controller_macro_playback_cmd = None
+                                else:
+                                    stop_controller_cycle_preview("auto", completed=True)
                             else:
                                 reset_auto_drive_shape(now)
                                 preview_fwd, preview_turn = mix_ds_drive(
@@ -7637,6 +7710,8 @@ def main():
                         if key == ord("5"):
                             set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
                         if key == ord("6"):
+                            set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
+                        if key == ord("7"):
                             set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                         now_key = time.time()
                         if key == ord("w"):
@@ -8692,6 +8767,9 @@ def main():
                                     mechanism_state["digger_on"],
                                     mechanism_state["conveyor_on"],
                                     mechanism_state["lower_on"],
+                                    mechanism_state["stow_on"],
+                                    mechanism_state["manual_extend_on"],
+                                    mechanism_state["manual_retract_on"],
                                     mechanism_state["left_extend_on"],
                                     mechanism_state["right_extend_on"],
                                     mechanism_state["door_open_on"],
@@ -8799,17 +8877,14 @@ def main():
                                 if cycle_macro is not None:
                                     macro_duration = float(cycle_macro.get("duration_sec", 0.0))
                                 if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
-                                    if controller_cycle_phase == "forward":
-                                        controller_cycle_phase = "return"
-                                        controller_cycle_phase_started_at = now
-                                        print("Controller cycle: returning to recorded start point.")
-                                        publish_map_ui_state(force=True)
-                                    else:
+                                    if controller_cycle_phase == "return":
                                         controller_cycle_phase = "forward"
                                         controller_cycle_phase_started_at = now
-                                        print("Controller cycle: restarting recorded pass.")
+                                        print("AutoRecord: reached recorded start point, replaying forward.")
                                         publish_map_ui_state(force=True)
-                                    controller_macro_playback_cmd = None
+                                        controller_macro_playback_cmd = None
+                                        continue
+                                    stop_controller_cycle_preview("auto", completed=True)
                                     continue
                                 reset_auto_drive_shape(now)
                                 preview_fwd, preview_turn = mix_ds_drive(
@@ -9467,6 +9542,8 @@ def main():
                     if key == ord("5"):
                         set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
                     if key == ord("6"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
+                    if key == ord("7"):
                         set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)
