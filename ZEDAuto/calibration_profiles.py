@@ -1,6 +1,7 @@
 import bisect
 import copy
 import json
+import math
 import os
 import re
 import time
@@ -251,6 +252,7 @@ class DigProfileLibrary:
         self.recording_style = None
         self.recording_phase = None
         self.recording_name_base = None
+        self.recording_metadata = None
         self.recording_started_at = 0.0
         self.recording_samples = []
         self.last_recorded_signature = None
@@ -702,11 +704,12 @@ class ControllerMacroLibrary:
         self._save()
         return macro
 
-    def begin_recording(self, name_base=None):
+    def begin_recording(self, name_base=None, metadata=None):
         if self.recording:
             return False
         self.recording = True
         self.recording_name_base = self._slugify_name(name_base)
+        self.recording_metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else None
         self.recording_started_at = time.time()
         self.recording_samples = []
         self.last_recorded_signature = None
@@ -728,6 +731,9 @@ class ControllerMacroLibrary:
         right_extend_on,
         door_open_on,
         door_close_on,
+        map_x=None,
+        map_z=None,
+        heading_rad=None,
     ):
         if not self.recording:
             return
@@ -747,6 +753,22 @@ class ControllerMacroLibrary:
             "door_open_on": bool(door_open_on),
             "door_close_on": bool(door_close_on),
         }
+        if map_x is not None and map_z is not None:
+            try:
+                map_x_val = float(map_x)
+                map_z_val = float(map_z)
+                if math.isfinite(map_x_val) and math.isfinite(map_z_val):
+                    sample["map_x"] = round(map_x_val, 4)
+                    sample["map_z"] = round(map_z_val, 4)
+            except Exception:
+                pass
+        if heading_rad is not None:
+            try:
+                heading_val = float(heading_rad)
+                if math.isfinite(heading_val):
+                    sample["heading_rad"] = round(heading_val, 4)
+            except Exception:
+                pass
         signature = (
             sample["fwd"],
             sample["turn"],
@@ -775,8 +797,10 @@ class ControllerMacroLibrary:
             return None
         samples = list(self.recording_samples)
         name_base = self.recording_name_base
+        metadata = copy.deepcopy(self.recording_metadata) if isinstance(self.recording_metadata, dict) else None
         self.recording = False
         self.recording_name_base = None
+        self.recording_metadata = None
         self.recording_started_at = 0.0
         self.recording_samples = []
         self.last_recorded_signature = None
@@ -795,6 +819,8 @@ class ControllerMacroLibrary:
             "duration_sec": float(samples[-1]["t"]),
             "samples": samples,
         }
+        if metadata:
+            macro["metadata"] = metadata
         self.macros = [item for item in self.macros if item.get("name") != name]
         self.macros.append(macro)
         self.selected = name
@@ -813,25 +839,59 @@ class ControllerMacroLibrary:
             suppress_mechanisms=suppress_mechanisms,
         )
 
-    def playback_sample_for_macro(self, macro, elapsed_sec, mode="forward", mechanism_hold_sec=0.0, suppress_mechanisms=False):
+    def _movement_timeline_samples(self, samples, move_threshold=0.05):
+        if not samples:
+            return []
+        moving_flags = [
+            (abs(float(sample.get("fwd", 0.0))) >= move_threshold)
+            or (abs(float(sample.get("turn", 0.0))) >= move_threshold)
+            for sample in samples
+        ]
+        compressed_times = [0.0] * len(samples)
+        compressed_t = 0.0
+        for idx in range(1, len(samples)):
+            prev_t = float(samples[idx - 1].get("t", 0.0))
+            curr_t = float(samples[idx].get("t", prev_t))
+            if moving_flags[idx - 1] or moving_flags[idx]:
+                compressed_t += max(0.0, curr_t - prev_t)
+            compressed_times[idx] = compressed_t
+        drive_samples = []
+        for idx, sample in enumerate(samples):
+            prev_moving = moving_flags[idx - 1] if idx > 0 else moving_flags[idx]
+            next_moving = moving_flags[idx + 1] if (idx + 1) < len(samples) else moving_flags[idx]
+            if not (moving_flags[idx] or prev_moving or next_moving):
+                continue
+            sample_copy = copy.deepcopy(sample)
+            sample_copy["_play_t"] = round(float(compressed_times[idx]), 4)
+            drive_samples.append(sample_copy)
+        return drive_samples
+
+    def playback_sample_for_macro(self, macro, elapsed_sec, mode="forward", mechanism_hold_sec=0.0, suppress_mechanisms=False, drive_only_return=False):
         if macro is None:
             return None
         samples = macro.get("samples") or []
         if not samples:
             return None
-        duration_sec = float(macro.get("duration_sec", 0.0))
         mode = str(mode or "forward").strip().lower()
         reverse_time = mode in ("reverse", "return", "inverted")
+        if reverse_time and drive_only_return:
+            samples = self._movement_timeline_samples(samples)
+            if not samples:
+                return None
+            duration_sec = float(samples[-1].get("_play_t", 0.0))
+        else:
+            duration_sec = float(macro.get("duration_sec", 0.0))
         elapsed_sec = max(0.0, float(elapsed_sec))
         sample_elapsed = max(0.0, duration_sec - elapsed_sec) if reverse_time else elapsed_sec
-        times = [float(sample.get("t", 0.0)) for sample in samples]
+        time_key = "_play_t" if (reverse_time and drive_only_return) else "t"
+        times = [float(sample.get(time_key, sample.get("t", 0.0))) for sample in samples]
         idx = bisect.bisect_right(times, float(sample_elapsed)) - 1
         idx = max(0, min(idx, len(samples) - 1))
         sample = samples[idx]
         next_idx = min(idx + 1, len(samples) - 1)
         next_sample = samples[next_idx]
-        t0 = float(sample.get("t", 0.0))
-        t1 = float(next_sample.get("t", t0))
+        t0 = float(sample.get(time_key, sample.get("t", 0.0)))
+        t1 = float(next_sample.get(time_key, next_sample.get("t", t0)))
         alpha = 0.0
         if next_idx != idx and t1 > t0:
             alpha = max(0.0, min(1.0, (float(sample_elapsed) - t0) / (t1 - t0)))

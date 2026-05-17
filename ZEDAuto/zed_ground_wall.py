@@ -1665,6 +1665,11 @@ def main():
     last_drive_send = 0.0
     demo_rover_pos_map = None
     demo_rover_heading_rad = 0.0
+    rover_pos_map = None
+    rover_forward_world = None
+    rover_row_col = None
+    drive_origin_pos_map = None
+    drive_origin_row_col = None
     manual_fwd = 0.0
     manual_turn = 0.0
     manual_mode = True
@@ -1733,10 +1738,20 @@ def main():
     controller_cycle_phase = "return"
     controller_cycle_phase_started_at = 0.0
     controller_cycle_preview_name = None
-    controller_cycle_mechanism_hold_sec = 3.0
-    controller_cycle_return_drive_scale = 0.72
-    controller_cycle_return_turn_scale = 0.72
+    controller_cycle_mechanism_hold_sec = 0.0
+    controller_cycle_return_drive_scale = 0.60
+    controller_cycle_return_turn_scale = 0.55
+    controller_cycle_return_target_cell = None
+    controller_cycle_return_target_heading_rad = None
+    controller_cycle_forward_assist_enabled = False
+    controller_cycle_forward_assist_state = "OFF"
+    controller_cycle_forward_assist_reason = "inactive"
+    controller_cycle_forward_assist_reduce_error_m = 0.20
+    controller_cycle_forward_assist_disable_error_m = 0.85
+    controller_macro_drive_scale = 1.0
     controller_macro_last_tailgate_open = None
+    controller_recording_tracking_compromised = False
+    controller_recording_tracking_warned = False
 
     def current_controller_macro_mechanism_state():
         nonlocal controller_macro_last_tailgate_open
@@ -1820,6 +1835,15 @@ def main():
             "door_open_on": bool(door_open_pulse),
             "door_close_on": bool(door_close_pulse),
         }
+
+    def set_controller_macro_drive_scale(value, source="slider"):
+        nonlocal controller_macro_drive_scale
+        value = max(0.40, min(1.60, float(value)))
+        if abs(float(controller_macro_drive_scale) - value) <= 1e-6:
+            return
+        controller_macro_drive_scale = value
+        print(f"Controller replay drive scale set to {controller_macro_drive_scale:.2f} via {source}.")
+        publish_map_ui_state(force=True)
     low_latency_mode = bool(args.camera_only)
     low_latency_restore_state = {
         "camera_overlay_enabled": True,
@@ -3372,7 +3396,9 @@ def main():
 
     def stop_controller_cycle_preview(source="button", completed=False):
         nonlocal controller_cycle_preview_active, controller_cycle_phase, controller_cycle_phase_started_at
-        nonlocal controller_cycle_preview_name
+        nonlocal controller_cycle_preview_name, controller_cycle_return_target_cell
+        nonlocal controller_cycle_return_target_heading_rad, controller_cycle_forward_assist_enabled
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
         if not controller_cycle_preview_active:
             return
         name = controller_cycle_preview_name or "AutoRecord"
@@ -3380,6 +3406,12 @@ def main():
         controller_cycle_phase = "return"
         controller_cycle_phase_started_at = 0.0
         controller_cycle_preview_name = None
+        controller_cycle_return_target_cell = None
+        controller_cycle_return_target_heading_rad = None
+        controller_cycle_forward_assist_enabled = False
+        controller_cycle_forward_assist_state = "OFF"
+        controller_cycle_forward_assist_reason = "inactive"
+        clear_navigation_goal()
         reset_auto_drive_shape(time.time())
         send_nt_command(False, 0.0, 0.0, 0.1)
         if completed:
@@ -3418,7 +3450,9 @@ def main():
 
     def start_controller_cycle_preview(source="button"):
         nonlocal controller_cycle_preview_active, controller_cycle_phase, controller_cycle_phase_started_at
-        nonlocal controller_cycle_preview_name
+        nonlocal controller_cycle_preview_name, controller_cycle_return_target_cell
+        nonlocal controller_cycle_return_target_heading_rad, controller_cycle_forward_assist_enabled
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
         if controller_macros.recording:
             print("Stop controller recording before starting AutoRecord.")
             return
@@ -3439,6 +3473,11 @@ def main():
         controller_cycle_phase = "return"
         controller_cycle_phase_started_at = time.time()
         controller_cycle_preview_name = str(macro.get("name", "controller_autorecord"))
+        controller_cycle_return_target_cell = None
+        controller_cycle_return_target_heading_rad = None
+        controller_cycle_forward_assist_enabled = False
+        controller_cycle_forward_assist_state = "OFF"
+        controller_cycle_forward_assist_reason = "inactive"
         reset_auto_drive_shape(controller_cycle_phase_started_at)
         print(
             f"Starting AutoRecord for {controller_cycle_preview_name} via {source} "
@@ -3448,8 +3487,64 @@ def main():
         )
         publish_map_ui_state(force=True)
 
+    def start_controller_map_cycle_preview(source="button"):
+        nonlocal controller_cycle_preview_active, controller_cycle_phase, controller_cycle_phase_started_at
+        nonlocal controller_cycle_preview_name, controller_cycle_return_target_cell
+        nonlocal controller_cycle_return_target_heading_rad, controller_cycle_forward_assist_enabled
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
+        if args.camera_only:
+            print("Map AutoRecord is unavailable in rec.sh / camera-only mode.")
+            return
+        if controller_macros.recording:
+            print("Stop controller recording before starting Map AutoRecord.")
+            return
+        if dig_profiles.recording or dig_profile_preview_active:
+            print("Stop dig recording/playback before starting Map AutoRecord.")
+            return
+        if controller_macro_preview_active:
+            print("Stop normal controller playback before starting Map AutoRecord.")
+            return
+        if controller_cycle_preview_active:
+            print("Stop the current AutoRecord before starting Map AutoRecord.")
+            return
+        macro = resolve_preview_controller_macro()
+        if macro is None:
+            print("No controller macro available for Map AutoRecord.")
+            return
+        valid_macro, validation_reason = validate_macro_for_map_autorecord(macro)
+        if not valid_macro:
+            print(validation_reason)
+            return
+        map_return_target = resolve_controller_cycle_map_return_target(macro)
+        if map_return_target is None:
+            print("This recording does not have a usable saved map start pose for Map AutoRecord.")
+            return
+        clear_navigation_goal()
+        mining.abort()
+        set_manual_drive_mode(False, f"{source} Map AutoRecord")
+        controller_cycle_preview_active = True
+        controller_cycle_phase = "map_return"
+        controller_cycle_phase_started_at = time.time()
+        controller_cycle_preview_name = str(macro.get("name", "controller_map_autorecord"))
+        controller_cycle_return_target_cell = tuple(map_return_target["cell"])
+        controller_cycle_return_target_heading_rad = map_return_target.get("heading_rad")
+        controller_cycle_forward_assist_enabled = True
+        controller_cycle_forward_assist_state = "ARMED"
+        controller_cycle_forward_assist_reason = "waiting for map return"
+        set_navigation_goal_cell(
+            controller_cycle_return_target_cell[0],
+            controller_cycle_return_target_cell[1],
+        )
+        reset_auto_drive_shape(controller_cycle_phase_started_at)
+        print(
+            f"Starting Map AutoRecord for {controller_cycle_preview_name} via {source} "
+            "(map-guided return to the saved start pose, then replay forward once)."
+        )
+        publish_map_ui_state(force=True)
+
     def start_controller_recording(source="button"):
         nonlocal dig_name_input_focused, controller_macro_last_tailgate_open
+        nonlocal controller_recording_tracking_compromised, controller_recording_tracking_warned
         name_base = str(dig_name_input_text or "").strip()
         if not name_base:
             dig_name_input_focused = True
@@ -3473,17 +3568,31 @@ def main():
         if controller_macros.recording:
             print("Controller macro recording already active. Stop it first.")
             return
+        if (not args.camera_only) and tracking_enabled and (not tracking_pose_ok):
+            print("Tracking is not locked. Wait for the AprilTag/start-frame lock before starting a mapped recording.")
+            publish_map_ui_state(force=True)
+            return
         clear_navigation_goal()
         mining.abort()
         set_manual_drive_mode(True, f"{source} controller macro recording")
-        if not controller_macros.begin_recording(name_base=name_base):
+        recording_metadata = controller_macro_recording_metadata()
+        if not controller_macros.begin_recording(
+            name_base=name_base,
+            metadata=recording_metadata,
+        ):
             print("Failed to start controller macro recording.")
             return
         controller_macro_last_tailgate_open = None
+        controller_recording_tracking_compromised = False
+        controller_recording_tracking_warned = False
         print(
             "Recording controller macro. Drive and use actuators/door controls, "
             "then stop recording to save it."
         )
+        if recording_metadata is not None:
+            print("Saved map start pose for this recording.")
+            if not bool(recording_metadata.get("start_frame_locked_at_start", False)):
+                print("Start frame is not locked; this take will not be eligible for Map AutoRecord.")
         publish_map_ui_state(force=True)
 
     def stop_controller_recording(save=True, source="button"):
@@ -3499,6 +3608,12 @@ def main():
             f"Saved controller macro {macro['name']} "
             f"({float(macro.get('duration_sec', 0.0)):.2f}s) via {source}."
         )
+        metadata = macro.get("metadata") if isinstance(macro, dict) else None
+        if isinstance(metadata, dict) and bool(metadata.get("recording_compromised", False)):
+            print(
+                "This recording is marked compromised for Map AutoRecord: "
+                f"{str(metadata.get('recording_compromise_reason') or 'tracking degraded during recording')}."
+            )
         publish_map_ui_state(force=True)
 
     def start_dig_recording(style, phase, source="button"):
@@ -3679,6 +3794,403 @@ def main():
         mining_goal_active = False
         status_target_cell = None
         status_target_world = None
+
+    def set_navigation_goal_cell(row, col):
+        nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
+        nonlocal path_plan_mode, mining_goal_active, status_target_cell, status_target_world
+        goal_cell = (int(row), int(col))
+        path_cells = None
+        last_path_cells = None
+        last_start = None
+        last_goal = None
+        last_path_plan_time = 0.0
+        path_plan_mode = "none"
+        mining_goal_active = False
+        status_target_cell = None
+        status_target_world = None
+
+    def wrap_angle_rad(angle_rad):
+        angle = float(angle_rad)
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def controller_macro_recording_metadata():
+        if args.camera_only:
+            return None
+        if tracking_enabled and (not tracking_pose_ok):
+            return None
+        if drive_origin_row_col is None or drive_origin_pos_map is None or rover_forward_world is None:
+            return None
+        drive_forward = np.array(
+            drive_forward_world_from_rover(rover_forward_world),
+            dtype=np.float32,
+        ).reshape(3,)
+        metadata = {
+            "start_cell": [int(drive_origin_row_col[0]), int(drive_origin_row_col[1])],
+            "start_pos_map": [
+                float(drive_origin_pos_map[0]),
+                float(drive_origin_pos_map[2]),
+            ],
+            "start_heading_rad": float(
+                math.atan2(float(drive_forward[2]), float(drive_forward[0]))
+            ),
+            "start_frame_locked_at_start": bool(start_frame_locked_once),
+            "tracking_ok_at_start": bool(tracking_pose_ok),
+            "recording_compromised": False,
+            "recording_compromise_reason": "",
+            "drive_heading_flip": bool(args.drive_heading_flip),
+            "hard_drive_flip": bool(args.hard_drive_flip),
+            "steering_flip": bool(args.steering_flip),
+            "camera_mount": str(args.camera_mount),
+        }
+        return metadata
+
+    def mark_controller_recording_compromised(reason):
+        nonlocal controller_recording_tracking_compromised, controller_recording_tracking_warned
+        controller_recording_tracking_compromised = True
+        if isinstance(getattr(controller_macros, "recording_metadata", None), dict):
+            controller_macros.recording_metadata["recording_compromised"] = True
+            controller_macros.recording_metadata["recording_compromise_reason"] = str(reason or "tracking compromised")
+        if (not controller_recording_tracking_warned) and reason:
+            print(f"Controller recording warning: {reason}. Map AutoRecord will be blocked for this take.")
+            controller_recording_tracking_warned = True
+
+    def validate_macro_for_map_autorecord(macro):
+        if not isinstance(macro, dict):
+            return False, "No controller macro selected."
+        metadata = macro.get("metadata")
+        if not isinstance(metadata, dict):
+            return False, "This recording does not have saved map metadata."
+        if not bool(metadata.get("start_frame_locked_at_start", False)):
+            return False, "This recording was started without a start-frame / AprilTag lock."
+        if bool(metadata.get("recording_compromised", False)):
+            reason = str(metadata.get("recording_compromise_reason") or "tracking was lost during the recording")
+            return False, f"This recording is marked compromised: {reason}."
+        if bool(metadata.get("drive_heading_flip", False)) != bool(args.drive_heading_flip):
+            return False, "Drive heading flip does not match the recording."
+        if bool(metadata.get("hard_drive_flip", False)) != bool(args.hard_drive_flip):
+            return False, "Hard drive flip does not match the recording."
+        if bool(metadata.get("steering_flip", False)) != bool(args.steering_flip):
+            return False, "Steering flip does not match the recording."
+        if str(metadata.get("camera_mount", "")) != str(args.camera_mount):
+            return False, "Camera mount does not match the recording."
+        return True, ""
+
+    def resolve_controller_cycle_map_return_target(macro):
+        if macro is None or args.camera_only:
+            return None
+        if tracking_enabled and (not tracking_pose_ok):
+            return None
+        metadata = macro.get("metadata") if isinstance(macro, dict) else None
+        if not isinstance(metadata, dict):
+            return None
+        start_cell = metadata.get("start_cell")
+        if (
+            not isinstance(start_cell, (list, tuple))
+            or len(start_cell) != 2
+        ):
+            return None
+        try:
+            cell = (int(start_cell[0]), int(start_cell[1]))
+        except Exception:
+            return None
+        heading_value = metadata.get("start_heading_rad")
+        heading_rad = None
+        if isinstance(heading_value, (int, float)) and math.isfinite(float(heading_value)):
+            heading_rad = float(heading_value)
+        return {
+            "cell": cell,
+            "heading_rad": heading_rad,
+        }
+
+    def begin_controller_cycle_forward(now, announce=True):
+        nonlocal controller_cycle_phase, controller_cycle_phase_started_at
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
+        clear_navigation_goal()
+        controller_cycle_phase = "forward"
+        controller_cycle_phase_started_at = float(now)
+        controller_cycle_forward_assist_state = "ACTIVE" if controller_cycle_forward_assist_enabled else "OFF"
+        controller_cycle_forward_assist_reason = (
+            "path assist ready" if controller_cycle_forward_assist_enabled else "inactive"
+        )
+        if announce:
+            print("AutoRecord: reached recorded start point, replaying forward.")
+            publish_map_ui_state(force=True)
+
+    def fallback_map_cycle_to_reverse_return(now, reason):
+        nonlocal controller_cycle_phase, controller_cycle_phase_started_at
+        nonlocal controller_cycle_return_target_cell, controller_cycle_return_target_heading_rad
+        nonlocal controller_cycle_forward_assist_enabled
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
+        clear_navigation_goal()
+        controller_cycle_phase = "return"
+        controller_cycle_phase_started_at = float(now)
+        controller_cycle_return_target_cell = None
+        controller_cycle_return_target_heading_rad = None
+        controller_cycle_forward_assist_enabled = False
+        controller_cycle_forward_assist_state = "OFF"
+        controller_cycle_forward_assist_reason = str(reason or "fallback to reverse return")
+        print(f"Map AutoRecord assist disabled: {controller_cycle_forward_assist_reason}. Falling back to reverse replay.")
+        publish_map_ui_state(force=True)
+
+    def compute_goal_navigation_command(goal_rc, target_heading_rad=None, reverse_path_drive=False):
+        if goal_rc is None:
+            return {"state": "unavailable"}
+        if drive_origin_row_col is None or drive_origin_pos_map is None or rover_forward_world is None:
+            return {"state": "unavailable"}
+        draw_path = path_cells if path_cells else last_path_cells
+        target_rc = pick_drive_target(draw_path, drive_origin_row_col, goal_rc)
+        if target_rc is not None:
+            target_world = occ_map.grid_to_world(target_rc[0], target_rc[1])
+            if target_world is None:
+                return {"state": "unavailable"}
+            tx, tz = target_world
+        elif args.allow_direct_no_path:
+            goal_world_fallback = occ_map.grid_to_world(goal_rc[0], goal_rc[1])
+            if goal_world_fallback is None:
+                return {"state": "unavailable"}
+            tx, tz = goal_world_fallback
+            target_rc = goal_rc
+        else:
+            return {"state": "waiting_path"}
+
+        cx, cz = float(drive_origin_pos_map[0]), float(drive_origin_pos_map[2])
+        goal_world = occ_map.grid_to_world(goal_rc[0], goal_rc[1])
+        if goal_world is None:
+            return {"state": "unavailable"}
+        gx, gz = goal_world
+        gx_drive = zed_x_from_map(gx)
+        goal_dist = math.hypot(gx_drive - cx, gz - cz)
+
+        forward = drive_forward_world_from_rover(rover_forward_world)
+        heading = math.atan2(float(forward[2]), float(forward[0]))
+        tol = math.radians(max(0.0, args.drive_heading_tol_deg))
+
+        if goal_dist <= args.drive_goal_tol_m:
+            if target_heading_rad is None:
+                return {"state": "arrived"}
+            heading_err = wrap_angle_rad(float(target_heading_rad) - heading)
+            if abs(heading_err) <= tol:
+                return {"state": "arrived"}
+            max_turn_cmd = max(0.0, min(1.0, float(args.drive_max_turn_cmd)))
+            turn_target = max(-max_turn_cmd, min(max_turn_cmd, args.drive_turn_k * heading_err))
+            fwd, turn = apply_auto_drive_shape(0.0, turn_target, time.time())
+            return {"state": "aligning", "fwd": fwd, "turn": turn}
+
+        tx_drive = zed_x_from_map(tx)
+        dx = tx_drive - cx
+        dz = tz - cz
+        target = math.atan2(dz, dx)
+        if reverse_path_drive:
+            target += math.pi
+        err = wrap_angle_rad(target - heading)
+        err_abs = abs(err)
+        max_turn_cmd = max(0.0, min(1.0, float(args.drive_max_turn_cmd)))
+        if err_abs <= tol:
+            turn_target = 0.0
+        else:
+            turn_target = max(-max_turn_cmd, min(max_turn_cmd, args.drive_turn_k * err))
+
+        slow_turn_rad = math.radians(max(0.0, float(args.drive_slow_turn_deg)))
+        stop_turn_rad = math.radians(max(0.0, float(args.drive_stop_turn_deg)))
+        if stop_turn_rad < slow_turn_rad:
+            stop_turn_rad = slow_turn_rad
+        min_turn_forward_scale = max(
+            0.0, min(1.0, float(args.drive_min_turn_forward_scale))
+        )
+        if stop_turn_rad <= 1e-6:
+            turn_scale = min_turn_forward_scale if err_abs > 0.0 else 1.0
+        elif err_abs >= stop_turn_rad:
+            turn_scale = min_turn_forward_scale
+        elif err_abs <= slow_turn_rad:
+            turn_scale = 1.0
+        else:
+            turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
+            turn_scale = max(min_turn_forward_scale, turn_scale)
+
+        align_scale = max(0.0, math.cos(err))
+        fwd_mag = max(0.0, min(1.0, float(args.drive_speed))) * align_scale * max(
+            0.0, min(1.0, turn_scale)
+        )
+        fwd_target = -fwd_mag if reverse_path_drive else fwd_mag
+        fwd_target, turn_target = mix_ds_drive(fwd_target, turn_target)
+        fwd, turn = apply_auto_drive_shape(fwd_target, turn_target, time.time())
+        return {"state": "driving", "fwd": fwd, "turn": turn}
+
+    def controller_macro_path_points(macro):
+        points = []
+        if not isinstance(macro, dict):
+            return points
+        for sample in macro.get("samples") or []:
+            try:
+                map_x = float(sample.get("map_x"))
+                map_z = float(sample.get("map_z"))
+            except Exception:
+                continue
+            if not (math.isfinite(map_x) and math.isfinite(map_z)):
+                continue
+            rc = occ_map.world_to_grid(map_x, map_z)
+            if rc is None:
+                continue
+            row, col = int(rc[0]), int(rc[1])
+            if points and points[-1] == (row, col):
+                continue
+            points.append((row, col))
+        return points
+
+    def controller_macro_path_error_m(macro):
+        if rover_pos_map is None or not isinstance(macro, dict):
+            return None
+        rover_x = float(rover_pos_map[0])
+        rover_z = float(rover_pos_map[2])
+        best_dist = None
+        for sample in macro.get("samples") or []:
+            try:
+                map_x = float(sample.get("map_x"))
+                map_z = float(sample.get("map_z"))
+            except Exception:
+                continue
+            if not (math.isfinite(map_x) and math.isfinite(map_z)):
+                continue
+            dist = math.hypot(map_x - rover_x, map_z - rover_z)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+        return best_dist
+
+    def controller_macro_assist_command(macro, elapsed_sec, base_fwd, base_turn):
+        nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
+        prev_state = str(controller_cycle_forward_assist_state)
+        prev_reason = str(controller_cycle_forward_assist_reason)
+        if (not controller_cycle_forward_assist_enabled) or args.camera_only:
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "inactive"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                if controller_cycle_forward_assist_state == "OFF" and controller_cycle_forward_assist_reason != "inactive":
+                    print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+        if tracking_enabled and (not tracking_pose_ok):
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "tracking not locked"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+        if rover_pos_map is None or rover_forward_world is None or not isinstance(macro, dict):
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "pose unavailable"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+        samples = macro.get("samples") or []
+        if not samples:
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "no mapped samples"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+
+        valid_samples = []
+        for sample in samples:
+            try:
+                map_x = float(sample.get("map_x"))
+                map_z = float(sample.get("map_z"))
+                sample_t = float(sample.get("t", 0.0))
+            except Exception:
+                continue
+            if not (math.isfinite(map_x) and math.isfinite(map_z) and math.isfinite(sample_t)):
+                continue
+            valid_samples.append((sample_t, map_x, map_z))
+        if not valid_samples:
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "no mapped samples"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+
+        rover_x = float(rover_pos_map[0])
+        rover_z = float(rover_pos_map[2])
+        path_error = controller_macro_path_error_m(macro)
+        if path_error is None:
+            path_error = 0.0
+        if path_error >= float(controller_cycle_forward_assist_disable_error_m):
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = f"path error {path_error:.2f}m too large"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+
+        lookahead_t = max(0.0, float(elapsed_sec)) + 0.35
+        target_idx = len(valid_samples) - 1
+        for idx, (sample_t, _, _) in enumerate(valid_samples):
+            if sample_t >= lookahead_t:
+                target_idx = idx
+                break
+
+        nearest_idx = 0
+        nearest_dist = None
+        for idx, (_, map_x, map_z) in enumerate(valid_samples):
+            dist = math.hypot(map_x - rover_x, map_z - rover_z)
+            if nearest_dist is None or dist < nearest_dist:
+                nearest_dist = dist
+                nearest_idx = idx
+
+        target_idx = max(target_idx, min(len(valid_samples) - 1, nearest_idx + 3))
+        _, target_x, target_z = valid_samples[target_idx]
+        dx = float(target_x - rover_x)
+        dz = float(target_z - rover_z)
+        if math.hypot(dx, dz) <= 1e-4:
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "no target delta"
+            result = (float(base_fwd), float(base_turn))
+            if controller_cycle_forward_assist_state != prev_state or controller_cycle_forward_assist_reason != prev_reason:
+                print(f"Map AutoRecord assist OFF: {controller_cycle_forward_assist_reason}.")
+            return result
+
+        forward = np.array(
+            drive_forward_world_from_rover(rover_forward_world),
+            dtype=np.float32,
+        ).reshape(3,)
+        current_heading = math.atan2(float(forward[2]), float(forward[0]))
+        target_heading = math.atan2(dz, dx)
+        heading_err = wrap_angle_rad(target_heading - current_heading)
+
+        assist_gain = max(
+            0.0,
+            min(
+                1.0,
+                (float(path_error) - float(controller_cycle_forward_assist_reduce_error_m))
+                / max(0.05, float(controller_cycle_forward_assist_disable_error_m) - float(controller_cycle_forward_assist_reduce_error_m)),
+            ),
+        )
+        heading_scale = max(0.0, min(1.0, abs(heading_err) / math.radians(28.0)))
+        assist_scale = max(assist_gain, 0.35 * heading_scale)
+        if assist_scale <= 1e-4:
+            controller_cycle_forward_assist_state = "OFF"
+            controller_cycle_forward_assist_reason = "path on track"
+            result = (float(base_fwd), float(base_turn))
+            return result
+
+        assist_turn = max(-0.40, min(0.40, 0.85 * heading_err))
+        blended_turn = ((1.0 - 0.55 * assist_scale) * float(base_turn)) + ((0.55 + 0.35 * assist_scale) * assist_turn)
+        blended_turn = max(-1.0, min(1.0, blended_turn))
+
+        forward_scale = 1.0
+        if path_error > 0.20:
+            forward_scale = max(0.35, 1.0 - min(0.55, (float(path_error) - 0.20) * 0.9))
+        if abs(heading_err) > math.radians(35.0):
+            forward_scale = min(forward_scale, 0.60)
+        blended_fwd = float(base_fwd) * forward_scale
+        controller_cycle_forward_assist_state = "REDUCED" if (path_error > 0.35 or abs(heading_err) > math.radians(24.0)) else "ACTIVE"
+        controller_cycle_forward_assist_reason = f"err {path_error:.2f}m heading {math.degrees(abs(heading_err)):.0f}deg"
+        return blended_fwd, blended_turn
 
     def set_direct_nav_enabled(enabled, source="button"):
         nonlocal direct_nav_enabled
@@ -4109,7 +4621,7 @@ def main():
                     "id": "controller_autorecord",
                     "label": "Start AutoRecord",
                     "command": "controller_autorecord",
-                    "active": bool(controller_cycle_preview_active),
+                    "active": bool(controller_cycle_preview_active and controller_cycle_phase != "map_return"),
                     "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
                 },
                 {
@@ -4118,6 +4630,20 @@ def main():
                     "command": "controller_stop",
                     "active": bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
                     "enabled": bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active),
+                },
+                {
+                    "id": "controller_map_autorecord",
+                    "label": "Map AutoRecord",
+                    "command": "controller_map_autorecord",
+                    "active": bool(controller_cycle_preview_active and controller_cycle_phase == "map_return"),
+                    "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not args.camera_only)),
+                },
+                {
+                    "id": "set_controller_replay_speed",
+                    "label": "Set Controller Replay Speed",
+                    "command": "set_controller_replay_speed",
+                    "active": False,
+                    "enabled": True,
                 },
                 {
                     "id": "controller_prev",
@@ -4990,6 +5516,22 @@ def main():
                 else:
                     stop_controller_macro_preview("button")
                 return
+        rect = status_button_rects.get("controller_map_autorecord")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_cycle_preview_active and controller_cycle_phase == "map_return":
+                    stop_controller_cycle_preview("button")
+                else:
+                    start_controller_map_cycle_preview("button")
+                return
+        rect = status_button_rects.get("controller_replay_speed_slider")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                frac = (x - x0) / max(1, (x1 - x0))
+                set_controller_macro_drive_scale(0.40 + frac * 1.20, "slider")
+                return
         rect = status_button_rects.get("controller_prev")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -5328,6 +5870,17 @@ def main():
                 stop_controller_cycle_preview("external command")
             else:
                 stop_controller_macro_preview("external command")
+        elif action == "controller_map_autorecord":
+            if controller_cycle_preview_active and controller_cycle_phase == "map_return":
+                stop_controller_cycle_preview("external command")
+            else:
+                start_controller_map_cycle_preview("external command")
+        elif action == "set_controller_replay_speed":
+            try:
+                value = float(payload.get("value", controller_macro_drive_scale))
+            except Exception:
+                value = float(controller_macro_drive_scale)
+            set_controller_macro_drive_scale(value, "external command")
         elif action == "controller_prev":
             cycle_controller_macro_cursor(-1, "external command")
         elif action == "controller_next":
@@ -6789,13 +7342,17 @@ def main():
                 f"Play: {str(controller_macro_preview_name or 'OFF')[:26]}"
                 if controller_macro_preview_active
                 else (
-                    f"AutoRecord: {controller_cycle_phase.title()} {str(controller_cycle_preview_name or '')[:18]}"
+                    (
+                        f"Map AutoRecord: {str(controller_cycle_preview_name or '')[:20]}"
+                        if controller_cycle_phase == "map_return"
+                        else f"AutoRecord: {controller_cycle_phase.title()} {str(controller_cycle_preview_name or '')[:18]}"
+                    )
                     if controller_cycle_preview_active and controller_cycle_preview_name
                     else "Idle"
                 )
             )
         )
-        record_section_h = 72 + 2 * (button_h + 10) + 140
+        record_section_h = 72 + 2 * (button_h + 10) + 224
         record_body_y = section_frame(
             cursor_y,
             record_section_h,
@@ -6807,7 +7364,8 @@ def main():
         controller_record_rect = grid_rect(record_body_y, 0, 0)
         controller_preview_rect = grid_rect(record_body_y, 0, 1)
         controller_autorecord_rect = grid_rect(record_body_y, 0, 2)
-        controller_stop_rect = grid_rect(record_body_y, 1, 0, span=3)
+        controller_stop_rect = grid_rect(record_body_y, 1, 0, span=2)
+        controller_map_autorecord_rect = grid_rect(record_body_y, 1, 2)
         draw_control_button(
             controller_record_rect,
             "Record: ON" if controller_macros.recording else "Record",
@@ -6828,10 +7386,11 @@ def main():
             controller_autorecord_rect,
             (
                 f"AutoRecord: {controller_cycle_phase.title()}"
-                if controller_cycle_preview_active else "Start AutoRecord"
+                if (controller_cycle_preview_active and controller_cycle_phase != "map_return")
+                else "Start AutoRecord"
             ),
             bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)),
-            bool(controller_cycle_preview_active),
+            bool(controller_cycle_preview_active and controller_cycle_phase != "map_return"),
             (90, 110, 10),
             (210, 255, 140),
         )
@@ -6843,7 +7402,33 @@ def main():
             (170, 70, 0),
             (255, 180, 120),
         )
+        draw_control_button(
+            controller_map_autorecord_rect,
+            (
+                "Map AutoRecord: ON"
+                if (controller_cycle_preview_active and controller_cycle_phase == "map_return")
+                else "Map AutoRecord"
+            ),
+            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not args.camera_only)),
+            bool(controller_cycle_preview_active and controller_cycle_phase == "map_return"),
+            (60, 90, 120),
+            (150, 220, 255),
+        )
         record_summary_y = record_body_y + 2 * (button_h + 10) + 24
+        selected_macro_path_error = controller_macro_path_error_m(
+            resolve_preview_controller_macro()
+            if (controller_macro_preview_active or controller_cycle_preview_active)
+            else controller_selected_macro
+        )
+        controller_replay_slider_y = record_summary_y + 126
+        controller_replay_slider_x0 = card_x0 + card_inner
+        controller_replay_slider_x1 = card_x1 - card_inner
+        controller_replay_speed_slider_rect = (
+            controller_replay_slider_x0,
+            controller_replay_slider_y,
+            controller_replay_slider_x1,
+            controller_replay_slider_y + 44,
+        )
         put_control_line(
             f"Selected controller: {controller_selected_name[:30]}",
             record_summary_y,
@@ -6873,8 +7458,86 @@ def main():
             x=card_x0 + card_inner,
         )
         put_control_line(
-            f"Forward replay adds +{controller_cycle_mechanism_hold_sec:.1f}s hold for lower/extend actions",
+            (
+                "Map AutoRecord returns to start, then lightly steers along the recorded path"
+                if not args.camera_only
+                else "Map AutoRecord unavailable in rec.sh / camera-only mode"
+            ),
             record_summary_y + 86,
+            (185, 220, 255),
+            0.38,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            (
+                f"Recorded path error: {selected_macro_path_error:.2f}m | Assist {controller_cycle_forward_assist_state}"
+                if selected_macro_path_error is not None
+                else f"Recorded path overlay: unavailable until a mapped recording exists | Assist {controller_cycle_forward_assist_state}"
+            ),
+            record_summary_y + 106,
+            (185, 220, 255),
+            0.38,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            f"Replay drive scale: {float(controller_macro_drive_scale):.2f}",
+            controller_replay_slider_y - 2,
+            (220, 235, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        cv2.rectangle(
+            controls,
+            (controller_replay_slider_x0, controller_replay_slider_y + 18),
+            (controller_replay_slider_x1, controller_replay_slider_y + 34),
+            (60, 60, 60),
+            -1,
+        )
+        cv2.rectangle(
+            controls,
+            (controller_replay_slider_x0, controller_replay_slider_y + 18),
+            (controller_replay_slider_x1, controller_replay_slider_y + 34),
+            (120, 120, 120),
+            1,
+        )
+        controller_replay_frac = (
+            max(0.40, min(1.60, float(controller_macro_drive_scale))) - 0.40
+        ) / 1.20
+        controller_replay_knob_x = int(
+            controller_replay_slider_x0
+            + controller_replay_frac * (controller_replay_slider_x1 - controller_replay_slider_x0)
+        )
+        cv2.circle(
+            controls,
+            (controller_replay_knob_x, controller_replay_slider_y + 26),
+            11,
+            (120, 210, 255),
+            -1,
+        )
+        cv2.circle(
+            controls,
+            (controller_replay_knob_x, controller_replay_slider_y + 26),
+            11,
+            (235, 245, 255),
+            1,
+        )
+        put_control_line(
+            "Slower",
+            controller_replay_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=controller_replay_slider_x0,
+        )
+        put_control_line(
+            "Faster",
+            controller_replay_slider_y + 52,
+            (180, 180, 180),
+            0.36,
+            x=max(controller_replay_slider_x0, controller_replay_slider_x1 - 44),
+        )
+        put_control_line(
+            "Use this to match replay wheel speed against your marker line.",
+            controller_replay_slider_y + 74,
             (185, 220, 255),
             0.38,
             x=card_x0 + card_inner,
@@ -7136,6 +7799,8 @@ def main():
             ("controller_preview", controller_preview_rect),
             ("controller_autorecord", controller_autorecord_rect),
             ("controller_stop", controller_stop_rect),
+            ("controller_map_autorecord", controller_map_autorecord_rect),
+            ("controller_replay_speed_slider", controller_replay_speed_slider_rect),
             ("controller_prev", controller_prev_rect),
             ("controller_next", controller_next_rect),
             ("controller_use", controller_use_rect),
@@ -7594,27 +8259,34 @@ def main():
                                     if controller_cycle_phase == "forward" else 0.0
                                 ),
                                 suppress_mechanisms=bool(controller_cycle_phase == "return"),
+                                drive_only_return=bool(controller_cycle_phase == "return"),
                             )
                             macro_duration = 0.0
                             if cycle_macro is not None:
-                                macro_duration = float(cycle_macro.get("duration_sec", 0.0))
-                            if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
                                 if controller_cycle_phase == "return":
-                                    controller_cycle_phase = "forward"
-                                    controller_cycle_phase_started_at = now
-                                    print("AutoRecord: reached recorded start point, replaying forward.")
-                                    publish_map_ui_state(force=True)
-                                    controller_macro_playback_cmd = None
+                                    drive_samples = controller_macros._movement_timeline_samples(
+                                        cycle_macro.get("samples") or []
+                                    )
+                                    macro_duration = float(drive_samples[-1].get("_play_t", 0.0)) if drive_samples else 0.0
                                 else:
-                                    stop_controller_cycle_preview("auto", completed=True)
-                            else:
-                                reset_auto_drive_shape(now)
-                                preview_fwd = float(controller_macro_playback_cmd["fwd"])
-                                preview_turn = float(controller_macro_playback_cmd["turn"])
-                                preview_fwd, preview_turn = mix_ds_drive(
-                                    preview_fwd,
-                                    preview_turn,
-                                )
+                                    macro_duration = float(cycle_macro.get("duration_sec", 0.0))
+                                if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
+                                    if controller_cycle_phase == "return":
+                                        begin_controller_cycle_forward(now, announce=True)
+                                        controller_macro_playback_cmd = None
+                                    else:
+                                        stop_controller_cycle_preview("auto", completed=True)
+                                else:
+                                    reset_auto_drive_shape(now)
+                                    preview_fwd = float(controller_macro_playback_cmd["fwd"])
+                                    preview_turn = float(controller_macro_playback_cmd["turn"])
+                                    if controller_cycle_phase == "forward":
+                                        preview_fwd *= float(controller_macro_drive_scale)
+                                        preview_turn *= float(controller_macro_drive_scale)
+                                    preview_fwd, preview_turn = mix_ds_drive(
+                                        preview_fwd,
+                                        preview_turn,
+                                    )
                                 send_nt_command(
                                     True,
                                     preview_fwd,
@@ -7628,16 +8300,18 @@ def main():
                             macro_duration = 0.0
                             if preview_macro is not None:
                                 macro_duration = float(preview_macro.get("duration_sec", 0.0))
-                            if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
-                                stop_controller_macro_preview("auto", completed=True)
-                            else:
-                                reset_auto_drive_shape(now)
-                                preview_fwd = float(controller_macro_playback_cmd["fwd"])
-                                preview_turn = float(controller_macro_playback_cmd["turn"])
-                                preview_fwd, preview_turn = mix_ds_drive(
-                                    preview_fwd,
-                                    preview_turn,
-                                )
+                                if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
+                                    stop_controller_macro_preview("auto", completed=True)
+                                else:
+                                    reset_auto_drive_shape(now)
+                                    preview_fwd = float(controller_macro_playback_cmd["fwd"])
+                                    preview_turn = float(controller_macro_playback_cmd["turn"])
+                                    preview_fwd *= float(controller_macro_drive_scale)
+                                    preview_turn *= float(controller_macro_drive_scale)
+                                    preview_fwd, preview_turn = mix_ds_drive(
+                                        preview_fwd,
+                                        preview_turn,
+                                    )
                                 send_nt_command(
                                     True,
                                     preview_fwd,
@@ -8619,6 +9293,34 @@ def main():
                                     cv2.LINE_AA,
                                 )
                     # Draw goal marker.
+                    path_preview_macro = None
+                    if controller_cycle_preview_active or controller_macro_preview_active:
+                        path_preview_macro = resolve_preview_controller_macro()
+                    elif not controller_macros.recording:
+                        path_preview_macro = controller_macros.get_selected_macro()
+                    record_path_points = controller_macro_path_points(path_preview_macro)
+                    if len(record_path_points) >= 2:
+                        record_path_color = (
+                            (255, 220, 80)
+                            if (controller_cycle_preview_active or controller_macro_preview_active)
+                            else (120, 180, 255)
+                        )
+                        for idx in range(1, len(record_path_points)):
+                            pr0, pc0 = record_path_points[idx - 1]
+                            pr1, pc1 = record_path_points[idx]
+                            cv2.line(
+                                map_vis,
+                                (pc0, pr0),
+                                (pc1, pr1),
+                                record_path_color,
+                                1,
+                                cv2.LINE_AA,
+                            )
+                        path_start_r, path_start_c = record_path_points[0]
+                        path_end_r, path_end_c = record_path_points[-1]
+                        cv2.circle(map_vis, (path_start_c, path_start_r), 3, (255, 255, 255), 1)
+                        cv2.circle(map_vis, (path_end_c, path_end_r), 3, record_path_color, -1)
+                    # Draw goal marker.
                     if goal_cell is not None:
                         gr, gc = goal_cell
                         if 0 <= gr < occ_map.grid_h and 0 <= gc < occ_map.grid_w:
@@ -8752,6 +9454,8 @@ def main():
                             controller_macro_playback_cmd = None
                             refresh_ds_joystick_state()
                             if controller_macros.recording:
+                                if tracking_enabled and (not tracking_pose_ok):
+                                    mark_controller_recording_compromised("tracking lock was lost during recording")
                                 record_fwd = 0.0
                                 record_turn = 0.0
                                 telemetry_fwd = float("nan")
@@ -8789,6 +9493,15 @@ def main():
                                     mechanism_state["right_extend_on"],
                                     mechanism_state["door_open_on"],
                                     mechanism_state["door_close_on"],
+                                    map_x=float(rover_pos_map[0]) if rover_pos_map is not None else None,
+                                    map_z=float(rover_pos_map[2]) if rover_pos_map is not None else None,
+                                    heading_rad=(
+                                        math.atan2(
+                                            float(drive_forward_world_from_rover(rover_forward_world)[2]),
+                                            float(drive_forward_world_from_rover(rover_forward_world)[0]),
+                                        )
+                                        if rover_forward_world is not None else None
+                                    ),
                                 )
                             # Watchdog: NT telemetry lost — stop immediately.
                             _nt_timeout = float(args.nt_timeout_sec)
@@ -8881,6 +9594,31 @@ def main():
                                 )
                             elif controller_cycle_preview_active:
                                 cycle_macro = resolve_preview_controller_macro()
+                                if controller_cycle_phase == "map_return":
+                                    if tracking_enabled and (not tracking_pose_ok):
+                                        fallback_map_cycle_to_reverse_return(
+                                            now,
+                                            "tracking lost during map return",
+                                        )
+                                        continue
+                                    nav_cmd = compute_goal_navigation_command(
+                                        controller_cycle_return_target_cell,
+                                        target_heading_rad=controller_cycle_return_target_heading_rad,
+                                    )
+                                    if nav_cmd.get("state") == "arrived":
+                                        begin_controller_cycle_forward(now, announce=True)
+                                        controller_macro_playback_cmd = None
+                                        continue
+                                    if nav_cmd.get("state") in ("driving", "aligning"):
+                                        send_nt_command(
+                                            True,
+                                            float(nav_cmd.get("fwd", 0.0)),
+                                            float(nav_cmd.get("turn", 0.0)),
+                                            1.0 / max(1.0, args.drive_rate_hz),
+                                        )
+                                    else:
+                                        send_nt_command(False, 0.0, 0.0, 0.1)
+                                    continue
                                 elapsed_preview = now - float(controller_cycle_phase_started_at)
                                 controller_macro_playback_cmd = controller_macros.playback_sample_for_macro(
                                     cycle_macro,
@@ -8891,24 +9629,39 @@ def main():
                                         if controller_cycle_phase == "forward" else 0.0
                                     ),
                                     suppress_mechanisms=bool(controller_cycle_phase == "return"),
+                                    drive_only_return=bool(controller_cycle_phase == "return"),
                                 )
                                 macro_duration = 0.0
                                 if cycle_macro is not None:
-                                    macro_duration = float(cycle_macro.get("duration_sec", 0.0))
+                                    if controller_cycle_phase == "return":
+                                        drive_samples = controller_macros._movement_timeline_samples(
+                                            cycle_macro.get("samples") or []
+                                        )
+                                        macro_duration = float(drive_samples[-1].get("_play_t", 0.0)) if drive_samples else 0.0
+                                    else:
+                                        macro_duration = float(cycle_macro.get("duration_sec", 0.0))
                                 if controller_macro_playback_cmd is None or elapsed_preview > max(0.05, macro_duration):
                                     if controller_cycle_phase == "return":
-                                        controller_cycle_phase = "forward"
-                                        controller_cycle_phase_started_at = now
-                                        print("AutoRecord: reached recorded start point, replaying forward.")
-                                        publish_map_ui_state(force=True)
+                                        begin_controller_cycle_forward(now, announce=True)
                                         controller_macro_playback_cmd = None
                                         continue
                                     stop_controller_cycle_preview("auto", completed=True)
                                     continue
                                 reset_auto_drive_shape(now)
+                                assist_fwd = float(controller_macro_playback_cmd["fwd"])
+                                assist_turn = float(controller_macro_playback_cmd["turn"])
+                                if controller_cycle_phase == "forward":
+                                    assist_fwd *= float(controller_macro_drive_scale)
+                                    assist_turn *= float(controller_macro_drive_scale)
+                                    assist_fwd, assist_turn = controller_macro_assist_command(
+                                        cycle_macro,
+                                        elapsed_preview,
+                                        assist_fwd,
+                                        assist_turn,
+                                    )
                                 preview_fwd, preview_turn = mix_ds_drive(
-                                    controller_macro_playback_cmd["fwd"],
-                                    controller_macro_playback_cmd["turn"],
+                                    assist_fwd,
+                                    assist_turn,
                                 )
                                 send_nt_command(
                                     True,
@@ -8928,8 +9681,8 @@ def main():
                                     continue
                                 reset_auto_drive_shape(now)
                                 preview_fwd, preview_turn = mix_ds_drive(
-                                    controller_macro_playback_cmd["fwd"],
-                                    controller_macro_playback_cmd["turn"],
+                                    float(controller_macro_playback_cmd["fwd"]) * float(controller_macro_drive_scale),
+                                    float(controller_macro_playback_cmd["turn"]) * float(controller_macro_drive_scale),
                                 )
                                 send_nt_command(
                                     True,
