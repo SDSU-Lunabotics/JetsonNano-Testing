@@ -15,7 +15,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Preview and optionally record a USB camera for power logger monitoring."
     )
-    parser.add_argument("--device", default="/dev/video0", help="Video device path.")
+    parser.add_argument("--device", default="/dev/video1", help="Video device path.")
     parser.add_argument("--width", type=int, default=1280, help="Capture width.")
     parser.add_argument("--height", type=int, default=720, help="Capture height.")
     parser.add_argument("--fps", type=float, default=30.0, help="Requested capture FPS.")
