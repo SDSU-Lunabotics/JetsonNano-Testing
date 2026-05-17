@@ -2,6 +2,7 @@
 import argparse
 import os
 import time
+from collections import deque
 from datetime import datetime
 
 import cv2
@@ -59,13 +60,23 @@ def make_writer(output_dir, frame_width, frame_height, fps):
     return writer, path
 
 
-def draw_overlay(frame, recording, output_path, frame_width, frame_height, fps):
+def draw_overlay(
+    frame,
+    recording,
+    output_path,
+    frame_width,
+    frame_height,
+    preview_fps,
+    record_fps,
+):
     status_color = (0, 220, 0) if recording else (0, 180, 255)
     status_text = "REC" if recording else "PREVIEW"
     lines = [
-        f"{status_text}  {frame_width}x{frame_height} @ {fps:.1f} fps",
+        f"{status_text}  {frame_width}x{frame_height}  live {preview_fps:.1f} fps",
         "Keys: r = start/stop recording, q or ESC = quit",
     ]
+    if recording and record_fps is not None:
+        lines.append(f"Recording fps: {record_fps:.1f}")
     if output_path:
         lines.append(f"File: {os.path.basename(output_path)}")
 
@@ -100,15 +111,19 @@ def main():
     cap = open_camera(args.device, args.width, args.height, args.fps)
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or args.width
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or args.height
-    actual_fps = cap.get(cv2.CAP_PROP_FPS) or args.fps
+    reported_fps = cap.get(cv2.CAP_PROP_FPS) or args.fps
 
     writer = None
     output_path = None
     recording = False
+    record_fps = None
+    frame_times = deque(maxlen=90)
+    measured_fps = args.fps
 
     if args.auto_record:
-        writer, output_path = make_writer(args.output_dir, actual_width, actual_height, actual_fps)
+        writer, output_path = make_writer(args.output_dir, actual_width, actual_height, args.fps)
         recording = True
+        record_fps = args.fps
         print(f"Recording started: {output_path}")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
@@ -127,11 +142,26 @@ def main():
                 time.sleep(0.02)
                 continue
 
+            now = time.perf_counter()
+            frame_times.append(now)
+            if len(frame_times) >= 2:
+                elapsed = frame_times[-1] - frame_times[0]
+                if elapsed > 0:
+                    measured_fps = (len(frame_times) - 1) / elapsed
+
             if recording and writer is not None:
                 writer.write(frame)
 
             preview = frame.copy()
-            draw_overlay(preview, recording, output_path, actual_width, actual_height, actual_fps)
+            draw_overlay(
+                preview,
+                recording,
+                output_path,
+                actual_width,
+                actual_height,
+                measured_fps,
+                record_fps,
+            )
             cv2.imshow(WINDOW_NAME, preview)
 
             key = cv2.waitKey(1) & 0xFF
@@ -143,14 +173,21 @@ def main():
                     assert writer is not None
                     writer.release()
                     writer = None
+                    record_fps = None
                     print(f"Recording stopped: {output_path}")
                     output_path = None
                 else:
+                    # Use the measured live FPS so saved playback matches observed capture speed.
+                    start_fps = max(1.0, min(args.fps, measured_fps or reported_fps or args.fps))
                     writer, output_path = make_writer(
-                        args.output_dir, actual_width, actual_height, actual_fps
+                        args.output_dir, actual_width, actual_height, start_fps
                     )
+                    record_fps = start_fps
                     recording = True
-                    print(f"Recording started: {output_path}")
+                    print(
+                        f"Recording started: {output_path} "
+                        f"(record_fps={record_fps:.1f}, live_fps={measured_fps:.1f}, reported_fps={reported_fps:.1f})"
+                    )
     finally:
         if writer is not None:
             writer.release()
