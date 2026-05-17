@@ -4,6 +4,7 @@ import os
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import cv2
 
@@ -15,7 +16,16 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Preview and optionally record a USB camera for power logger monitoring."
     )
-    parser.add_argument("--device", default="/dev/video1", help="Video device path.")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="Video device path, or 'auto' to detect the camera by name.",
+    )
+    parser.add_argument(
+        "--device-name",
+        default="icspring",
+        help="Case-insensitive camera name substring to use for auto-detection.",
+    )
     parser.add_argument("--width", type=int, default=1280, help="Capture width.")
     parser.add_argument("--height", type=int, default=720, help="Capture height.")
     parser.add_argument("--fps", type=float, default=30.0, help="Requested capture FPS.")
@@ -30,6 +40,37 @@ def build_arg_parser():
         help="Start recording immediately.",
     )
     return parser
+
+
+def detect_camera_device(device_name):
+    target = (device_name or "").strip().lower()
+    sys_class = Path("/sys/class/video4linux")
+    if not target or not sys_class.exists():
+        return None
+
+    matches = []
+    for entry in sorted(sys_class.glob("video*"), key=lambda p: p.name):
+        name_path = entry / "name"
+        dev_name = name_path.read_text().strip().lower() if name_path.exists() else ""
+        if target in dev_name:
+            matches.append(f"/dev/{entry.name}")
+
+    return matches[0] if matches else None
+
+
+def resolve_camera_device(device, device_name):
+    if device and device != "auto":
+        return device
+    detected = detect_camera_device(device_name)
+    if detected:
+        print(f"Auto-detected camera '{device_name}' -> {detected}")
+        return detected
+    fallback = "/dev/video0"
+    print(
+        f"Warning: could not auto-detect camera '{device_name}'. "
+        f"Falling back to {fallback}."
+    )
+    return fallback
 
 
 def open_camera(device, width, height, fps):
@@ -107,8 +148,9 @@ def draw_overlay(
 
 def main():
     args = build_arg_parser().parse_args()
+    camera_device = resolve_camera_device(args.device, args.device_name)
 
-    cap = open_camera(args.device, args.width, args.height, args.fps)
+    cap = open_camera(camera_device, args.width, args.height, args.fps)
     actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or args.width
     actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or args.height
     reported_fps = cap.get(cv2.CAP_PROP_FPS) or args.fps
@@ -124,7 +166,7 @@ def main():
         writer, output_path = make_writer(args.output_dir, actual_width, actual_height, args.fps)
         recording = True
         record_fps = args.fps
-        print(f"Recording started: {output_path}")
+        print(f"Recording started: {output_path} (device={camera_device})")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW_NAME, min(actual_width, 1280), min(actual_height, 720))
@@ -186,7 +228,8 @@ def main():
                     recording = True
                     print(
                         f"Recording started: {output_path} "
-                        f"(record_fps={record_fps:.1f}, live_fps={measured_fps:.1f}, reported_fps={reported_fps:.1f})"
+                        f"(device={camera_device}, "
+                        f"record_fps={record_fps:.1f}, live_fps={measured_fps:.1f}, reported_fps={reported_fps:.1f})"
                     )
     finally:
         if writer is not None:
