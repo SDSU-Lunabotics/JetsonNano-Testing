@@ -1203,3 +1203,69 @@ class MiningAutomation:
                        min(occ_map.z_max - occ_map.map_res_m, ap_z))
             rc = occ_map.world_to_grid(ap_x, ap_z)
         return rc
+
+    def preferred_navigation_mask(self, occ_map):
+        """
+        Return a soft preferred travel mask for mining navigation.
+
+        This is not a hard obstacle mask. It marks the excavation/deposit/start
+        regions plus a widened corridor between them so the path planner can
+        prefer staying near the scoring side and known open travel lanes.
+        """
+        grid_shape = (occ_map.grid_h, occ_map.grid_w)
+        mask = np.zeros(grid_shape, dtype=bool)
+
+        def _stamp_polygon(corners_rc):
+            if not corners_rc:
+                return
+            for rr, cc in self._polygon_cells(corners_rc, grid_shape):
+                mask[rr, cc] = True
+
+        _stamp_polygon(self.starting_corners_rc)
+        _stamp_polygon(self.deposit_corners_rc)
+        _stamp_polygon(self.excav_corners_rc)
+
+        corridor_points = []
+        if self.starting_corners_rc:
+            corridor_points.append(self._poly_centroid(self.starting_corners_rc))
+        if self.deposit_corners_rc:
+            dep_center = self._poly_centroid(self.deposit_corners_rc)
+            if not corridor_points or (
+                abs(corridor_points[-1][0] - dep_center[0]) > 1e-3
+                or abs(corridor_points[-1][1] - dep_center[1]) > 1e-3
+            ):
+                corridor_points.append(dep_center)
+        if self._deposit_approach_rc is not None:
+            corridor_points.append(self._deposit_approach_rc)
+        if self.state == MiningState.NAVIGATE_DIG and self.dig_index < len(self.dig_points_rc):
+            corridor_points.append(self.dig_points_rc[self.dig_index])
+        elif self.excav_corners_rc:
+            corridor_points.append(self._poly_centroid(self.excav_corners_rc))
+
+        if HAS_CV2 and len(corridor_points) >= 2:
+            rover_size_m = max(0.10, float(self.cfg.get("rover_size_m", 0.305)))
+            corridor_width_m = max(
+                rover_size_m * 3.0,
+                float(self.cfg.get("nav_corridor_width_m", 1.20)),
+            )
+            corridor_px = max(1, int(round(corridor_width_m / max(1e-6, occ_map.map_res_m))))
+            corridor_mask = np.zeros(grid_shape, dtype=np.uint8)
+            prev_pt = None
+            for point in corridor_points:
+                rr = int(round(point[0]))
+                cc = int(round(point[1]))
+                rr = max(0, min(grid_shape[0] - 1, rr))
+                cc = max(0, min(grid_shape[1] - 1, cc))
+                if prev_pt is not None:
+                    cv2.line(
+                        corridor_mask,
+                        (int(prev_pt[1]), int(prev_pt[0])),
+                        (cc, rr),
+                        1,
+                        corridor_px,
+                        cv2.LINE_AA,
+                    )
+                prev_pt = (rr, cc)
+            mask |= corridor_mask.astype(bool)
+
+        return mask if np.any(mask) else None

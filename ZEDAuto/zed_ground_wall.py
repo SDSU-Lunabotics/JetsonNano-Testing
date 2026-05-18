@@ -1174,29 +1174,56 @@ def main():
         span_u = max(0.0, local_u_max - local_u_min)
         span_v = max(0.0, local_v_max - local_v_min)
 
-        if span_u >= span_v:
-            excav_axis = "u"
-            split_value = start_w + max(0.0, (local_u_max - start_w) * 0.5)
-            split_value = min(max(split_value, local_u_min), local_u_max)
+        excav_axis = str(_mining_cfg.get("start_frame_excav_axis", "v") or "v").strip().lower()
+        excav_side = str(_mining_cfg.get("start_frame_excav_side", "start") or "start").strip().lower()
+        excav_fraction = max(
+            0.20,
+            min(0.80, float(_mining_cfg.get("start_frame_excav_fraction", 0.50))),
+        )
+        if excav_axis not in ("u", "v", "auto"):
+            excav_axis = "v"
+        if excav_axis == "auto":
+            excav_axis = "v" if span_v >= span_u else "u"
+        if excav_side not in ("start", "far"):
+            excav_side = "start"
+
+        if excav_axis == "u":
+            avail_min = max(local_u_min, start_w)
+            avail_max = local_u_max
+            if (avail_max - avail_min) < 0.10:
+                avail_min = local_u_min
+            split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+            split_value = min(max(split_value, avail_min), avail_max)
+            if excav_side == "start":
+                u0, u1 = avail_min, split_value
+            else:
+                u0, u1 = split_value, avail_max
             excav_local = np.array(
                 [
-                    [split_value, local_v_min],
-                    [local_u_max, local_v_min],
-                    [local_u_max, local_v_max],
-                    [split_value, local_v_max],
+                    [u0, local_v_min],
+                    [u1, local_v_min],
+                    [u1, local_v_max],
+                    [u0, local_v_max],
                 ],
                 dtype=np.float32,
             )
         else:
-            excav_axis = "v"
-            split_value = start_d + max(0.0, (local_v_max - start_d) * 0.5)
-            split_value = min(max(split_value, local_v_min), local_v_max)
+            avail_min = max(local_v_min, start_d)
+            avail_max = local_v_max
+            if (avail_max - avail_min) < 0.10:
+                avail_min = local_v_min
+            split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+            split_value = min(max(split_value, avail_min), avail_max)
+            if excav_side == "start":
+                v0, v1 = avail_min, split_value
+            else:
+                v0, v1 = split_value, avail_max
             excav_local = np.array(
                 [
-                    [local_u_min, split_value],
-                    [local_u_max, split_value],
-                    [local_u_max, local_v_max],
-                    [local_u_min, local_v_max],
+                    [local_u_min, v0],
+                    [local_u_max, v0],
+                    [local_u_max, v1],
+                    [local_u_min, v1],
                 ],
                 dtype=np.float32,
             )
@@ -1233,7 +1260,7 @@ def main():
         start_frame_last_error_m = float(fit_err)
         start_frame_last_status = (
             f"{status_prefix} from tags {start_frame_last_ids} "
-            f"(fit {float(fit_err):.03f} m, deposit=start, excav={excav_axis}-half)."
+            f"(fit {float(fit_err):.03f} m, deposit=start, excav={excav_axis}-{excav_side}-{excav_fraction:.2f})."
         )
         print(start_frame_last_status)
         return True
@@ -1574,6 +1601,16 @@ def main():
         "starting_zone_width_m": float(os.getenv("MINING_STARTING_ZONE_WIDTH_M", "1.50")),
         "starting_zone_depth_m": float(os.getenv("MINING_STARTING_ZONE_DEPTH_M", "1.50")),
         "starting_zone_apply_to_excav": os.getenv("MINING_STARTING_ZONE_APPLY_TO_EXCAV", "1"),
+        "start_frame_excav_axis": os.getenv("MINING_START_FRAME_EXCAV_AXIS", "v"),
+        "start_frame_excav_side": os.getenv("MINING_START_FRAME_EXCAV_SIDE", "start"),
+        "start_frame_excav_fraction": float(os.getenv("MINING_START_FRAME_EXCAV_FRACTION", "0.50")),
+        "nav_corridor_width_m": float(os.getenv("MINING_NAV_CORRIDOR_WIDTH_M", "1.20")),
+        "nav_zone_inflate_m": float(os.getenv("MINING_NAV_ZONE_INFLATE_M", "0.45")),
+        "nav_outside_corridor_bias": float(os.getenv("MINING_NAV_OUTSIDE_CORRIDOR_BIAS", "1.10")),
+        "nav_open_area_bias": float(os.getenv("MINING_NAV_OPEN_AREA_BIAS", "0.30")),
+        "no_progress_timeout_sec": float(os.getenv("MINING_NO_PROGRESS_TIMEOUT_SEC", "8.0")),
+        "no_progress_min_gain_m": float(os.getenv("MINING_NO_PROGRESS_MIN_GAIN_M", "0.18")),
+        "tracking_loss_abort_sec": float(os.getenv("MINING_TRACKING_LOSS_ABORT_SEC", "1.5")),
         "zones_path":            os.getenv("MINING_ZONES_PATH",
                                            os.path.join(SCRIPT_DIR, "mining_zones.json")),
     }
@@ -1674,6 +1711,12 @@ def main():
     manual_turn = 0.0
     manual_mode = True
     no_mapping_mode = False
+    pending_auto_run_source = None
+    mining_progress_state_key = None
+    mining_progress_baseline_dist_m = None
+    mining_progress_best_dist_m = None
+    mining_progress_last_improve_at = 0.0
+    mining_tracking_lost_since = 0.0
     if manual_mode:
         print("Manual drive mode: ON (startup)")
     if no_mapping_mode:
@@ -1844,6 +1887,7 @@ def main():
         controller_macro_drive_scale = value
         print(f"Controller replay drive scale set to {controller_macro_drive_scale:.2f} via {source}.")
         publish_map_ui_state(force=True)
+
     low_latency_mode = bool(args.camera_only)
     low_latency_restore_state = {
         "camera_overlay_enabled": True,
@@ -3150,6 +3194,92 @@ def main():
         start_frame_last_status = f"Start frame: scanning via {source}."
         print(start_frame_last_status)
         publish_map_ui_state(force=True)
+
+    def start_full_auto_run(source="button"):
+        nonlocal pending_auto_run_source
+        nonlocal demo_rover_pos_map
+        nonlocal emergency_stop, manual_mode, manual_fwd, manual_turn
+        nonlocal mining_progress_state_key, mining_progress_baseline_dist_m
+        nonlocal mining_progress_best_dist_m, mining_progress_last_improve_at
+        nonlocal mining_tracking_lost_since
+        requires_start_frame = bool(
+            tracking_enabled
+            and start_frame_tag_dictionary is not None
+            and len(start_frame_tag_layout) >= 3
+            and (not args.camera_only)
+        )
+        if requires_start_frame:
+            if start_frame_scan_active:
+                pending_auto_run_source = str(source)
+                print(f"Auto Run delayed: waiting for AprilTag start-frame scan ({source}).")
+                return False
+            if not tracking_pose_ok:
+                pending_auto_run_source = str(source)
+                print(f"Auto Run blocked: tracking is not locked yet ({source}).")
+                return False
+            if not start_frame_locked_once:
+                pending_auto_run_source = str(source)
+                request_start_frame_scan(f"{source} auto run")
+                print("Auto Run delayed: waiting for AprilTag start-frame lock to align zones.")
+                return False
+
+        pending_auto_run_source = None
+        clear_navigation_goal()
+        set_no_mapping_mode(False, f"auto run {source}")
+        suppress_driver_priority(1.25, f"auto run {source}")
+        if demo_auto_enabled:
+            demo_rover_pos_map = None
+        emergency_stop = False
+        manual_mode = False
+        manual_fwd = 0.0
+        manual_turn = 0.0
+        mining_progress_state_key = None
+        mining_progress_baseline_dist_m = None
+        mining_progress_best_dist_m = None
+        mining_progress_last_improve_at = 0.0
+        mining_tracking_lost_since = 0.0
+        mining.start_run()
+        print(f"Auto Run: START requested via {source}")
+        return True
+
+    def mining_run_active(state=None):
+        state = mining.state if state is None else state
+        return state in (
+            auto_mining.MiningState.PLAN_SWEEP,
+            auto_mining.MiningState.NAVIGATE_DIG,
+            auto_mining.MiningState.DIGGING,
+            auto_mining.MiningState.BACKUP,
+            auto_mining.MiningState.NAVIGATE_DEPOSIT,
+            auto_mining.MiningState.DEPOSITING,
+        )
+
+    def reset_mining_progress_watch():
+        nonlocal mining_progress_state_key, mining_progress_baseline_dist_m
+        nonlocal mining_progress_best_dist_m, mining_progress_last_improve_at
+        mining_progress_state_key = None
+        mining_progress_baseline_dist_m = None
+        mining_progress_best_dist_m = None
+        mining_progress_last_improve_at = 0.0
+
+    def reset_mining_tracking_watch():
+        nonlocal mining_tracking_lost_since
+        mining_tracking_lost_since = 0.0
+
+    def abort_mining_safety(reason, now=None):
+        nonlocal pending_auto_run_source, manual_fwd, manual_turn
+        pending_auto_run_source = None
+        manual_fwd = 0.0
+        manual_turn = 0.0
+        reset_mining_progress_watch()
+        reset_mining_tracking_watch()
+        clear_navigation_goal()
+        mining.abort()
+        if now is None:
+            now = time.time()
+        reset_auto_drive_shape(float(now))
+        send_nt_command(False, 0.0, 0.0, 0.1)
+        publish_map_ui_state(force=True)
+        print(f"[Mining] Safety abort: {reason}.")
 
     def set_show_all_dig_profiles(enabled, source="button"):
         nonlocal show_all_dig_profiles
@@ -5211,6 +5341,7 @@ def main():
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 if mining_running:
+                    pending_auto_run_source = None
                     mining.abort()
                     clear_navigation_goal()
                     manual_mode = False
@@ -5218,17 +5349,7 @@ def main():
                     manual_turn = 0.0
                     print("Auto Run: ABORTED via button")
                 else:
-                    clear_navigation_goal()
-                    emergency_stop = False
-                    manual_mode = False
-                    manual_fwd = 0.0
-                    manual_turn = 0.0
-                    set_no_mapping_mode(False, "auto run button")
-                    suppress_driver_priority(1.25, "auto run button")
-                    if demo_auto_enabled:
-                        demo_rover_pos_map = None
-                    mining.start_run()
-                    print("Auto Run: START requested via button")
+                    start_full_auto_run("button")
                 return
         rect = status_button_rects.get("direct_nav")
         if rect is not None:
@@ -5717,16 +5838,11 @@ def main():
             manual_fwd = 0.0
             manual_turn = 0.0
             if mining_running:
+                pending_auto_run_source = None
                 mining.abort()
                 print("Auto Run: ABORTED via external command")
             else:
-                emergency_stop = False
-                set_no_mapping_mode(False, "auto run external command")
-                suppress_driver_priority(1.25, "auto run external command")
-                if demo_auto_enabled:
-                    demo_rover_pos_map = None
-                mining.start_run()
-                print("Auto Run: START requested via external command")
+                start_full_auto_run("external command")
         elif action == "paint_safe":
             set_brush_tool(None if paint_safe_mode else "paint_safe")
             print(f"Paint Safe mode {'ON — click/drag map to lock cells safe' if paint_safe_mode else 'OFF'}")
@@ -8698,14 +8814,27 @@ def main():
                 drive_origin_pos_map = navigation_origin_world(rover_pos_map, rover_forward_world)
                 if drive_origin_pos_map is not None:
                     drive_origin_row_col = map_world_to_grid(drive_origin_pos_map[0], drive_origin_pos_map[2])
-                mining_running_now = mining.state in (
-                    auto_mining.MiningState.PLAN_SWEEP,
-                    auto_mining.MiningState.NAVIGATE_DIG,
-                    auto_mining.MiningState.DIGGING,
-                    auto_mining.MiningState.BACKUP,
-                    auto_mining.MiningState.NAVIGATE_DEPOSIT,
-                    auto_mining.MiningState.DEPOSITING,
-                )
+                mining_running_now = mining_run_active()
+                if tracking_enabled and mining_running_now and (not manual_mode):
+                    tracking_abort_sec = max(
+                        0.0,
+                        float(_mining_cfg.get("tracking_loss_abort_sec", 0.0)),
+                    )
+                    if tracking_pose_ok:
+                        reset_mining_tracking_watch()
+                    elif tracking_abort_sec > 0.0:
+                        if mining_tracking_lost_since <= 0.0:
+                            mining_tracking_lost_since = time.time()
+                        elif (time.time() - float(mining_tracking_lost_since)) >= tracking_abort_sec:
+                            abort_mining_safety(
+                                f"tracking lock lost for {time.time() - float(mining_tracking_lost_since):.1f}s",
+                                now=time.time(),
+                            )
+                            mining_running_now = False
+                    else:
+                        reset_mining_tracking_watch()
+                else:
+                    reset_mining_tracking_watch()
                 if start_frame_scan_active:
                     if tracking_enabled and (not tracking_pose_ok):
                         start_frame_scan_active = False
@@ -8788,6 +8917,10 @@ def main():
                                         status_prefix="Start frame scan locked",
                                     ):
                                         start_frame_locked_once = True
+                                        if pending_auto_run_source:
+                                            queued_source = pending_auto_run_source
+                                            print("Auto Run: AprilTag scan complete; starting full auto.")
+                                            start_full_auto_run(f"{queued_source} ready")
                                 else:
                                     start_frame_last_status = "Start frame: scan needs 3 stable tags."
                                     start_frame_last_error_m = None
@@ -8832,6 +8965,10 @@ def main():
                             else:
                                 if apply_start_frame_from_tags(_img_bgr, cloud, R_world_cam, t_map):
                                     start_frame_locked_once = True
+                                    if pending_auto_run_source:
+                                        queued_source = pending_auto_run_source
+                                        print("Auto Run: AprilTag lock complete; starting full auto.")
+                                        start_full_auto_run(f"{queued_source} ready")
                         except Exception as exc:
                             start_frame_last_status = f"Start frame: lock failed ({exc})."
                             start_frame_last_error_m = None
@@ -9108,8 +9245,9 @@ def main():
                             )
                     # Draw camera position marker (blue square).
                     # Mining tick: may override goal_cell or supply a direct drive command.
+                    mining_tick_now = time.time()
                     _mine_goal, _mine_drive, _mine_status = mining.tick(
-                        rover_row_col, occ_map, time.time()
+                        rover_row_col, occ_map, mining_tick_now
                     )
                     if _mine_goal is not None and _mine_goal != goal_cell:
                         goal_cell = _mine_goal
@@ -9123,6 +9261,68 @@ def main():
                         auto_mining.MiningState.ABORTED,
                     ):
                         clear_navigation_goal()
+                    mining_nav_state = mining.state in (
+                        auto_mining.MiningState.NAVIGATE_DIG,
+                        auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                    )
+                    if (
+                        mining_nav_state
+                        and (not manual_mode)
+                        and _mine_goal is not None
+                        and drive_origin_row_col is not None
+                    ):
+                        nav_state_key = (
+                            mining.state.value,
+                            int(_mine_goal[0]),
+                            int(_mine_goal[1]),
+                            int(mining.dig_index),
+                        )
+                        nav_dist_m = auto_mining.MiningAutomation._dist_rc(
+                            drive_origin_row_col,
+                            _mine_goal,
+                            occ_map.map_res_m,
+                        )
+                        if nav_state_key != mining_progress_state_key:
+                            mining_progress_state_key = nav_state_key
+                            mining_progress_baseline_dist_m = float(nav_dist_m)
+                            mining_progress_best_dist_m = float(nav_dist_m)
+                            mining_progress_last_improve_at = float(mining_tick_now)
+                        else:
+                            mining_progress_best_dist_m = min(
+                                float(mining_progress_best_dist_m)
+                                if mining_progress_best_dist_m is not None else float(nav_dist_m),
+                                float(nav_dist_m),
+                            )
+                            progress_gain_m = max(
+                                0.01,
+                                float(_mining_cfg.get("no_progress_min_gain_m", 0.18)),
+                            )
+                            timeout_sec = max(
+                                0.0,
+                                float(_mining_cfg.get("no_progress_timeout_sec", 0.0)),
+                            )
+                            if (
+                                mining_progress_baseline_dist_m is None
+                                or mining_progress_best_dist_m
+                                <= float(mining_progress_baseline_dist_m) - progress_gain_m
+                            ):
+                                mining_progress_baseline_dist_m = float(mining_progress_best_dist_m)
+                                mining_progress_last_improve_at = float(mining_tick_now)
+                            elif (
+                                timeout_sec > 0.0
+                                and mining_progress_last_improve_at > 0.0
+                                and (float(mining_tick_now) - float(mining_progress_last_improve_at)) >= timeout_sec
+                            ):
+                                abort_mining_safety(
+                                    (
+                                        f"no progress toward {mining.state.value} target for "
+                                        f"{float(mining_tick_now) - float(mining_progress_last_improve_at):.1f}s "
+                                        f"(remaining {float(nav_dist_m):.2f}m)"
+                                    ),
+                                    now=mining_tick_now,
+                                )
+                    else:
+                        reset_mining_progress_watch()
                     if rover_row_col is not None:
                         display_forward = display_forward_world(
                             R_world_cam,
@@ -9158,6 +9358,16 @@ def main():
                             or (now - last_path_plan_time) >= args.path_replan_sec
                         )
                         if should_replan:
+                            mining_nav_active = mining.state in (
+                                auto_mining.MiningState.PLAN_SWEEP,
+                                auto_mining.MiningState.NAVIGATE_DIG,
+                                auto_mining.MiningState.NAVIGATE_DEPOSIT,
+                            )
+                            mining_preferred_mask = (
+                                mining.preferred_navigation_mask(occ_map)
+                                if mining_nav_active
+                                else None
+                            )
                             base_obs = occ_map.obstacle_mask(
                                 min_occ_count=args.path_avoid_occ_min,
                                 min_occ_ratio=args.path_avoid_occ_ratio,
@@ -9190,6 +9400,40 @@ def main():
                                         path_cost[near] = np.maximum(path_cost[near], cost)
 
                                 path_cost += np.minimum(3.0, occ_map.occ_counts).astype(np.float32) * 0.05
+
+                                if mining_nav_active:
+                                    if mining_preferred_mask is not None and np.any(mining_preferred_mask):
+                                        preferred_mask = mining_preferred_mask.copy()
+                                        inflate_cells = int(
+                                            math.ceil(
+                                                max(
+                                                    0.0,
+                                                    float(_mining_cfg.get("nav_zone_inflate_m", 0.45)),
+                                                ) / occ_map.map_res_m
+                                            )
+                                        )
+                                        if inflate_cells > 0:
+                                            preferred_mask = map_utils.inflate_mask(preferred_mask, inflate_cells)
+                                        outside_mask = np.logical_not(preferred_mask)
+                                        if np.any(outside_mask):
+                                            path_cost[outside_mask] += float(
+                                                _mining_cfg.get("nav_outside_corridor_bias", 1.10)
+                                            )
+                                    known_mask = occ_map.known_mask(
+                                        min_evidence=max(1.0, float(args.unknown_min_evidence))
+                                    )
+                                    not_known = np.logical_not(known_mask)
+                                    if np.any(not_known):
+                                        path_cost[not_known] += 0.45
+                                    confirmed_open = occ_map.free_counts >= max(
+                                        3.0,
+                                        float(occ_map.free_confirm_hits) * 0.5,
+                                    )
+                                    rough_open = known_mask & np.logical_not(confirmed_open)
+                                    if np.any(rough_open):
+                                        path_cost[rough_open] += float(
+                                            _mining_cfg.get("nav_open_area_bias", 0.30)
+                                        )
 
                                 clear_cells = int(np.ceil(max(0.0, args.start_clear_radius_m) / occ_map.map_res_m))
                                 if clear_cells > 0:
@@ -10265,13 +10509,9 @@ def main():
                     else:
                         # Mining keys: r=run, t=abort. Zone boxes are button-only.
                         if key == ord("r"):
-                            clear_navigation_goal()
-                            emergency_stop = False
-                            manual_mode = False
-                            manual_fwd = 0.0
-                            manual_turn = 0.0
-                            mining.handle_key(key)
+                            start_full_auto_run("keyboard")
                         elif key == ord("t"):
+                            pending_auto_run_source = None
                             mining.handle_key(key)
                             clear_navigation_goal()
                             manual_mode = False

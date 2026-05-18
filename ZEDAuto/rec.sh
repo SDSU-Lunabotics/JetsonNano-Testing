@@ -84,7 +84,11 @@ PY
   fi
 fi
 
-cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py" --camera-only --manual-start)
+cmd=(python3 "${SCRIPT_DIR}/zed_ground_wall.py" --manual-start)
+
+if [[ "${REC_CAMERA_ONLY:-0}" == "1" ]]; then
+  cmd+=(--camera-only)
+fi
 
 if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive)
