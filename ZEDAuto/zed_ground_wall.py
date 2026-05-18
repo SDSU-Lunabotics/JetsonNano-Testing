@@ -1174,12 +1174,16 @@ def main():
         span_u = max(0.0, local_u_max - local_u_min)
         span_v = max(0.0, local_v_max - local_v_min)
 
-        excav_axis = str(_mining_cfg.get("start_frame_excav_axis", "v") or "v").strip().lower()
+        excav_axis = str(_mining_cfg.get("start_frame_excav_axis", "u") or "u").strip().lower()
         excav_side = str(_mining_cfg.get("start_frame_excav_side", "start") or "start").strip().lower()
         excav_fraction = max(
             0.20,
-            min(0.80, float(_mining_cfg.get("start_frame_excav_fraction", 0.50))),
+            min(0.80, float(_mining_cfg.get("start_frame_excav_fraction", 0.36))),
         )
+        excav_length_m = max(0.0, float(_mining_cfg.get("start_frame_excav_length_m", 2.50)))
+        excav_include_start = str(
+            _mining_cfg.get("start_frame_excav_include_start", "1")
+        ).strip().lower() not in ("0", "false", "no", "off", "")
         if excav_axis not in ("u", "v", "auto"):
             excav_axis = "v"
         if excav_axis == "auto":
@@ -1188,16 +1192,24 @@ def main():
             excav_side = "start"
 
         if excav_axis == "u":
-            avail_min = max(local_u_min, start_w)
+            avail_min = local_u_min if excav_include_start else max(local_u_min, start_w)
             avail_max = local_u_max
             if (avail_max - avail_min) < 0.10:
                 avail_min = local_u_min
-            split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
-            split_value = min(max(split_value, avail_min), avail_max)
             if excav_side == "start":
-                u0, u1 = avail_min, split_value
+                u0 = avail_min
+                if excav_length_m > 0.0:
+                    u1 = min(avail_max, u0 + excav_length_m)
+                else:
+                    split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+                    u1 = min(max(split_value, avail_min), avail_max)
             else:
-                u0, u1 = split_value, avail_max
+                u1 = avail_max
+                if excav_length_m > 0.0:
+                    u0 = max(avail_min, u1 - excav_length_m)
+                else:
+                    split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+                    u0 = min(max(split_value, avail_min), avail_max)
             excav_local = np.array(
                 [
                     [u0, local_v_min],
@@ -1208,16 +1220,24 @@ def main():
                 dtype=np.float32,
             )
         else:
-            avail_min = max(local_v_min, start_d)
+            avail_min = local_v_min if excav_include_start else max(local_v_min, start_d)
             avail_max = local_v_max
             if (avail_max - avail_min) < 0.10:
                 avail_min = local_v_min
-            split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
-            split_value = min(max(split_value, avail_min), avail_max)
             if excav_side == "start":
-                v0, v1 = avail_min, split_value
+                v0 = avail_min
+                if excav_length_m > 0.0:
+                    v1 = min(avail_max, v0 + excav_length_m)
+                else:
+                    split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+                    v1 = min(max(split_value, avail_min), avail_max)
             else:
-                v0, v1 = split_value, avail_max
+                v1 = avail_max
+                if excav_length_m > 0.0:
+                    v0 = max(avail_min, v1 - excav_length_m)
+                else:
+                    split_value = avail_min + max(0.0, (avail_max - avail_min) * excav_fraction)
+                    v0 = min(max(split_value, avail_min), avail_max)
             excav_local = np.array(
                 [
                     [local_u_min, v0],
@@ -1229,6 +1249,22 @@ def main():
             )
 
         excav_world = transform_local_poly(excav_local)
+        berm_center_u = float(_mining_cfg.get("start_frame_berm_center_u_m", 5.38))
+        berm_center_v = float(_mining_cfg.get("start_frame_berm_center_v_m", 0.60))
+        berm_width = max(0.10, float(_mining_cfg.get("berm_width_m", 1.70)))
+        berm_depth = max(0.10, float(_mining_cfg.get("berm_depth_m", 0.80)))
+        berm_half_w = 0.5 * berm_width
+        berm_half_d = 0.5 * berm_depth
+        deposit_local = np.array(
+            [
+                [berm_center_u - berm_half_w, berm_center_v - berm_half_d],
+                [berm_center_u + berm_half_w, berm_center_v - berm_half_d],
+                [berm_center_u + berm_half_w, berm_center_v + berm_half_d],
+                [berm_center_u - berm_half_w, berm_center_v + berm_half_d],
+            ],
+            dtype=np.float32,
+        )
+        deposit_world = transform_local_poly(deposit_local)
 
         def world_poly_to_rc(poly_world):
             out = []
@@ -1240,8 +1276,9 @@ def main():
             return out
 
         start_rc = world_poly_to_rc(start_world)
+        deposit_rc = world_poly_to_rc(deposit_world)
         excav_rc = world_poly_to_rc(excav_world)
-        if start_rc is None or (apply_start_to_excav and excav_rc is None):
+        if start_rc is None or deposit_rc is None or (apply_start_to_excav and excav_rc is None):
             start_frame_last_error_m = None
             start_frame_last_status = "Start frame: transformed zones fell outside current map bounds."
             print(start_frame_last_status)
@@ -1249,7 +1286,7 @@ def main():
 
         mining.starting_corners_rc = list(start_rc)
         mining.starting_zone_preset_side = None
-        mining.deposit_corners_rc = list(start_rc)
+        mining.deposit_corners_rc = list(deposit_rc)
         mining.deposit_zone_preset_side = None
         if apply_start_to_excav:
             mining.excav_corners_rc = list(excav_rc)
@@ -1258,9 +1295,14 @@ def main():
         mining.save_zones(occ_map)
 
         start_frame_last_error_m = float(fit_err)
+        excav_desc = (
+            f"{excav_axis}-{excav_side}-{float(excav_length_m):.2f}m"
+            if excav_length_m > 0.0
+            else f"{excav_axis}-{excav_side}-{excav_fraction:.2f}"
+        )
         start_frame_last_status = (
             f"{status_prefix} from tags {start_frame_last_ids} "
-            f"(fit {float(fit_err):.03f} m, deposit=start, excav={excav_axis}-{excav_side}-{excav_fraction:.2f})."
+            f"(fit {float(fit_err):.03f} m, deposit=berm, excav={excav_desc})."
         )
         print(start_frame_last_status)
         return True
@@ -1590,20 +1632,24 @@ def main():
         "strip_pitch_m":         float(os.getenv("MINING_STRIP_PITCH",            "0.0")),
         "goal_tol_m":            float(os.getenv("MINING_GOAL_TOL_M",             "0.55")),
         "rover_size_m":          float(args.rover_size_m),
-        "berm_left_center_x_m":  float(os.getenv("MINING_BERM_LEFT_CENTER_X_M",   "-6.80")),
-        "berm_right_center_x_m": float(os.getenv("MINING_BERM_RIGHT_CENTER_X_M",  "6.80")),
-        "berm_center_z_m":       float(os.getenv("MINING_BERM_CENTER_Z_M",        "3.57")),
-        "berm_width_m":          float(os.getenv("MINING_BERM_WIDTH_M",           "1.50")),
-        "berm_depth_m":          float(os.getenv("MINING_BERM_DEPTH_M",           "0.90")),
+        "berm_left_center_x_m":  float(os.getenv("MINING_BERM_LEFT_CENTER_X_M",   "-5.38")),
+        "berm_right_center_x_m": float(os.getenv("MINING_BERM_RIGHT_CENTER_X_M",  "5.38")),
+        "berm_center_z_m":       float(os.getenv("MINING_BERM_CENTER_Z_M",        "0.60")),
+        "berm_width_m":          float(os.getenv("MINING_BERM_WIDTH_M",           "1.70")),
+        "berm_depth_m":          float(os.getenv("MINING_BERM_DEPTH_M",           "0.80")),
         "starting_zone_side":    os.getenv("MINING_STARTING_ZONE_SIDE",          "right"),
         "starting_zone_origin_x_m": float(os.getenv("MINING_STARTING_ZONE_ORIGIN_X_M", "0.0")),
         "starting_zone_origin_z_m": float(os.getenv("MINING_STARTING_ZONE_ORIGIN_Z_M", "0.0")),
-        "starting_zone_width_m": float(os.getenv("MINING_STARTING_ZONE_WIDTH_M", "1.50")),
-        "starting_zone_depth_m": float(os.getenv("MINING_STARTING_ZONE_DEPTH_M", "1.50")),
+        "starting_zone_width_m": float(os.getenv("MINING_STARTING_ZONE_WIDTH_M", "2.00")),
+        "starting_zone_depth_m": float(os.getenv("MINING_STARTING_ZONE_DEPTH_M", "2.00")),
         "starting_zone_apply_to_excav": os.getenv("MINING_STARTING_ZONE_APPLY_TO_EXCAV", "1"),
-        "start_frame_excav_axis": os.getenv("MINING_START_FRAME_EXCAV_AXIS", "v"),
+        "start_frame_excav_axis": os.getenv("MINING_START_FRAME_EXCAV_AXIS", "u"),
         "start_frame_excav_side": os.getenv("MINING_START_FRAME_EXCAV_SIDE", "start"),
-        "start_frame_excav_fraction": float(os.getenv("MINING_START_FRAME_EXCAV_FRACTION", "0.50")),
+        "start_frame_excav_fraction": float(os.getenv("MINING_START_FRAME_EXCAV_FRACTION", "0.36")),
+        "start_frame_excav_length_m": float(os.getenv("MINING_START_FRAME_EXCAV_LENGTH_M", "2.50")),
+        "start_frame_excav_include_start": os.getenv("MINING_START_FRAME_EXCAV_INCLUDE_START", "1"),
+        "start_frame_berm_center_u_m": float(os.getenv("MINING_START_FRAME_BERM_CENTER_U_M", "5.38")),
+        "start_frame_berm_center_v_m": float(os.getenv("MINING_START_FRAME_BERM_CENTER_V_M", "0.60")),
         "nav_corridor_width_m": float(os.getenv("MINING_NAV_CORRIDOR_WIDTH_M", "1.20")),
         "nav_zone_inflate_m": float(os.getenv("MINING_NAV_ZONE_INFLATE_M", "0.45")),
         "nav_outside_corridor_bias": float(os.getenv("MINING_NAV_OUTSIDE_CORRIDOR_BIAS", "1.10")),
