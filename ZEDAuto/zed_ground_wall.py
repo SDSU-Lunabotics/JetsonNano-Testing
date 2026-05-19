@@ -1657,6 +1657,7 @@ def main():
         "no_progress_timeout_sec": float(os.getenv("MINING_NO_PROGRESS_TIMEOUT_SEC", "8.0")),
         "no_progress_min_gain_m": float(os.getenv("MINING_NO_PROGRESS_MIN_GAIN_M", "0.18")),
         "tracking_loss_abort_sec": float(os.getenv("MINING_TRACKING_LOSS_ABORT_SEC", "1.5")),
+        "autonomy_excavation_test_mode": os.getenv("MINING_AUTONOMY_EXCAVATION_TEST_MODE", "1"),
         "zones_path":            os.getenv("MINING_ZONES_PATH",
                                            os.path.join(SCRIPT_DIR, "mining_zones.json")),
     }
@@ -6132,6 +6133,12 @@ def main():
             if pattern_state is not None and pattern_state.get("done"):
                 pattern_state = None
             auto_excavation_pattern = None
+            mining_run_now = mining_run_active()
+            mining_excavation_test_mode = (
+                mining_run_now
+                and str(_mining_cfg.get("autonomy_excavation_test_mode", "1")).strip().lower()
+                not in ("0", "false", "no", "off", "")
+            )
             if enabled and mining.state == auto_mining.MiningState.DIGGING:
                 auto_excavation_pattern = mining.excavation_pattern_command(now)
                 if auto_excavation_pattern is not None and bool(auto_excavation_pattern.get("done")):
@@ -6207,6 +6214,13 @@ def main():
                     auto_mining.MiningState.NAVIGATE_DEPOSIT,
                 ):
                     door_close_enabled = True
+            if mining_excavation_test_mode:
+                excavator_lower_requested = False
+                excavator_stow_requested = False
+                excavator_manual_extend_requested = False
+                excavator_manual_retract_requested = False
+                left_extend_enabled = False
+                right_extend_enabled = False
             sd.putBoolean("Drive/UseMainRoverControls", bool(args.main_rover_mode))
             sd.putBoolean("Drive/MainRoverDebugMode", bool(args.main_rover_debug))
             sd.putBoolean("Drive/MainRoverEmergencyStop", False)
