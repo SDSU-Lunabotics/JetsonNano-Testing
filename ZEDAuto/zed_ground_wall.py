@@ -1266,18 +1266,30 @@ def main():
         )
         deposit_world = transform_local_poly(deposit_local)
 
-        def world_poly_to_rc(poly_world):
+        def world_poly_to_rc(poly_world, clamp_to_map=False):
             out = []
+            clamped = False
             for map_x, map_z in np.asarray(poly_world, dtype=np.float32):
                 rc = occ_map.world_to_grid(float(map_x), float(map_z))
+                if rc is None and clamp_to_map:
+                    clamp_x = max(
+                        float(occ_map.x_min) + float(occ_map.map_res_m),
+                        min(float(occ_map.x_max) - float(occ_map.map_res_m), float(map_x)),
+                    )
+                    clamp_z = max(
+                        float(occ_map.z_min) + float(occ_map.map_res_m),
+                        min(float(occ_map.z_max) - float(occ_map.map_res_m), float(map_z)),
+                    )
+                    rc = occ_map.world_to_grid(float(clamp_x), float(clamp_z))
+                    clamped = True
                 if rc is None:
-                    return None
+                    return None, clamped
                 out.append(rc)
-            return out
+            return out, clamped
 
-        start_rc = world_poly_to_rc(start_world)
-        deposit_rc = world_poly_to_rc(deposit_world)
-        excav_rc = world_poly_to_rc(excav_world)
+        start_rc, start_clamped = world_poly_to_rc(start_world, clamp_to_map=True)
+        deposit_rc, deposit_clamped = world_poly_to_rc(deposit_world, clamp_to_map=True)
+        excav_rc, excav_clamped = world_poly_to_rc(excav_world, clamp_to_map=True)
         if start_rc is None or deposit_rc is None or (apply_start_to_excav and excav_rc is None):
             start_frame_last_error_m = None
             start_frame_last_status = "Start frame: transformed zones fell outside current map bounds."
@@ -1300,9 +1312,19 @@ def main():
             if excav_length_m > 0.0
             else f"{excav_axis}-{excav_side}-{excav_fraction:.2f}"
         )
+        clamp_note = ""
+        if start_clamped or deposit_clamped or (apply_start_to_excav and excav_clamped):
+            clamped_parts = []
+            if start_clamped:
+                clamped_parts.append("start")
+            if deposit_clamped:
+                clamped_parts.append("deposit")
+            if apply_start_to_excav and excav_clamped:
+                clamped_parts.append("excav")
+            clamp_note = f", clamped={'/'.join(clamped_parts)}"
         start_frame_last_status = (
             f"{status_prefix} from tags {start_frame_last_ids} "
-            f"(fit {float(fit_err):.03f} m, deposit=berm, excav={excav_desc})."
+            f"(fit {float(fit_err):.03f} m, deposit=berm, excav={excav_desc}{clamp_note})."
         )
         print(start_frame_last_status)
         return True
@@ -3733,13 +3755,23 @@ def main():
             print("Controller macro name must include at least one letter or number.")
             publish_map_ui_state(force=True)
             return
+        cleared_modes = []
         if controller_macro_preview_active:
-            print("Stop controller macro preview before starting a new recording.")
-            return
+            stop_controller_macro_preview(f"{source} record reset")
+            cleared_modes.append("controller preview")
         if controller_cycle_preview_active:
-            print("Stop controller cycle playback before starting a new recording.")
-            return
-        if dig_profiles.recording or dig_profile_preview_active:
+            stop_controller_cycle_preview(f"{source} record reset")
+            cleared_modes.append("AutoRecord")
+        if dig_profile_preview_active:
+            stop_dig_profile_preview(f"{source} record reset")
+            cleared_modes.append("dig preview")
+        if cleared_modes:
+            print(
+                "Record start cleared stale modes: "
+                + ", ".join(cleared_modes)
+                + "."
+            )
+        if dig_profiles.recording:
             print("Stop dig recording/playback before starting a controller macro recording.")
             return
         if controller_macros.recording:
@@ -5398,6 +5430,21 @@ def main():
                 else:
                     start_full_auto_run("button")
                 return
+        rect = status_button_rects.get("auto_run_panel")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if mining_running:
+                    pending_auto_run_source = None
+                    mining.abort()
+                    clear_navigation_goal()
+                    manual_mode = False
+                    manual_fwd = 0.0
+                    manual_turn = 0.0
+                    print("Auto Run: ABORTED via auto panel")
+                else:
+                    start_full_auto_run("auto panel")
+                return
         rect = status_button_rects.get("direct_nav")
         if rect is not None:
             x0, y0, x1, y1 = rect
@@ -5543,11 +5590,23 @@ def main():
             if x0 <= x <= x1 and y0 <= y <= y1:
                 request_start_frame_lock("button")
                 return
+        rect = status_button_rects.get("auto_lock_start_frame")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                request_start_frame_lock("auto panel")
+                return
         rect = status_button_rects.get("scan_start_frame")
         if rect is not None:
             x0, y0, x1, y1 = rect
             if x0 <= x <= x1 and y0 <= y <= y1:
                 request_start_frame_scan("button")
+                return
+        rect = status_button_rects.get("auto_scan_start_frame")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                request_start_frame_scan("auto panel")
                 return
         rect = status_button_rects.get("test_drive_forward")
         if rect is not None:
@@ -6747,6 +6806,7 @@ def main():
         jump_buttons = [
             ("jump_setup", "Setup"),
             ("jump_map_tools", "Map"),
+            ("jump_auto", "Auto"),
             ("jump_zones_camera", "Zones"),
             ("jump_calibration", "Calibration"),
             ("jump_actuators", "Actuators"),
@@ -7020,6 +7080,158 @@ def main():
                 cv2.LINE_AA,
             )
         cursor_y += map_section_h + card_gap
+
+        auto_requires_start_frame = bool(
+            tracking_enabled
+            and start_frame_tag_dictionary is not None
+            and len(start_frame_tag_layout) >= 3
+            and (not args.camera_only)
+        )
+        auto_tracking_ready = (not tracking_enabled) or tracking_pose_ok
+        auto_tags_ready = (not auto_requires_start_frame) or bool(start_frame_locked_once)
+        auto_zones_ready = bool(excav_set and deposit_set)
+        auto_ready = bool(auto_tracking_ready and auto_tags_ready and auto_zones_ready)
+        auto_section_h = 72 + 2 * (button_h + 10) + 178
+        auto_body_y = section_frame(
+            cursor_y,
+            auto_section_h,
+            "Auto",
+            "Full autonomy, AprilTag confirmation, and auto-run readiness.",
+            (120, 210, 150),
+            "auto",
+        )
+        auto_mode_rect = grid_rect(auto_body_y, 0, 0)
+        auto_run_panel_rect = grid_rect(auto_body_y, 0, 1, span=2)
+        auto_lock_start_frame_rect = grid_rect(auto_body_y, 1, 0)
+        auto_scan_start_frame_rect = grid_rect(auto_body_y, 1, 1)
+        auto_test_mode_rect = grid_rect(auto_body_y, 1, 2)
+        auto_mode_label = (
+            "Auto Mode"
+            if _mining_active
+            else ("Manual Mode" if manual_mode else "Auto Ready")
+        )
+        draw_control_button(
+            auto_mode_rect,
+            auto_mode_label,
+            True,
+            True,
+            (
+                (0, 150, 70)
+                if _mining_active
+                else ((0, 110, 185) if manual_mode else (130, 120, 20))
+            ),
+            (
+                (110, 255, 170)
+                if _mining_active
+                else ((150, 225, 255) if manual_mode else (255, 235, 120))
+            ),
+        )
+        draw_control_button(
+            auto_run_panel_rect,
+            (
+                "Auto Run: ON"
+                if _mining_active
+                else ("Auto Run: READY" if auto_ready else "Auto Run: BLOCKED")
+            ),
+            True,
+            bool(_mining_active or auto_ready),
+            ((170, 50, 35) if _mining_active else (0, 140, 40)),
+            ((255, 170, 150) if _mining_active else (60, 240, 100)),
+        )
+        draw_control_button(
+            auto_lock_start_frame_rect,
+            (
+                "Tags Locked"
+                if auto_tags_ready
+                else ("Confirm Tags" if auto_requires_start_frame else "Tags N/A")
+            ),
+            bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
+            bool(auto_tags_ready),
+            (0, 130, 120),
+            (120, 255, 235),
+        )
+        draw_control_button(
+            auto_scan_start_frame_rect,
+            "Auto Scan: ON" if start_frame_scan_active else "Scan Tags",
+            bool(tracking_enabled and start_frame_tag_dictionary is not None and len(start_frame_tag_layout) >= 3),
+            bool(start_frame_scan_active),
+            (80, 90, 180),
+            (160, 190, 255),
+        )
+        auto_excavation_test_mode = str(
+            _mining_cfg.get("autonomy_excavation_test_mode", "1")
+        ).strip().lower() not in ("0", "false", "no", "off", "")
+        draw_control_button(
+            auto_test_mode_rect,
+            "Excav Test: ON" if auto_excavation_test_mode else "Excav Test",
+            False,
+            bool(auto_excavation_test_mode),
+            (120, 70, 150),
+            (220, 170, 255),
+        )
+        auto_summary_y = auto_body_y + 2 * (button_h + 10) + 18
+        auto_tracking_text = (
+            "Tracking: LOCKED"
+            if tracking_pose_ok
+            else "Tracking: SEARCHING"
+        )
+        auto_zones_text = (
+            f"Zones: start={'SET' if starting_set else 'unset'} | "
+            f"excav={'SET' if excav_set else 'unset'} | "
+            f"deposit={'SET' if deposit_set else 'unset'}"
+        )
+        put_control_line(
+            auto_tracking_text,
+            auto_summary_y,
+            (185, 220, 255) if tracking_pose_ok else (255, 210, 120),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            start_frame_last_status[:90],
+            auto_summary_y + 22,
+            (180, 255, 235),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        put_control_line(
+            auto_zones_text,
+            auto_summary_y + 44,
+            (220, 235, 255),
+            0.40,
+            x=card_x0 + card_inner,
+        )
+        auto_warning_lines = []
+        if tracking_enabled and (not tracking_pose_ok):
+            auto_warning_lines.append("Warning: tracking is not locked yet.")
+        if auto_requires_start_frame and (not start_frame_locked_once):
+            auto_warning_lines.append("Warning: confirm AprilTags before Auto Run.")
+        if not excav_set:
+            auto_warning_lines.append("Warning: excavation zone is not set.")
+        if not deposit_set:
+            auto_warning_lines.append("Warning: deposit zone is not set.")
+        if "clamped=" in str(start_frame_last_status or "").lower():
+            auto_warning_lines.append("Warning: start-frame zones were clamped to the current map bounds.")
+        put_control_line(
+            (
+                "Auto Run needs excavation + deposit zones; tag lock can stamp them automatically."
+                if not (excav_set and deposit_set)
+                else "Auto Run is ready to plan from the current zones."
+            ),
+            auto_summary_y + 66,
+            (220, 235, 255),
+            0.38,
+            x=card_x0 + card_inner,
+        )
+        for idx, warning_text in enumerate(auto_warning_lines[:3]):
+            put_control_line(
+                warning_text,
+                auto_summary_y + 88 + idx * 20,
+                (255, 190, 120),
+                0.38,
+                x=card_x0 + card_inner,
+            )
+        cursor_y += auto_section_h + card_gap
 
         zones_section_h = 72 + 4 * (button_h + 10) + 20
         zones_body_y = section_frame(
@@ -7892,6 +8104,7 @@ def main():
 
         status_section_jump_targets["jump_setup"] = int(section_offsets.get("setup", 0))
         status_section_jump_targets["jump_map_tools"] = int(section_offsets.get("map_tools", 0))
+        status_section_jump_targets["jump_auto"] = int(section_offsets.get("auto", 0))
         status_section_jump_targets["jump_zones_camera"] = int(section_offsets.get("zones_camera", 0))
         status_section_jump_targets["jump_calibration"] = int(section_offsets.get("calibration", 0))
         status_section_jump_targets["jump_actuators"] = int(section_offsets.get("actuators", 0))
@@ -7918,6 +8131,9 @@ def main():
             ("no_mapping_mode", no_mapping_rect),
             ("setup_low_latency_mode", setup_low_latency_rect),
             ("auto_run", auto_run_rect),
+            ("auto_run_panel", auto_run_panel_rect),
+            ("auto_lock_start_frame", auto_lock_start_frame_rect),
+            ("auto_scan_start_frame", auto_scan_start_frame_rect),
             ("auto_digger", auto_digger_rect),
             ("test_excavation_left_extend", test_excavation_left_extend_rect),
             ("test_excavation_right_extend", test_excavation_right_extend_rect),
@@ -8074,7 +8290,7 @@ def main():
         put_line(
             (
                 f"Controls scroll: {status_scroll_y}/{status_scroll_max} | "
-                "Wheel, drag panel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-7 sections"
+                "Wheel, drag panel, drag scrollbar, Up/Down, PgUp/PgDn, j/k, 1-8 sections"
             ),
             controls_top - 8,
             (170, 200, 230),
@@ -8568,16 +8784,18 @@ def main():
                             set_status_scroll_to(status_section_jump_targets.get("jump_setup", 0))
                         if key == ord("2"):
                             set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
-                        if key == ord("3"):
-                            set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
-                        if key == ord("4"):
-                            set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
-                        if key == ord("5"):
-                            set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
-                        if key == ord("6"):
-                            set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
-                        if key == ord("7"):
-                            set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
+                    if key == ord("3"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_auto", 0))
+                    if key == ord("4"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
+                    if key == ord("5"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
+                    if key == ord("6"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                    if key == ord("7"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
+                    if key == ord("8"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                         now_key = time.time()
                         if key == ord("w"):
                             manual_fwd = max(0.0, min(1.0, args.drive_speed))
@@ -10608,14 +10826,16 @@ def main():
                     if key == ord("2"):
                         set_status_scroll_to(status_section_jump_targets.get("jump_map_tools", 0))
                     if key == ord("3"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_auto", 0))
                     if key == ord("4"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_zones_camera", 0))
                     if key == ord("5"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_calibration", 0))
                     if key == ord("6"):
-                        set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
+                        set_status_scroll_to(status_section_jump_targets.get("jump_actuators", 0))
                     if key == ord("7"):
+                        set_status_scroll_to(status_section_jump_targets.get("jump_record", 0))
+                    if key == ord("8"):
                         set_status_scroll_to(status_section_jump_targets.get("jump_dig_profiles", 0))
                     if key == ord("o"):
                         map_scale_live = min(12, map_scale_live + 1)
