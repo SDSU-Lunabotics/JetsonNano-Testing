@@ -100,6 +100,10 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-20.0}")
   cmd+=(--drive-stop-turn-deg "${DRIVE_STOP_TURN_DEG:-40.0}")
   cmd+=(--drive-min-turn-forward-scale "${DRIVE_MIN_TURN_FORWARD_SCALE:-0.20}")
+  cmd+=(--drive-min-arc-forward-scale "${DRIVE_MIN_ARC_FORWARD_SCALE:-0.32}")
+  cmd+=(--drive-arc-turn-limit-deg "${DRIVE_ARC_TURN_LIMIT_DEG:-110.0}")
+  cmd+=(--drive-goal-tol-m "${DRIVE_GOAL_TOL_M:-0.45}")
+  cmd+=(--drive-heading-tol-deg "${DRIVE_HEADING_TOL_DEG:-16.0}")
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
   cmd+=(--backup-lane-half-width-m "${BACKUP_LANE_HALF_WIDTH_M:-0.35}")
   cmd+=(--backup-min-obstacle-points "${BACKUP_MIN_OBSTACLE_POINTS:-30}")
@@ -122,7 +126,11 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   if [[ "${DRIVE_DEBUG:-0}" == "1" ]]; then cmd+=(--drive-debug); fi
   if [[ "${NT_HEALTH_DEBUG:-0}" == "1" ]]; then cmd+=(--nt-health-debug); fi
   if [[ "${HARD_DRIVE_FLIP:-1}" == "1" ]]; then cmd+=(--hard-drive-flip); fi
-  if [[ "${DRIVE_HEADING_FLIP:-1}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  if [[ -n "${DRIVE_HEADING_FLIP:-}" ]]; then
+    if [[ "${DRIVE_HEADING_FLIP}" == "1" ]]; then cmd+=(--drive-heading-flip); fi
+  elif [[ "${CAMERA_MOUNT:-front}" != "rear" ]]; then
+    cmd+=(--drive-heading-flip)
+  fi
   if [[ "${DRIVER_PRIORITY_MODE:-1}" == "1" ]]; then
     cmd+=(--driver-priority-mode)
   else

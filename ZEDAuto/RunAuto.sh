@@ -199,6 +199,8 @@ if [[ "${DRIVE:-1}" == "1" ]]; then
   cmd+=(--drive-slow-turn-deg "${DRIVE_SLOW_TURN_DEG:-20.0}")
   cmd+=(--drive-stop-turn-deg "${DRIVE_STOP_TURN_DEG:-40.0}")
   cmd+=(--drive-min-turn-forward-scale "${DRIVE_MIN_TURN_FORWARD_SCALE:-0.20}")
+  cmd+=(--drive-min-arc-forward-scale "${DRIVE_MIN_ARC_FORWARD_SCALE:-0.32}")
+  cmd+=(--drive-arc-turn-limit-deg "${DRIVE_ARC_TURN_LIMIT_DEG:-110.0}")
   cmd+=(--drive-goal-tol-m "${DRIVE_GOAL_TOL_M:-0.45}")
   cmd+=(--drive-heading-tol-deg "${DRIVE_HEADING_TOL_DEG:-16.0}")
   cmd+=(--backup-close-dist-m "${BACKUP_CLOSE_DIST_M:-0.45}")
