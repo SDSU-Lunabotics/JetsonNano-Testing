@@ -369,6 +369,18 @@ def main():
         help="Minimum forward-speed scale to keep while auto-turning toward the path (0-1).",
     )
     parser.add_argument(
+        "--drive-min-arc-forward-scale",
+        type=float,
+        default=0.32,
+        help="Minimum forward-speed scale to keep during auto path arc turns before allowing near-pivot behavior (0-1).",
+    )
+    parser.add_argument(
+        "--drive-arc-turn-limit-deg",
+        type=float,
+        default=110.0,
+        help="Heading error below this limit prefers arc turns instead of zero-point turns during auto navigation (deg).",
+    )
+    parser.add_argument(
         "--drive-turn-slew-per-sec",
         type=float,
         default=2.5,
@@ -4004,6 +4016,31 @@ def main():
         status_target_cell = None
         status_target_world = None
 
+    def auto_heading_forward_scale(err_abs_rad, turn_scale):
+        min_turn_forward_scale = max(
+            0.0, min(1.0, float(args.drive_min_turn_forward_scale))
+        )
+        min_arc_forward_scale = max(
+            min_turn_forward_scale,
+            min(1.0, float(args.drive_min_arc_forward_scale)),
+        )
+        arc_turn_limit_rad = math.radians(max(0.0, float(args.drive_arc_turn_limit_deg)))
+        if arc_turn_limit_rad <= 1e-6:
+            align_scale = max(0.0, math.cos(err_abs_rad))
+        elif err_abs_rad <= arc_turn_limit_rad:
+            # Keep enough forward motion for broad arcs instead of collapsing into
+            # a zero-point turn at ~90 deg of heading error.
+            align_scale = max(min_arc_forward_scale, max(0.0, math.cos(err_abs_rad)))
+        else:
+            # Past the arc-turn window, taper the forward floor down toward zero so
+            # the rover can still recover from a badly wrong heading without forcing
+            # a wide unsafe sweep.
+            over_span = max(1e-6, math.pi - arc_turn_limit_rad)
+            over_frac = min(1.0, max(0.0, (err_abs_rad - arc_turn_limit_rad) / over_span))
+            floor_scale = min_arc_forward_scale * (1.0 - over_frac)
+            align_scale = max(floor_scale, max(0.0, math.cos(err_abs_rad)))
+        return max(0.0, min(1.0, align_scale)) * max(0.0, min(1.0, float(turn_scale)))
+
     def set_navigation_goal_cell(row, col):
         nonlocal goal_cell, path_cells, last_path_cells, last_start, last_goal, last_path_plan_time
         nonlocal path_plan_mode, mining_goal_active, status_target_cell, status_target_world
@@ -4220,10 +4257,8 @@ def main():
             turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
             turn_scale = max(min_turn_forward_scale, turn_scale)
 
-        align_scale = max(0.0, math.cos(err))
-        fwd_mag = max(0.0, min(1.0, float(args.drive_speed))) * align_scale * max(
-            0.0, min(1.0, turn_scale)
-        )
+        forward_scale = auto_heading_forward_scale(err_abs, turn_scale)
+        fwd_mag = max(0.0, min(1.0, float(args.drive_speed))) * forward_scale
         fwd_target = -fwd_mag if reverse_path_drive else fwd_mag
         fwd_target, turn_target = mix_ds_drive(fwd_target, turn_target)
         fwd, turn = apply_auto_drive_shape(fwd_target, turn_target, time.time())
@@ -10393,8 +10428,8 @@ def main():
                                     turn_scale = (stop_turn_rad - err_abs) / max(1e-6, (stop_turn_rad - slow_turn_rad))
                                     turn_scale = max(min_turn_forward_scale, turn_scale)
 
-                                align_scale = max(0.0, math.cos(err))
-                                fwd_mag = max(0.0, min(1.0, args.drive_speed)) * align_scale * max(0.0, min(1.0, turn_scale))
+                                forward_scale = auto_heading_forward_scale(err_abs, turn_scale)
+                                fwd_mag = max(0.0, min(1.0, args.drive_speed)) * forward_scale
                                 fwd_target = -fwd_mag if reverse_path_drive else fwd_mag
 
                                 # Driver Station joystick can nudge auto commands.
