@@ -276,6 +276,7 @@ if [[ "${NO_GUI:-0}" == "1" ]]; then cmd+=(--no-gui); fi
 if [[ "${OVERLAY_RED_ONLY:-0}" == "1" ]]; then cmd+=(--overlay-red-only); fi
 if [[ "${MANUAL_START:-0}" == "1" ]]; then cmd+=(--manual-start); fi
 if [[ "${NO_MAPPING_START:-0}" == "1" ]]; then cmd+=(--no-mapping-start); fi
+if [[ "${SKIP_DEPTH_PROCESSING:-0}" == "1" ]]; then cmd+=(--skip-depth-processing); fi
 
 # Human detection
 if [[ "${HUMAN_DETECT:-1}" == "1" ]]; then

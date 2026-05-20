@@ -609,6 +609,11 @@ def main():
         help="Run a lightweight camera/controller mode: skip tracking, depth, mapping, and AI detection.",
     )
     parser.add_argument(
+        "--skip-depth-processing",
+        action="store_true",
+        help="Skip point-cloud/depth processing and AI detection while keeping the main control UI active.",
+    )
+    parser.add_argument(
         "--nt-timeout-sec",
         type=float,
         default=3.0,
@@ -698,13 +703,16 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.camera_only:
+    if args.camera_only or args.skip_depth_processing:
         args.tracking = False
         args.area_memory = False
         args.human_detect = False
         args.rock_model = ""
         args.landmark_memory = False
         args.manual_start = True
+        args.no_mapping_start = True
+
+    lightweight_record_mode = bool(args.camera_only or args.skip_depth_processing)
 
     if args.rviz_config is None:
         args.rviz_config = os.path.join(os.path.dirname(__file__), "zed_pointcloud.rviz")
@@ -808,7 +816,7 @@ def main():
             resizable_flags = cv2.WINDOW_NORMAL | gui_normal
             fixed_flags = cv2.WINDOW_AUTOSIZE | gui_normal
             cv2.namedWindow("ZED Ground/Obstacle Segmentation", resizable_flags)
-            if not args.camera_only:
+            if not lightweight_record_mode:
                 cv2.namedWindow("ZED Occupancy Map (XZ)", fixed_flags)
             cv2.namedWindow("ZED Drive Status", fixed_flags)
             cv2.resizeWindow("ZED Ground/Obstacle Segmentation", 1280, 720)
@@ -1800,7 +1808,7 @@ def main():
     manual_fwd = 0.0
     manual_turn = 0.0
     manual_mode = True
-    no_mapping_mode = bool(args.no_mapping_start or args.camera_only)
+    no_mapping_mode = bool(args.no_mapping_start or lightweight_record_mode)
     pending_auto_run_source = None
     mining_progress_state_key = None
     mining_progress_baseline_dist_m = None
@@ -1810,7 +1818,7 @@ def main():
     if manual_mode:
         print("Manual drive mode: ON (startup)")
     if no_mapping_mode:
-        startup_reason = "startup, camera-only path" if args.camera_only else "startup"
+        startup_reason = "startup, lightweight path" if lightweight_record_mode else "startup"
         print(f"No Mapping mode: ON ({startup_reason})")
         if HAS_CV2 and (not args.no_gui):
             try:
@@ -1979,7 +1987,7 @@ def main():
         print(f"Controller replay drive scale set to {controller_macro_drive_scale:.2f} via {source}.")
         publish_map_ui_state(force=True)
 
-    low_latency_mode = bool(args.camera_only)
+    low_latency_mode = bool(lightweight_record_mode)
     low_latency_restore_state = {
         "camera_overlay_enabled": True,
         "human_detect_enabled": False,
@@ -3300,7 +3308,7 @@ def main():
             tracking_enabled
             and start_frame_tag_dictionary is not None
             and len(start_frame_tag_layout) >= 3
-            and (not args.camera_only)
+            and (not lightweight_record_mode)
         )
         if requires_start_frame:
             if start_frame_scan_active:
@@ -3716,8 +3724,8 @@ def main():
         nonlocal controller_cycle_preview_name, controller_cycle_return_target_cell
         nonlocal controller_cycle_return_target_heading_rad, controller_cycle_forward_assist_enabled
         nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
-        if args.camera_only:
-            print("Map AutoRecord is unavailable in rec.sh / camera-only mode.")
+        if lightweight_record_mode:
+            print("Map AutoRecord is unavailable in rec.sh / lightweight mode.")
             return
         if controller_macros.recording:
             print("Stop controller recording before starting Map AutoRecord.")
@@ -3803,7 +3811,7 @@ def main():
         if controller_macros.recording:
             print("Controller macro recording already active. Stop it first.")
             return
-        if (not args.camera_only) and (not no_mapping_mode) and tracking_enabled and (not tracking_pose_ok):
+        if (not lightweight_record_mode) and (not no_mapping_mode) and tracking_enabled and (not tracking_pose_ok):
             print("Tracking is not locked. Wait for the AprilTag/start-frame lock before starting a mapped recording.")
             publish_map_ui_state(force=True)
             return
@@ -4086,7 +4094,7 @@ def main():
         return angle
 
     def controller_macro_recording_metadata():
-        if args.camera_only:
+        if lightweight_record_mode:
             return None
         if tracking_enabled and (not tracking_pose_ok):
             return None
@@ -4148,7 +4156,7 @@ def main():
         return True, ""
 
     def resolve_controller_cycle_map_return_target(macro):
-        if macro is None or args.camera_only:
+        if macro is None or lightweight_record_mode:
             return None
         if tracking_enabled and (not tracking_pose_ok):
             return None
@@ -4330,7 +4338,7 @@ def main():
         nonlocal controller_cycle_forward_assist_state, controller_cycle_forward_assist_reason
         prev_state = str(controller_cycle_forward_assist_state)
         prev_reason = str(controller_cycle_forward_assist_reason)
-        if (not controller_cycle_forward_assist_enabled) or args.camera_only:
+        if (not controller_cycle_forward_assist_enabled) or lightweight_record_mode:
             controller_cycle_forward_assist_state = "OFF"
             controller_cycle_forward_assist_reason = "inactive"
             result = (float(base_fwd), float(base_turn))
@@ -4902,7 +4910,7 @@ def main():
                     "label": "Map AutoRecord",
                     "command": "controller_map_autorecord",
                     "active": bool(controller_cycle_preview_active and controller_cycle_phase == "map_return"),
-                    "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not args.camera_only)),
+                    "enabled": bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not lightweight_record_mode)),
                 },
                 {
                     "id": "set_controller_replay_speed",
@@ -7200,7 +7208,7 @@ def main():
             tracking_enabled
             and start_frame_tag_dictionary is not None
             and len(start_frame_tag_layout) >= 3
-            and (not args.camera_only)
+            and (not lightweight_record_mode)
         )
         auto_tracking_ready = (not tracking_enabled) or tracking_pose_ok
         auto_tags_ready = (not auto_requires_start_frame) or bool(start_frame_locked_once)
@@ -7912,7 +7920,7 @@ def main():
                 if (controller_cycle_preview_active and controller_cycle_phase == "map_return")
                 else "Map AutoRecord"
             ),
-            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not args.camera_only)),
+            bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None) and (not lightweight_record_mode)),
             bool(controller_cycle_preview_active and controller_cycle_phase == "map_return"),
             (60, 90, 120),
             (150, 220, 255),
@@ -7963,8 +7971,8 @@ def main():
         put_control_line(
             (
                 "Map AutoRecord returns to start, then lightly steers along the recorded path"
-                if not args.camera_only
-                else "Map AutoRecord unavailable in rec.sh / camera-only mode"
+                if not lightweight_record_mode
+                else "Map AutoRecord unavailable in rec.sh / lightweight mode"
             ),
             record_summary_y + 86,
             (185, 220, 255),
@@ -8791,7 +8799,7 @@ def main():
             refresh_camera_servo_state()
             refresh_ds_joystick_state()
 
-            if args.camera_only:
+            if lightweight_record_mode:
                 zed.retrieve_image(image_left, sl.VIEW.LEFT)
 
                 if sd is not None:

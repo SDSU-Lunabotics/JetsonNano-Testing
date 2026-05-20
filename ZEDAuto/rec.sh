@@ -12,5 +12,9 @@ fi
 # same main control stack, manual drive, and no mapping window/integration overhead.
 MANUAL_START=1 \
 NO_MAPPING_START=1 \
+SKIP_DEPTH_PROCESSING=1 \
+HUMAN_DETECT=0 \
+LANDMARK_MEMORY=0 \
+ROCK_MODEL="" \
 MAP_PUBLISH_URL="" \
 exec "${SCRIPT_DIR}/RunAuto.sh" "$@"
