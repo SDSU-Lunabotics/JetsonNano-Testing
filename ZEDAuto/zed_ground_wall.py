@@ -599,6 +599,11 @@ def main():
     parser.add_argument("--map-publish-source", default="zed_ground_wall", help="Source label attached to published map frames")
     parser.add_argument("--manual-start", action="store_true", help="Start in keyboard manual drive mode")
     parser.add_argument(
+        "--no-mapping-start",
+        action="store_true",
+        help="Start with No Mapping mode enabled while still using the main control loop.",
+    )
+    parser.add_argument(
         "--camera-only",
         action="store_true",
         help="Run a lightweight camera/controller mode: skip tracking, depth, mapping, and AI detection.",
@@ -1762,8 +1767,11 @@ def main():
     mining_goal_active = False
     map_window_ready = False
     status_window_ready = False
+    camera_window_ready = False
     status_button_rects = {}
     status_section_jump_targets = {}
+    camera_button_rects = {}
+    camera_controls_collapsed = True
     reset_map_confirm = False
     status_scroll_y = 0
     status_scroll_max = 0
@@ -1774,6 +1782,7 @@ def main():
     status_view_drag_anchor_scroll = 0
     last_status_panel_shape = None
     last_map_window_shape = None
+    last_camera_window_shape = None
     disable_holes = bool(args.disable_holes)
     whole_map_enabled = False
     smooth_map_enabled = True
@@ -1791,7 +1800,7 @@ def main():
     manual_fwd = 0.0
     manual_turn = 0.0
     manual_mode = True
-    no_mapping_mode = False
+    no_mapping_mode = bool(args.no_mapping_start or args.camera_only)
     pending_auto_run_source = None
     mining_progress_state_key = None
     mining_progress_baseline_dist_m = None
@@ -1801,7 +1810,8 @@ def main():
     if manual_mode:
         print("Manual drive mode: ON (startup)")
     if no_mapping_mode:
-        print("No Mapping mode: ON (startup, camera-only path)")
+        startup_reason = "startup, camera-only path" if args.camera_only else "startup"
+        print(f"No Mapping mode: ON ({startup_reason})")
         if HAS_CV2 and (not args.no_gui):
             try:
                 cv2.destroyWindow("ZED Occupancy Map (XZ)")
@@ -2524,15 +2534,18 @@ def main():
         )
         print(f"Localize auto-start blocked for {seconds:.1f}s ({source}).")
 
-    def set_manual_drive_mode(enabled, source="key"):
+    def set_manual_drive_mode(enabled, source="key", preserve_drive_state=False):
         nonlocal manual_mode, manual_fwd, manual_turn, emergency_stop
         enabled = bool(enabled)
+        preserve_drive_state = bool(preserve_drive_state)
+        was_manual_mode = bool(manual_mode)
         if localization_scan_active:
             block_localization_autostart(5.0, f"{source} manual override")
             stop_localization_scan(f"{source} manual override")
         manual_mode = enabled
-        manual_fwd = 0.0
-        manual_turn = 0.0
+        if (not preserve_drive_state) or (enabled != was_manual_mode):
+            manual_fwd = 0.0
+            manual_turn = 0.0
         emergency_stop = False
         if manual_mode:
             print("Manual drive mode: ON (localization canceled, auto paused)")
@@ -3756,6 +3769,7 @@ def main():
     def start_controller_recording(source="button"):
         nonlocal dig_name_input_focused, controller_macro_last_tailgate_open
         nonlocal controller_recording_tracking_compromised, controller_recording_tracking_warned
+        nonlocal no_mapping_mode
         name_base = str(dig_name_input_text or "").strip()
         if not name_base:
             dig_name_input_focused = True
@@ -3789,13 +3803,17 @@ def main():
         if controller_macros.recording:
             print("Controller macro recording already active. Stop it first.")
             return
-        if (not args.camera_only) and tracking_enabled and (not tracking_pose_ok):
+        if (not args.camera_only) and (not no_mapping_mode) and tracking_enabled and (not tracking_pose_ok):
             print("Tracking is not locked. Wait for the AprilTag/start-frame lock before starting a mapped recording.")
             publish_map_ui_state(force=True)
             return
         clear_navigation_goal()
         mining.abort()
-        set_manual_drive_mode(True, f"{source} controller macro recording")
+        set_manual_drive_mode(
+            True,
+            f"{source} controller macro recording",
+            preserve_drive_state=True,
+        )
         recording_metadata = controller_macro_recording_metadata()
         if not controller_macros.begin_recording(
             name_base=name_base,
@@ -3880,7 +3898,11 @@ def main():
             return
         clear_navigation_goal()
         mining.abort()
-        set_manual_drive_mode(True, f"{source} dig recording")
+        set_manual_drive_mode(
+            True,
+            f"{source} dig recording",
+            preserve_drive_state=True,
+        )
         print(
             f"Recording {style} {phase} profile. Use manual drive and digger controls, "
             "then stop recording to save it."
@@ -5274,6 +5296,64 @@ def main():
         print(f"New goal set at row={row}, col={col}")
         if tracking_enabled and (not tracking_pose_ok):
             print("Goal queued, but tracking is lost. Rover will wait here until tracking recovers.")
+
+    def on_camera_click(event, x, y, flags, param):
+        nonlocal camera_controls_collapsed
+        if last_camera_window_shape is not None:
+            x, y = window_to_image_coords(
+                "ZED Ground/Obstacle Segmentation",
+                x,
+                y,
+                last_camera_window_shape,
+            )
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        rect = camera_button_rects.get("drawer_toggle")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                camera_controls_collapsed = not camera_controls_collapsed
+                return
+
+        if camera_controls_collapsed:
+            return
+
+        rect = camera_button_rects.get("controller_record")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                start_controller_recording("camera drawer")
+                return
+        rect = camera_button_rects.get("controller_preview")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_macro_preview_active:
+                    stop_controller_macro_preview("camera drawer")
+                else:
+                    start_controller_macro_preview("camera drawer")
+                return
+        rect = camera_button_rects.get("controller_autorecord")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_cycle_preview_active:
+                    stop_controller_cycle_preview("camera drawer")
+                else:
+                    start_controller_cycle_preview("camera drawer")
+                return
+        rect = camera_button_rects.get("controller_stop")
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                if controller_macros.recording:
+                    stop_controller_recording(True, "camera drawer")
+                elif controller_cycle_preview_active:
+                    stop_controller_cycle_preview("camera drawer")
+                else:
+                    stop_controller_macro_preview("camera drawer")
+                return
 
     def on_status_click(event, x, y, flags, param):
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text
@@ -8363,6 +8443,126 @@ def main():
 
         return panel
 
+    def draw_camera_control_button(frame, rect, label, enabled, active, base_color, active_color):
+        x0, y0, x1, y1 = rect
+        if active:
+            fill = active_color
+        elif enabled:
+            fill = base_color
+        else:
+            fill = (58, 58, 58)
+        border = (235, 235, 235) if enabled or active else (120, 120, 120)
+        cv2.rectangle(frame, (x0, y0), (x1, y1), fill, -1)
+        cv2.rectangle(frame, (x0, y0), (x1, y1), border, 1)
+        text_color = (18, 18, 18) if (enabled or active) else (150, 150, 150)
+        cv2.putText(
+            frame,
+            label,
+            (x0 + 10, y0 + 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            text_color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    def render_camera_record_drawer(frame):
+        camera_button_rects.clear()
+        if frame is None:
+            return
+        h, w = frame.shape[:2]
+        tab_w = 26
+        tab_h = 88
+        margin = 12
+        tab_x1 = w - margin
+        tab_x0 = max(0, tab_x1 - tab_w)
+        tab_y0 = max(12, (h // 2) - (tab_h // 2))
+        tab_y1 = min(h - 12, tab_y0 + tab_h)
+        camera_button_rects["drawer_toggle"] = (tab_x0, tab_y0, tab_x1, tab_y1)
+
+        cv2.rectangle(frame, (tab_x0, tab_y0), (tab_x1, tab_y1), (40, 40, 40), -1)
+        cv2.rectangle(frame, (tab_x0, tab_y0), (tab_x1, tab_y1), (210, 210, 210), 1)
+        arrow = ">" if camera_controls_collapsed else "<"
+        cv2.putText(
+            frame,
+            arrow,
+            (tab_x0 + 7, tab_y0 + 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (250, 250, 250),
+            2,
+            cv2.LINE_AA,
+        )
+
+        if camera_controls_collapsed:
+            return
+
+        drawer_w = 196
+        drawer_h = 188
+        drawer_x1 = max(tab_x0 - 6, drawer_w + 12)
+        drawer_x0 = max(0, drawer_x1 - drawer_w)
+        drawer_y0 = max(12, tab_y0 - 42)
+        drawer_y1 = min(h - 12, drawer_y0 + drawer_h)
+        if drawer_y1 - drawer_y0 < drawer_h:
+            drawer_y0 = max(0, drawer_y1 - drawer_h)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (drawer_x0, drawer_y0), (drawer_x1, drawer_y1), (18, 18, 18), -1)
+        cv2.addWeighted(overlay, 0.72, frame, 0.28, 0.0, frame)
+        cv2.rectangle(frame, (drawer_x0, drawer_y0), (drawer_x1, drawer_y1), (210, 210, 210), 1)
+        cv2.putText(
+            frame,
+            "Record Controls",
+            (drawer_x0 + 10, drawer_y0 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+        status_line = (
+            "REC"
+            if controller_macros.recording
+            else ("AUTO" if controller_cycle_preview_active else ("PLAY" if controller_macro_preview_active else "IDLE"))
+        )
+        cv2.putText(
+            frame,
+            status_line,
+            (drawer_x1 - 54, drawer_y0 + 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (180, 220, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        btn_x0 = drawer_x0 + 10
+        btn_x1 = drawer_x1 - 10
+        btn_h = 30
+        btn_gap = 8
+        labels = [
+            ("controller_record", "Record", bool(not controller_macros.recording), bool(controller_macros.recording), (80, 70, 170), (180, 150, 255)),
+            ("controller_preview", "Play Recording", bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)), bool(controller_macro_preview_active), (0, 110, 170), (120, 220, 255)),
+            ("controller_autorecord", "Start AutoRecord", bool((not controller_macros.recording) and (resolve_preview_controller_macro() is not None)), bool(controller_cycle_preview_active), (90, 110, 10), (210, 255, 140)),
+            ("controller_stop", "Stop", bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active), bool(controller_macros.recording or controller_macro_preview_active or controller_cycle_preview_active), (170, 70, 0), (255, 180, 120)),
+        ]
+        y = drawer_y0 + 34
+        for key, label, enabled, active, base_color, active_color in labels:
+            rect = (btn_x0, y, btn_x1, y + btn_h)
+            camera_button_rects[key] = rect
+            draw_camera_control_button(frame, rect, label, enabled, active, base_color, active_color)
+            y += btn_h + btn_gap
+
+        cv2.putText(
+            frame,
+            "Click arrow to hide",
+            (drawer_x0 + 10, drawer_y1 - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+
     publish_map_ui_state(force=True)
 
     while True:
@@ -8782,8 +8982,13 @@ def main():
                             2,
                             cv2.LINE_AA,
                         )
+                        render_camera_record_drawer(vis)
                         if not args.no_gui:
+                            last_camera_window_shape = vis.shape[:2]
                             cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                            if not camera_window_ready:
+                                cv2.setMouseCallback("ZED Ground/Obstacle Segmentation", on_camera_click)
+                                camera_window_ready = True
                     process_external_map_command()
                     publish_map_ui_state()
                     if not args.no_gui:
@@ -10750,11 +10955,16 @@ def main():
                             cv2.LINE_AA,
                         )
 
+                    render_camera_record_drawer(vis)
                     if camera_publisher is not None and not driver_priority_active and not low_latency_mode:
                         camera_publisher.push_frame(vis)
 
                     if not args.no_gui:
+                        last_camera_window_shape = vis.shape[:2]
                         cv2.imshow("ZED Ground/Obstacle Segmentation", vis)
+                        if not camera_window_ready:
+                            cv2.setMouseCallback("ZED Ground/Obstacle Segmentation", on_camera_click)
+                            camera_window_ready = True
                 display_map_vis = None
                 if map_vis is not None:
                     display_map_vis = map_vis.copy()
