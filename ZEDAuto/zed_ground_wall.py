@@ -2047,9 +2047,10 @@ def main():
     landmark_dirty = False
     last_landmark_save = time.time()
     last_landmark_relocalize_log = 0.0
+    default_record_name = "default"
     map_size_input_text = ""      # user-typed map size string e.g. "6x8" (feet)
     map_size_input_focused = False
-    dig_name_input_text = ""
+    dig_name_input_text = default_record_name
     dig_name_input_focused = False
     paint_safe_mode = False       # when True, map clicks paint cells as permanently safe
     erase_safe_mode = False      # when True, map clicks erase painted cells
@@ -2081,9 +2082,8 @@ def main():
         if dig_name_input_focused:
             if key == 13:  # Enter
                 dig_name_input_focused = False
-                dig_name_input_text = dig_name_input_text.strip()
-                if dig_name_input_text:
-                    print(f"Dig profile name set: {dig_name_input_text}")
+                dig_name_input_text = dig_name_input_text.strip() or default_record_name
+                print(f"Dig profile name set: {dig_name_input_text}")
             elif key == 8 or key == 127:  # Backspace/Delete
                 dig_name_input_text = dig_name_input_text[:-1]
             elif key == 27:  # Escape
@@ -3777,13 +3777,9 @@ def main():
     def start_controller_recording(source="button"):
         nonlocal dig_name_input_focused, controller_macro_last_tailgate_open
         nonlocal controller_recording_tracking_compromised, controller_recording_tracking_warned
-        nonlocal no_mapping_mode
-        name_base = str(dig_name_input_text or "").strip()
-        if not name_base:
-            dig_name_input_focused = True
-            print("Enter a profile name in the status panel before recording a controller macro.")
-            publish_map_ui_state(force=True)
-            return
+        nonlocal no_mapping_mode, dig_name_input_text
+        name_base = str(dig_name_input_text or "").strip() or default_record_name
+        dig_name_input_text = name_base
         if not any(ch.isalnum() for ch in name_base):
             dig_name_input_focused = True
             print("Controller macro name must include at least one letter or number.")
@@ -3864,7 +3860,7 @@ def main():
         publish_map_ui_state(force=True)
 
     def start_dig_recording(style, phase, source="button"):
-        nonlocal dig_name_input_focused
+        nonlocal dig_name_input_focused, dig_name_input_text
         style = str(style).strip().lower()
         phase = str(phase).strip().lower()
         if style not in ("short", "long"):
@@ -3873,12 +3869,8 @@ def main():
         if phase not in ("dig", "retract"):
             print(f"Ignoring dig recording request for unknown phase '{phase}'.")
             return
-        name_base = str(dig_name_input_text or "").strip()
-        if not name_base:
-            dig_name_input_focused = True
-            print("Enter a dig profile name in the status panel before recording.")
-            publish_map_ui_state(force=True)
-            return
+        name_base = str(dig_name_input_text or "").strip() or default_record_name
+        dig_name_input_text = name_base
         if not any(ch.isalnum() for ch in name_base):
             dig_name_input_focused = True
             print("Dig profile name must include at least one letter or number.")
@@ -6909,9 +6901,9 @@ def main():
         dig_name_border = (100, 220, 255) if dig_name_input_focused else (120, 120, 120)
         cv2.rectangle(panel, (dig_name_rect[0], dig_name_rect[1]), (dig_name_rect[2], dig_name_rect[3]), (40, 40, 40), -1)
         cv2.rectangle(panel, (dig_name_rect[0], dig_name_rect[1]), (dig_name_rect[2], dig_name_rect[3]), dig_name_border, 1)
-        dig_name_display = dig_name_input_text if dig_name_input_text else "example: trench_v2"
+        dig_name_display = dig_name_input_text if dig_name_input_text else default_record_name
         dig_name_cursor = "|" if dig_name_input_focused else ""
-        dig_name_color = (255, 255, 255) if dig_name_input_text else (180, 180, 180)
+        dig_name_color = (255, 255, 255)
         cv2.putText(
             panel,
             dig_name_display + dig_name_cursor,
@@ -8922,12 +8914,12 @@ def main():
                                         preview_fwd,
                                         preview_turn,
                                     )
-                                send_nt_command(
-                                    True,
-                                    preview_fwd,
-                                    preview_turn,
-                                    1.0 / max(1.0, args.drive_rate_hz),
-                                )
+                                    send_nt_command(
+                                        True,
+                                        preview_fwd,
+                                        preview_turn,
+                                        1.0 / max(1.0, args.drive_rate_hz),
+                                    )
                         elif controller_macro_preview_active:
                             elapsed_preview = now - float(controller_macro_preview_started_at)
                             preview_macro = resolve_preview_controller_macro()
@@ -8947,12 +8939,12 @@ def main():
                                         preview_fwd,
                                         preview_turn,
                                     )
-                                send_nt_command(
-                                    True,
-                                    preview_fwd,
-                                    preview_turn,
-                                    1.0 / max(1.0, args.drive_rate_hz),
-                                )
+                                    send_nt_command(
+                                        True,
+                                        preview_fwd,
+                                        preview_turn,
+                                        1.0 / max(1.0, args.drive_rate_hz),
+                                    )
                         elif manual_mode:
                             reset_auto_drive_shape(now)
                             _man_fwd, _man_turn = mix_ds_drive(manual_fwd, manual_turn)
