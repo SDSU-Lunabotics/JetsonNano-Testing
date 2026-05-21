@@ -5299,6 +5299,7 @@ def main():
 
     def on_camera_click(event, x, y, flags, param):
         nonlocal camera_controls_collapsed
+        raw_x, raw_y = int(x), int(y)
         if last_camera_window_shape is not None:
             x, y = window_to_image_coords(
                 "ZED Ground/Obstacle Segmentation",
@@ -5306,54 +5307,55 @@ def main():
                 y,
                 last_camera_window_shape,
             )
+        click_points = ((int(x), int(y)), (raw_x, raw_y))
+
+        def _rect_hit(rect):
+            if rect is None:
+                return False
+            x0, y0, x1, y1 = rect
+            for px, py in click_points:
+                if x0 <= px <= x1 and y0 <= py <= y1:
+                    return True
+            return False
+
         if event != cv2.EVENT_LBUTTONDOWN:
             return
 
         rect = camera_button_rects.get("drawer_toggle")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                camera_controls_collapsed = not camera_controls_collapsed
-                return
+        if _rect_hit(rect):
+            camera_controls_collapsed = not camera_controls_collapsed
+            return
 
         if camera_controls_collapsed:
             return
 
         rect = camera_button_rects.get("controller_record")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                start_controller_recording("camera drawer")
-                return
+        if _rect_hit(rect):
+            start_controller_recording("camera drawer")
+            return
         rect = camera_button_rects.get("controller_preview")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                if controller_macro_preview_active:
-                    stop_controller_macro_preview("camera drawer")
-                else:
-                    start_controller_macro_preview("camera drawer")
-                return
+        if _rect_hit(rect):
+            if controller_macro_preview_active:
+                stop_controller_macro_preview("camera drawer")
+            else:
+                start_controller_macro_preview("camera drawer")
+            return
         rect = camera_button_rects.get("controller_autorecord")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                if controller_cycle_preview_active:
-                    stop_controller_cycle_preview("camera drawer")
-                else:
-                    start_controller_cycle_preview("camera drawer")
-                return
+        if _rect_hit(rect):
+            if controller_cycle_preview_active:
+                stop_controller_cycle_preview("camera drawer")
+            else:
+                start_controller_cycle_preview("camera drawer")
+            return
         rect = camera_button_rects.get("controller_stop")
-        if rect is not None:
-            x0, y0, x1, y1 = rect
-            if x0 <= x <= x1 and y0 <= y <= y1:
-                if controller_macros.recording:
-                    stop_controller_recording(True, "camera drawer")
-                elif controller_cycle_preview_active:
-                    stop_controller_cycle_preview("camera drawer")
-                else:
-                    stop_controller_macro_preview("camera drawer")
-                return
+        if _rect_hit(rect):
+            if controller_macros.recording:
+                stop_controller_recording(True, "camera drawer")
+            elif controller_cycle_preview_active:
+                stop_controller_cycle_preview("camera drawer")
+            else:
+                stop_controller_macro_preview("camera drawer")
+            return
 
     def on_status_click(event, x, y, flags, param):
         nonlocal disable_holes, whole_map_enabled, smooth_map_enabled, map_scale_live, map_size_input_focused, map_size_input_text

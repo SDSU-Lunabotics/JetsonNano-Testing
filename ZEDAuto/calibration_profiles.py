@@ -798,6 +798,7 @@ class ControllerMacroLibrary:
         samples = list(self.recording_samples)
         name_base = self.recording_name_base
         metadata = copy.deepcopy(self.recording_metadata) if isinstance(self.recording_metadata, dict) else None
+        elapsed_total = max(0.0, float(time.time()) - float(self.recording_started_at))
         self.recording = False
         self.recording_name_base = None
         self.recording_metadata = None
@@ -805,6 +806,10 @@ class ControllerMacroLibrary:
         self.recording_samples = []
         self.last_recorded_signature = None
         self.last_recorded_t = -1.0
+        if save and len(samples) == 1:
+            final_sample = copy.deepcopy(samples[0])
+            final_sample["t"] = round(max(float(samples[0].get("t", 0.0)), elapsed_total), 3)
+            samples.append(final_sample)
         if (not save) or len(samples) < 2:
             return None
         created_ms = int(time.time() * 1000)
