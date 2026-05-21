@@ -1890,7 +1890,10 @@ def main():
     controller_cycle_forward_assist_reason = "inactive"
     controller_cycle_forward_assist_reduce_error_m = 0.20
     controller_cycle_forward_assist_disable_error_m = 0.85
-    controller_macro_drive_scale = 1.0
+    # Playback runs slightly hot relative to recorded manual input on the rover,
+    # so trim the default replay scale a bit and leave the UI slider available
+    # for field calibration.
+    controller_macro_drive_scale = 0.90
     controller_macro_last_tailgate_open = None
     controller_recording_tracking_compromised = False
     controller_recording_tracking_warned = False
